@@ -293,9 +293,18 @@ def frontmatter(path: Path) -> str:
     return match.group(1)
 
 
-class AgentCoreOpenCodePolicyTest(unittest.TestCase):
+class OpenCodePolicyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.config = json.loads((CORE / "opencode.json").read_text(encoding="utf-8"))
+
+    def merged_permission_for(self, agent: str, command: str) -> str | None:
+        rules = list(self.config["permission"]["bash"].items())
+        rules.extend(permission_for(agent)["bash"].items())
+        action = None
+        for pattern, candidate in rules:
+            if fnmatchcase(command, pattern):
+                action = candidate
+        return action
 
     def test_depth_and_default_agent(self) -> None:
         self.assertEqual(self.config["default_agent"], "build")
@@ -438,6 +447,38 @@ class AgentCoreOpenCodePolicyTest(unittest.TestCase):
 
         self.assertEqual(self.config["permission"]["external_directory"]["*"], "deny")
         self.assertNotIn("external_directory", permission_for("task-orchestrator"))
+
+    def test_agent_core_effective_permissions_deny_destructive_operations(self) -> None:
+        destructive_commands = (
+            "rm -rf .build/default",
+            "rm -rf .git",
+            "rm -rf .build/../.git",
+            "rm -rf .",
+            "git reset --hard HEAD",
+            "git clean -fd",
+            "git push --force origin main",
+            "git push origin --delete feature",
+            "gh pr merge 123 --delete-branch",
+            "sudo rm -rf /tmp/agent-core",
+            "nix store delete /nix/store/example",
+        )
+        agents = ("task-orchestrator", *AGENT_CORE_PERMISSION_LEAVES)
+
+        for agent in agents:
+            with self.subTest(agent=agent):
+                expected_local_delete = "ask" if agent == "task-orchestrator" else "deny"
+                self.assertEqual(
+                    self.merged_permission_for(
+                        agent, "just agent::local-delete .build/default true"
+                    ),
+                    expected_local_delete,
+                    "just agent::local-delete .build/default true",
+                )
+                for command in destructive_commands:
+                    with self.subTest(command=command):
+                        self.assertEqual(
+                            self.merged_permission_for(agent, command), "deny", command
+                        )
 
     def test_fresh_cache_delete_escalation_contract_is_bounded(self) -> None:
         orchestrator = body_text("task-orchestrator").lower()

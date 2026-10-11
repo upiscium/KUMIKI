@@ -4,6 +4,8 @@ Nix flake templates for reproducible, Agent-ready development environments.
 
 ## Develop Templates
 
+Architecture decisions for KUMIKI / KAGARI are indexed in [docs/adr/README.md](docs/adr/README.md). The ADRs distinguish accepted design goals from the currently deployed Agent Core v3 and staged v4 implementation.
+
 The repository root `flake.nix` is the development-environment source of truth. Its default devShell provides the repository tools required for normal Templates work, including `just`, `python3`, `git`, and `gh`.
 
 With `direnv` and `nix-direnv` installed on the host, approve the repository once:
@@ -117,6 +119,36 @@ Local extension
 
 Generated files under `templates/<name>/` are artifacts. Edit `components/agent-core/` or `components/adapters/<adapter>/` and regenerate instead.
 
+The staged Agent Core 1.0.0 metadata-reference protocol (not active in the
+VERSION 3 runtime) is documented in
+[`docs/agent-core-metadata-ref.md`](docs/agent-core-metadata-ref.md).
+
+The staged deterministic factual Task View and immutable exact-subject handoff
+Snapshots are documented in
+[`docs/agent-core-task-view.md`](docs/agent-core-task-view.md). They use the
+metadata plane only and do not activate v4 or own readiness/evaluation policy.
+
+The staged requested-operation prerequisite diagnosis substrate is documented
+in [`docs/agent-core-operation-prerequisites.md`](docs/agent-core-operation-prerequisites.md).
+It diagnoses only the requested operation and creates no global Task status,
+canonical next action, execution authority, or runtime activation.
+
+The staged Task-start Git/GitHub collaboration capability is documented in
+[`docs/agent-core-task-collaboration.md`](docs/agent-core-task-collaboration.md).
+It establishes the durable Draft PR/checkpoint surface early, without legacy
+publication phases, merge/Ready authority, or runtime activation.
+
+The staged exact-subject Human-approved integration boundary is documented in
+[`docs/agent-core-human-approved-integration.md`](docs/agent-core-human-approved-integration.md).
+It separates READY eligibility from explicit Human merge authority and permits
+only confirmed-merge, bounded clean-default reconciliation afterward.
+
+The staged bounded autonomous cleanup proof facade (#198) is documented in
+[`docs/agent-core-autonomous-safe-cleanup.md`](docs/agent-core-autonomous-safe-cleanup.md).
+It separates read-only inventory and Task-bound proofs from host-qualified,
+operation-specific deletion; it does not activate v4 or provide a production
+deletion backend.
+
 ## Initialization
 
 Bootstrap, GitHub repository policy setup, and session initialization are intentionally separate. Concrete language/toolchain adapters use the bootstrap step; `agent-base` skips it because it has no bootstrap-owned project state:
@@ -181,7 +213,10 @@ Main schedules Tasks. Each Task owns one branch, one repo-local worktree under `
 For downstream-sensitive Agent Core changes, use the documented release gate
 from Issue through exact-revision AKV dogfood and post-merge tree equality:
 [`docs/agent-core-release-gate.md`](docs/agent-core-release-gate.md). It is
-human-gated and does not automate merge or release publication.
+human-gated and does not automate merge or release publication. This existing
+versionless historical check is not the future v4 Agent Core SemVer release
+gate and does not make current Agent Core VERSION 3 a stable SemVer release;
+see [`docs/agent-core-versioning.md`](docs/agent-core-versioning.md).
 
 Typical flow:
 
@@ -382,7 +417,17 @@ Inspect them through:
 just automation::version
 ```
 
-`UPSTREAM` records the canonical Templates repository/ref/component. Breaking Agent Core changes require a VERSION change and migration notes; compatible implementation/documentation changes may remain within the current version.
+`UPSTREAM` records the canonical Templates repository/ref/component. The
+currently distributed Agent Core `.automation/VERSION` is integer `3`, not
+SemVer `3.0.0`, and current Agent Core is not claimed as a stable SemVer
+release. The planned first stable Agent Core version is `1.0.0`, initially
+alongside but independently versioned from Templates `4.0.0`; internal
+architecture v4 is not public SemVer major 4. See
+[`docs/agent-core-versioning.md`](docs/agent-core-versioning.md) for the
+planned MAJOR/MINOR/PATCH policy, legacy-marker boundary, and future release
+identity checks. `just agent-core::release-identity-check` is a read-only
+local check of an exact clean commit, not a release gate; the current planned
+v3 checkout intentionally cannot pass it.
 
 ## Read-only update check
 
@@ -706,32 +751,21 @@ Then require the repository CI/smoke suite. Automation Core changes must be revi
 
 ## Template development
 
-### OpencodeContract dependency
+### OpenCode safety and policy validation
 
-The Templates source repository pins [`upiscium/OpencodeContract`](https://github.com/upiscium/OpencodeContract) through the root `flake.lock` and audits this checkout against the explicit `agent-core` profile. OpencodeContract owns the shared contract and compatibility policy; Templates remains the Agent Core implementation and distribution owner.
+Templates owns the minimum correct OpenCode policy and its tests for this repository and its generated templates. There is no cross-repository canonical role, model, or permission registry and no replacement shared registry. See [OpenCode policy ownership and retirement](docs/opencode-policy-ownership.md) for the ownership, runtime, and legacy-file boundaries.
 
-The dependency is a Templates development and validation gate only. It is not rendered into generated templates, does not change `.automation/UPSTREAM`, and does not generate OpenCode configuration.
-
-Contract revisions advance only through an explicit dependency update. The recommended path is **GitHub Actions → Update OpencodeContract → Branch = main → Run workflow**, or:
+Run the local safety/policy and distribution checks with:
 
 ```sh
-gh workflow run update-opencode-contract.yml \
-  --repo upiscium/Templates \
-  --ref main
-```
-
-This workflow runs only through an explicit `workflow_dispatch`; it has no schedule. It validates lock hygiene, Templates contracts, generated drift, distribution metadata, and the strict `agent-core` profile before creating a Draft pull request containing only `flake.lock`.
-
-For a local update:
-
-```sh
-nix flake update opencodeContract
-nix flake check --no-update-lock-file
+python3 -m unittest discover -s tests -p test_opencode_policy.py -v
 python3 -m unittest discover -s tests -v
 just template::check
+just template::distribution-verify
+nix flake check --all-systems --no-build --no-update-lock-file
 ```
 
-Review the resulting `flake.lock` diff and contract audit before merging. OpencodeContract `main` moving does not change Templates until this lockfile is deliberately updated. Generated templates do not receive the OpencodeContract input and are not regenerated by this dependency update. The resulting Draft pull request runs normal Template CI as a second gate, including the generated-template runtime smoke matrix.
+These checks validate repository-owned policy and generated/distribution structure; they do not establish interactive OpenCode runtime behavior or provider/model availability. The separate depth-2 Ask smoke remains subject to its documented runtime procedure.
 
 ```sh
 just template::render agent-base

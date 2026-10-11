@@ -77,16 +77,24 @@ class TemplateDistributionTest(unittest.TestCase):
             (destination / ".git").mkdir()
             (destination / "stale.txt").write_text("stale\n", encoding="utf-8")
             (destination / ".stale-dotfile").write_text("stale\n", encoding="utf-8")
+            # Isolated negative fixture for a stale pre-retirement distribution.
+            retired_manifest = destination / "opencode-contract-permissions.toml"
+            retired_manifest.write_text("stale legacy file\n", encoding="utf-8")
 
             distribution.materialize(ROOT, "agent-python", destination)
             differences = distribution.check(ROOT, "agent-python", destination)
             self.assertEqual(differences, [])
             self.assertFalse((destination / "stale.txt").exists())
             self.assertFalse((destination / ".stale-dotfile").exists())
+            self.assertFalse(retired_manifest.exists())
             self.assertTrue((destination / ".gitignore").is_file())
             self.assertEqual(
                 (destination / "LICENSE").read_bytes(),
                 (ROOT / "components" / "agent-core" / "LICENSE").read_bytes(),
+            )
+            self.assertEqual(
+                (destination / "opencode.json").read_bytes(),
+                (ROOT / "components" / "agent-core" / "opencode.json").read_bytes(),
             )
 
             source_mode = (ROOT / "templates" / "agent-python" / ".automation" / "bin" / "agent_core.py").stat().st_mode

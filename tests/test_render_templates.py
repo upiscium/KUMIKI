@@ -96,6 +96,16 @@ class RenderTemplatesTest(unittest.TestCase):
             ["missing: .opencode/agents/plan.md"],
         )
 
+    def test_check_detects_missing_generated_core_file(self) -> None:
+        core_file = self.root / "components" / "agent-core" / "Justfile"
+        core_file.write_text("set quiet := true\n", encoding="utf-8")
+        output = render_template(self.root, self.spec())
+        (output / "Justfile").unlink()
+        self.assertEqual(
+            check_template(self.root, self.spec()),
+            ["missing: Justfile"],
+        )
+
     def test_minimum_just_version_stays_in_sync(self) -> None:
         root = Path(__file__).resolve().parents[1]
         paths = [root / "Justfile", root / "components" / "agent-core" / "Justfile"]
