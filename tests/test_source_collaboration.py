@@ -971,6 +971,112 @@ class SourceCollaborationTest(unittest.TestCase):
         with self.assertRaisesRegex(source.GuardError, "subject to Git URL rewriting"):
             source.push_destination(self.root)
 
+    def test_nonclosing_issue_binding_is_visible_and_exact(self) -> None:
+        valid = ("Refs #215", "  refs #215  ", "Refs\t#215",
+                 "\nRefs #215\n\nPhase 2 is still open.",
+                 "Closes #215", "fixes #215", "RESOLVES #215")
+        invalid = ("", "Tracking #215", "Refs #2150", "Refs #215-more",
+                   "Refs #215t", "Refst#215", "Refſ #215", "Cloſes #215",
+                   "Refs #215 extra", "Refs #999", "> Refs #215",
+                   "    Refs #215", "~~~\nRefs #215\n~~~",
+                   "```python\nRefs #215\n```",
+                   "<!--\nRefs #215\n-->", "<!-- Refs #215 -->",
+                   "<!-- first --> <!--\nRefs #215\n-->",
+                   "<!-- first --> <!-- second\nRefs #215\n-->",
+                   "Refs #215 <!-- comment -->", "Intro\nRefs #215\nOutro",
+                   "> Proposed wording:\nRefs #215",
+                   "Refs #215\nParagraph continues without blank.",
+                   "Intro\n\nRefs #215\n",
+                   "<!-- first --> <!-- second -->\nRefs #215",
+                   "~~~markdown\n<!--\n~~~\nRefs #215")
+        for body in valid:
+            with self.subTest(body=body):
+                self.assertTrue(source.pr_binds_issue(body, 215))
+                source.validate_pr(self.pr(body=body),
+                                   "feat/215-source-collaboration",
+                                   git(self.root, "rev-parse", "HEAD"), 215)
+        for body in invalid:
+            with self.subTest(body=body):
+                self.assertFalse(source.pr_binds_issue(body, 215))
+                with self.assertRaisesRegex(source.GuardError, "not bound"):
+                    source.validate_pr(self.pr(body=body),
+                                       "feat/215-source-collaboration",
+                                       git(self.root, "rev-parse", "HEAD"), 215)
+
+    def test_nonclosing_pr_adoption_checks_same_draft_identity(self) -> None:
+        current = git(self.root, "rev-parse", "HEAD")
+        record = self.pr(body="Refs #215\n\nPhase 1 only.")
+        with mock.patch.object(source, "issue_meta", side_effect=self.issue), mock.patch.object(
+            source, "remote_head", return_value=current
+        ), mock.patch.object(source, "pulls", return_value=[record]) as scans:
+            result = source.pr_create(215, self.root, nonclosing=True)
+        self.assertEqual("ADOPTED", result["status"])
+        self.assertEqual(7, result["pr"])
+        self.assertEqual(2, scans.call_count)
+        for bad in (
+            self.pr(body="Refs #215", state="closed"),
+            self.pr(body="Refs #215", head={**record["head"], "sha": "f" * 40}),
+            self.pr(body="Refs #215", base={"ref": "other", "repo": {"full_name": source.REPO}}),
+            self.pr(body="Refs #215", head={**record["head"], "repo": {"full_name": "foreign/Templates"}}),
+        ):
+            with self.subTest(bad=bad), self.assertRaises(source.GuardError):
+                source.validate_pr(bad, "feat/215-source-collaboration", current, 215)
+
+    def test_pr_create_nonclosing_flag_emits_explicit_refs(self) -> None:
+        current = git(self.root, "rev-parse", "HEAD")
+        for nonclosing, expected in ((False, "Closes #215"), (True, "Refs #215")):
+            with self.subTest(nonclosing=nonclosing):
+                recorded = []
+
+                def create(_root, *args, **_kwargs):
+                    self.assertEqual(("gh", "pr", "create"), args[:3])
+                    recorded.append(args)
+                    return subprocess.CompletedProcess(
+                        args=[], returncode=0,
+                        stdout="https://github.com/upiscium/Templates/pull/7\n",
+                        stderr="",
+                    )
+
+                with mock.patch.object(source, "context", return_value=self.ctx()), mock.patch.object(
+                    source, "require_clean"
+                ), mock.patch.object(source, "require_approved_lineage"), mock.patch.object(
+                    source, "remote_head", return_value=current
+                ), mock.patch.object(source, "pulls", side_effect=[[], [], [self.pr(body=expected)]]), mock.patch.object(
+                    source, "require_task_head"
+                ), mock.patch.object(source, "run", side_effect=create):
+                    outcome = source.pr_create(215, self.root, nonclosing=nonclosing)
+                self.assertEqual("CREATED", outcome["status"])
+                self.assertEqual(1, len(recorded))
+                self.assertEqual(expected, recorded[0][recorded[0].index("--body") + 1])
+        with self.assertRaisesRegex(source.GuardError, "must be boolean"):
+            source.pr_create(215, self.root, nonclosing=1)
+
+    def test_checkpoint_validates_nonclosing_partial_pr(self) -> None:
+        current = git(self.root, "rev-parse", "HEAD")
+        record = self.pr(body="Refs #215")
+        with mock.patch.object(source, "issue_meta", side_effect=self.issue), mock.patch.object(
+            source, "remote_head", return_value=current
+        ), mock.patch.object(source, "publication_principal", return_value={
+            "id": 42, "login": "publisher", "type": "User"
+        }), mock.patch.object(source, "gh_json", return_value=record), mock.patch.object(
+            source, "checkpoint_matches", return_value=[201]
+        ):
+            result = source.checkpoint(215, 7, current, "Phase-1 reviewed result.", self.root)
+        self.assertEqual("ALREADY_POSTED", result["status"])
+        self.assertEqual(201, result["comment_id"])
+
+    def test_pr_create_nonclosing_cli_is_explicit(self) -> None:
+        worktree = str(self.root)
+        default = source.parser().parse_args([
+            "--worktree", worktree, "pr-create", "215",
+        ])
+        partial = source.parser().parse_args([
+            "--worktree", worktree, "pr-create", "215", "--nonclosing",
+        ])
+        self.assertFalse(default.nonclosing)
+        self.assertTrue(partial.nonclosing)
+        self.assertEqual(215, partial.issue)
+
     def test_pr_adoption_requires_exact_draft(self) -> None:
         current = git(self.root, "rev-parse", "HEAD")
         pr = {

@@ -919,6 +919,30 @@ def pulls(root_: Path, branch_: str) -> list[dict[str, Any]]:
     return found
 
 
+def pr_binds_issue(body: str, issue: int) -> bool:
+    """Accept an explicit non-closing Issue reference at the PR body's top.
+
+    A standalone first paragraph avoids interpreting Markdown blockquotes,
+    fences, comments, and lazy quote continuations as Issue authority. Existing
+    closing keywords are preserved for backwards-compatible completed Tasks.
+    """
+    if re.search(
+        rf"(?ima)^[ \t]*(?:closes|fixes|resolves)[ \t]+#{issue}(?![0-9A-Za-z_])",
+        body,
+    ):
+        return True
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        if index + 1 < len(lines) and lines[index + 1].strip():
+            return False  # Canonical Refs #N is a whole opening paragraph.
+        return re.fullmatch(
+            rf" {{0,3}}refs[ \t]+#{issue}[ \t]*", line, flags=re.IGNORECASE | re.ASCII,
+        ) is not None
+    return False
+
+
 def validate_pr(
     pr: dict[str, Any], branch_: str, expected_head: str, issue: int
 ) -> None:
@@ -938,13 +962,13 @@ def validate_pr(
     if b.get("ref") != DEFAULT or not same_repo(base_repo.get("full_name")):
         raise GuardError("PR base identity mismatch")
     body = str(pr.get("body") or "")
-    if not re.search(
-        rf"(?im)^\s*(?:closes|fixes|resolves)\s+#{issue}(?!\d)", body
-    ):
+    if not pr_binds_issue(body, issue):
         raise GuardError(f"PR is not bound to Issue #{issue}")
 
 
-def pr_create(issue: int, cwd: Path | None = None) -> dict[str, Any]:
+def pr_create(issue: int, cwd: Path | None = None, *, nonclosing: bool = False) -> dict[str, Any]:
+    if type(nonclosing) is not bool:
+        raise GuardError("nonclosing source PR selection must be boolean")
     ctx = context(issue, cwd)
     require_clean(ctx["root"])
     require_approved_lineage(ctx["root"], ctx["head"])
@@ -967,7 +991,7 @@ def pr_create(issue: int, cwd: Path | None = None) -> dict[str, Any]:
         out = run(
             Path(__file__).resolve().parent, "gh", "pr", "create", "--repo", REPO, "--draft",
             "--base", DEFAULT, "--head", ctx["branch"], "--title", ctx["title"],
-            "--body", f"Closes #{issue}", check=False
+            "--body", f"{'Refs' if nonclosing else 'Closes'} #{issue}", check=False
         )
         found = pulls(ctx["root"], ctx["branch"])
         if not found:
@@ -1105,7 +1129,7 @@ def parser() -> argparse.ArgumentParser:
     q = subs.add_parser("publication-check"); q.add_argument("issue", type=int)
     q = subs.add_parser("commit"); q.add_argument("issue", type=int); q.add_argument("digest"); q.add_argument("message")
     q = subs.add_parser("push"); q.add_argument("issue", type=int); q.add_argument("head")
-    q = subs.add_parser("pr-create"); q.add_argument("issue", type=int)
+    q = subs.add_parser("pr-create"); q.add_argument("issue", type=int); q.add_argument("--nonclosing", action="store_true")
     q = subs.add_parser("checkpoint"); q.add_argument("issue", type=int); q.add_argument("pr", type=int); q.add_argument("head"); q.add_argument("body")
     return p
 
@@ -1120,7 +1144,7 @@ def main() -> int:
         elif args.command == "push":
             result = push(args.issue, args.head, args.worktree)
         elif args.command == "pr-create":
-            result = pr_create(args.issue, args.worktree)
+            result = pr_create(args.issue, args.worktree, nonclosing=args.nonclosing)
         else:
             result = checkpoint(args.issue, args.pr, args.head, args.body, args.worktree)
     except GuardError as exc:
