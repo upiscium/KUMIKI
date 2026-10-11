@@ -110,8 +110,8 @@ KNOWN_CI_SKIP_IDS = frozenset({
     "test_automation_just_paths.AutomationJustPathTest.test_just_invocation_preserves_exact_sanitized_bridge_argv",
     "test_automation_upgrade.AutomationUpgradeContractTest.test_issue_85_bridge_contract_and_rejection_matrix",
     "test_init_contract.InitContractTest.test_real_repository_identity_modes_preserve_strictness",
-    "test_opencode_contract.OpenCodeContractTest.test_maintenance_effective_policy_when_cli_available",
-    "test_opencode_contract.OpenCodeContractTest.test_opencode_debug_agent_plan_effective_policy_when_cli_available",
+    "test_opencode_policy.OpenCodePolicyTest.test_maintenance_effective_policy_when_cli_available",
+    "test_opencode_policy.OpenCodePolicyTest.test_opencode_debug_agent_plan_effective_policy_when_cli_available",
     "test_source_bootstrap_upgrade_bridge.BootstrapUpgradeBridgeTest.test_installed_maintenance_check_preserves_active_receipt_paths",
 })
 

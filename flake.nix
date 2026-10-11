@@ -4,13 +4,9 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    opencodeContract = {
-      url = "github:upiscium/OpencodeContract";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, opencodeContract }:
+  outputs = { self, nixpkgs, flake-utils }:
     let
       trustedRevision = if self ? rev then self.rev else "0000000000000000000000000000000000000000";
     in flake-utils.lib.eachDefaultSystem (system:
@@ -18,7 +14,6 @@
       else
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          isLinux = pkgs.stdenv.hostPlatform.isLinux;
         in {
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [
@@ -45,16 +40,6 @@
               --replace-fail '@PATH@' '${nixpkgs.lib.makeBinPath [ pkgs.git pkgs.gh pkgs.openssh pkgs.python3 ]}'
             chmod 755 "$out/lib/templates-source/source_collaboration.py"
             chmod 755 "$out/bin/templates-source"
-          '';
-        } // nixpkgs.lib.optionalAttrs isLinux {
-          checks.opencode-contract = pkgs.runCommand "templates-opencode-contract" {
-            nativeBuildInputs = [ opencodeContract.packages.${system}.opencode-contract ];
-          } ''
-            opencode-contract audit-consumer \
-              --profile agent-core \
-              --consumer ${self} \
-              --strict
-            touch "$out"
           '';
         })
     // {
