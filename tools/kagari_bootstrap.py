@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -75,6 +76,19 @@ def valid_relpath(value: object) -> str:
     return value
 
 
+def git_observation_environment() -> dict[str, str]:
+    """Do not let inherited Git execution/worktree overrides redefine ownership."""
+    result = {key: value for key, value in os.environ.items()
+              if not key.startswith("GIT_")}
+    result.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_COUNT": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    })
+    return result
+
+
 def source_files(source: Path) -> list[Path]:
     # A source checkout may contain ignored OpenCode npm downloads and Python
     # caches. Select only Git-managed KAGARI payload files when Git is present.
@@ -82,10 +96,12 @@ def source_files(source: Path) -> list[Path]:
     command = ["git", "-C", str(source), "-c", "core.fsmonitor=false",
                "-c", "core.hooksPath=/dev/null"]
     probe = subprocess.run([*command, "rev-parse", "--is-inside-work-tree"],
-                           capture_output=True, check=False)
+                           capture_output=True, check=False,
+                           env=git_observation_environment())
     if probe.returncode == 0 and probe.stdout.strip() == b"true":
         result = subprocess.run([*command, "ls-files", "-z", "--", "."],
-                                capture_output=True, check=False)
+                                capture_output=True, check=False,
+                                env=git_observation_environment())
         require(result.returncode == 0,
                 "Git-managed KAGARI source inventory is unreadable")
         relative_paths = [valid_relpath(name.decode("utf-8", "strict"))
@@ -185,21 +201,109 @@ def validate_receipt(value: object) -> dict:
     return value
 
 
-def git_project(target: Path) -> tuple[Path, Path]:
-    require(target.is_dir() and not target.is_symlink(),
-            "target must be an existing directory, not a symlink")
-    target = target.resolve()
-    proc = subprocess.run(
-        ["git", "-C", str(target), "rev-parse", "--show-toplevel", "--absolute-git-dir"],
-        capture_output=True, text=True, check=False
-    )
-    require(proc.returncode == 0, "target must be a Git worktree")
-    output = proc.stdout.splitlines()
-    require(len(output) == 2 and Path(output[0]).resolve() == target,
-            "target must be the exact Git repository root")
-    git_dir = Path(output[1]).resolve()
-    require(git_dir.is_dir(), "Git administrative directory unavailable")
-    return target, git_dir
+def git_project(target: Path) -> tuple[Path, Path, tuple[int, int], tuple[int, int]]:
+    # Hold the original root while resolving its Git administrative identity.
+    # A swapped path can no longer make Git inspect a different worktree.
+    root_fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        first = os.fstat(root_fd)
+        require(target.is_dir() and not target.is_symlink(),
+                "target must be an existing directory, not a symlink")
+        target = target.resolve()
+        initial = os.stat(target, follow_symlinks=False)
+        require(stat.S_ISDIR(initial.st_mode) and
+                (initial.st_dev, initial.st_ino) == (first.st_dev, first.st_ino),
+                "validated target changed before Git root identification")
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel", "--absolute-git-dir"],
+            cwd=f"/proc/self/fd/{root_fd}", pass_fds=(root_fd,),
+            capture_output=True, text=True, check=False,
+            env=git_observation_environment(),
+        )
+        require(proc.returncode == 0, "target must be a Git worktree")
+        output = proc.stdout.splitlines()
+        require(len(output) == 2 and Path(output[0]).resolve() == target,
+                "target must be the exact Git repository root")
+        git_dir = Path(output[1]).resolve()
+        require(git_dir.is_dir(), "Git administrative directory unavailable")
+        latest = os.stat(target, follow_symlinks=False)
+        require((latest.st_dev, latest.st_ino) == (first.st_dev, first.st_ino),
+                "Git target changed during root validation")
+        git_info = os.stat(git_dir, follow_symlinks=False)
+        return target, git_dir, (first.st_dev, first.st_ino), (git_info.st_dev, git_info.st_ino)
+    finally:
+        os.close(root_fd)
+
+
+@contextmanager
+def held_project_dirs(root: Path, git_dir: Path,
+                      expected_root: tuple[int, int],
+                      expected_git: tuple[int, int]) -> Iterator[tuple[Path, Path]]:
+    """Anchor the previously validated Git root and metadata directory to FDs.
+
+    A concurrent same-user rename of the original project pathname must never
+    redirect install/repair/uninstall into a newly substituted directory.
+    Linux procfs supplies stable pathname handles to the open descriptors.
+    """
+    require(Path("/proc/self/fd").is_dir(), "Linux procfs fd anchoring unavailable")
+    descriptors: list[int] = []
+    try:
+        for directory, expected in ((root, expected_root), (git_dir, expected_git)):
+            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            descriptors.append(fd)
+            prior = os.stat(directory, follow_symlinks=False)
+            current = os.fstat(fd)
+            require(stat.S_ISDIR(current.st_mode) and
+                    (prior.st_dev, prior.st_ino) == (current.st_dev, current.st_ino)
+                    and (current.st_dev, current.st_ino) == expected,
+                    "validated Project/Git directory changed before anchoring")
+        yield tuple(Path(f"/proc/self/fd/{fd}") for fd in descriptors)
+    finally:
+        for fd in reversed(descriptors):
+            os.close(fd)
+
+
+def atomic_restore_dir(source_fd: int, dest_fd: int, *,
+                       source_name: str = CONTAINER,
+                       dest_name: str = CONTAINER) -> None:
+    """Restore quarantined .kagari without overwriting a newly created path."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    require(renameat2 is not None, "Linux atomic no-replace rename unavailable")
+    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                          ctypes.c_char_p, ctypes.c_uint)
+    renameat2.restype = ctypes.c_int
+    # Linux RENAME_NOREPLACE = 1. Never overwrite new Project-owned data.
+    result = renameat2(source_fd, os.fsencode(source_name),
+                       dest_fd, os.fsencode(dest_name), 1)
+    if result != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), dest_name)
+
+
+def check_noreplace_support(git_dir: Path) -> None:
+    """Prove no-clobber rename works on this filesystem before Project writes."""
+    with tempfile.TemporaryDirectory(prefix="kagari-rename-check-", dir=git_dir) as raw:
+        root = Path(raw)
+        (root / "a").mkdir()
+        (root / "b").mkdir()
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            try:
+                atomic_restore_dir(fd, fd, source_name="a", dest_name="b")
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise BootstrapError("filesystem cannot guarantee no-clobber rename") from exc
+            else:
+                raise BootstrapError("no-clobber rename replaced an occupied directory")
+            (root / "b").rmdir()
+            try:
+                atomic_restore_dir(fd, fd, source_name="a", dest_name="b")
+            except OSError as exc:
+                raise BootstrapError("filesystem cannot perform no-clobber rename") from exc
+        finally:
+            os.close(fd)
 
 
 def assert_normal_directories(root: Path) -> None:
@@ -284,6 +388,7 @@ def prepare_install(root: Path, git_dir: Path, receipt: dict,
     # leave a new untracked root-level .kagari-stage-* directory.
     require(git_dir.stat().st_dev == root.stat().st_dev,
             "Git administration and Project must share a filesystem for atomic install")
+    check_noreplace_support(git_dir)
     stage = Path(tempfile.mkdtemp(prefix="kagari-stage-", dir=git_dir))
     try:
         runtime = stage / RUNTIME
@@ -297,7 +402,13 @@ def prepare_install(root: Path, git_dir: Path, receipt: dict,
         require(not (root / CONTAINER).exists() and
                 not (root / CONTAINER).is_symlink(),
                 "KAGARI target appeared during install")
-        stage.rename(root / CONTAINER)
+        git_fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
+        project_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            atomic_restore_dir(git_fd, project_fd, source_name=stage.name)
+        finally:
+            os.close(project_fd)
+            os.close(git_fd)
     finally:
         if stage.exists():
             shutil.rmtree(stage)
@@ -345,7 +456,8 @@ def repair_missing(root: Path, git_dir: Path, receipt: dict,
             os.unlink(temp_name)
 
 
-def remove_owned(root: Path, receipt: dict) -> None:
+def _remove_quarantined(root: Path, receipt: dict, progress: dict[str, bool]) -> None:
+    """Delete ONLY after the entire managed directory is atomically detached."""
     container = root / CONTAINER
     runtime = container / RUNTIME
     for item in receipt["files"]:
@@ -365,7 +477,9 @@ def remove_owned(root: Path, receipt: dict) -> None:
             latest = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             require(latest.st_ino == info.st_ino and latest.st_dev == info.st_dev,
                     f"owned file changed during uninstall: {relative}")
+            progress["attempted"] = True
             os.unlink(name, dir_fd=parent_fd)
+            progress["deleted"] = True
     dirs = {runtime}
     for item in receipt["files"]:
         p = (runtime / item["path"]).parent
@@ -374,14 +488,86 @@ def remove_owned(root: Path, receipt: dict) -> None:
             p = p.parent
     for path in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
         if path.is_dir() and not path.is_symlink():
+            progress["attempted"] = True
             path.rmdir()
+            progress["deleted"] = True
     assert_normal_directories(root)
+    progress["attempted"] = True
     (container / RECEIPT).unlink()
+    progress["deleted"] = True
     container.rmdir()
 
 
+def remove_owned(root: Path, git_dir: Path, receipt: dict) -> None:
+    """Move the whole managed tree out of public Project space BEFORE deletion.
+
+    The atomic detachment prevents late root-level unknown files/replacements
+    from racing a sequence of unlinks. Inspect the detached private tree again
+    before any deletion. A blocked operation attempts no-replace restoration;
+    a failed restoration retains quarantine evidence, never overwrites data.
+    """
+    require(git_dir.stat().st_dev == root.stat().st_dev,
+            "Git administration and Project must share a filesystem for uninstall")
+    # Fail BEFORE touching Project-owned data if this Linux host cannot offer
+    # the no-overwrite rollback primitive required on validation failure.
+    check_noreplace_support(git_dir)
+    quarantine = Path(tempfile.mkdtemp(prefix="kagari-uninstall-", dir=git_dir))
+    root_fd: int | None = None
+    quarantine_fd: int | None = None
+    detached = False
+    progress = {"deleted": False, "attempted": False}
+    try:
+        # root is the /proc/self/fd handle to the already validated directory;
+        # its terminal symlink is intentional and cannot select a new root.
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        quarantine_fd = os.open(quarantine, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        os.rename(CONTAINER, CONTAINER,
+                  src_dir_fd=root_fd, dst_dir_fd=quarantine_fd)
+        detached = True
+        state = inventory_state(quarantine, receipt)
+        require(state["state"] in ("HEALTHY", "REPAIRABLE"),
+                "KAGARI changed while detaching managed directory for uninstall")
+        # From now on all destructive paths are under an unpredictable,
+        # Git-private 0700 quarantine rather than the shared Project root.
+        _remove_quarantined(quarantine, receipt, progress)
+    except BaseException as exc:
+        if progress["deleted"]:
+            raise BootstrapError("uninstall interrupted after deletion began; inspect Git-private quarantine") from exc
+        if progress["attempted"]:
+            # A signal can land after unlink succeeded but before its progress
+            # marker. Only restore when a fresh complete inventory proves the
+            # detached preimage remained intact.
+            try:
+                current = inventory_state(quarantine, receipt)
+                unchanged = all(current[key] == state[key]
+                                for key in ("state", "missing", "changed", "unknown"))
+            except Exception:
+                unchanged = False
+            if not unchanged:
+                raise BootstrapError("ambiguous uninstall interruption; preserve quarantine") from exc
+        if detached and (quarantine / CONTAINER).exists():
+            try:
+                assert quarantine_fd is not None and root_fd is not None
+                atomic_restore_dir(quarantine_fd, root_fd)
+            except Exception as rollback:
+                raise BootstrapError(
+                    f"uninstall quarantined KAGARI data at {quarantine / CONTAINER}; "
+                    f"restoration needs Human review: {rollback}"
+                ) from exc
+        raise
+    finally:
+        if quarantine_fd is not None:
+            os.close(quarantine_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+        # A hard interruption may leave a private Git-admin scratch directory.
+        # Never recursively delete unverified or foreign content from scratch.
+        if quarantine.exists() and not any(quarantine.iterdir()):
+            quarantine.rmdir()
+
+
 def operate(target: Path, source: Path | None, action: str) -> dict:
-    target, git_dir = git_project(target)
+    target, git_dir, root_identity, git_identity = git_project(target)
     receipt: dict | None = None
     files: dict[str, bytes] | None = None
     if source is not None:
@@ -391,35 +577,66 @@ def operate(target: Path, source: Path | None, action: str) -> dict:
     if action in ("install", "repair", "uninstall"):
         require(receipt is not None and files is not None,
                 "install/repair/uninstall requires an explicit KAGARI source")
-    if action in ("plan", "doctor"):
-        state = inventory_state(target, receipt)
-        return {"operation": action, "status": state["state"],
-                "missing": state["missing"], "changed": state["changed"],
-                "unknown": state["unknown"], "target": str(target),
-                "version": state.get("receipt", receipt or {}).get("version")}
-    with writer_lock(git_dir):
-        state = inventory_state(target, receipt)
-        require(state["state"] not in ("CONFLICT",),
-                "KAGARI scope contains unknown/modified files; preserve and request review")
-        if action == "uninstall":
-            if state["state"] == "ABSENT":
-                outcome = "ALREADY_ABSENT"
+    with held_project_dirs(target, git_dir, root_identity, git_identity) as (held_root, held_git):
+        require(not any(path.name.startswith("kagari-uninstall-")
+                        for path in held_git.iterdir()),
+                "unresolved KAGARI uninstall quarantine requires Human review")
+        if action in ("plan", "doctor"):
+            with writer_lock(held_git):
+                require(not any(p.name.startswith("kagari-uninstall-")
+                                for p in held_git.iterdir()),
+                        "unresolved KAGARI uninstall quarantine requires Human review")
+                state = inventory_state(held_root, receipt)
+                try:
+                    current_root = os.stat(target, follow_symlinks=False)
+                except OSError as exc:
+                    raise BootstrapError("validated Project pathname disappeared during inspection") from exc
+                require((current_root.st_dev, current_root.st_ino) == root_identity,
+                        "validated Project pathname changed during inspection")
+            return {"operation": action, "status": state["state"],
+                    "missing": state["missing"], "changed": state["changed"],
+                    "unknown": state["unknown"], "target": str(target),
+                    "version": state.get("receipt", receipt or {}).get("version")}
+        with writer_lock(held_git):
+            # A preceding writer may have left quarantine while this writer
+            # waited for the lock. Never rely on the earlier unlocked scan.
+            require(not any(path.name.startswith("kagari-uninstall-")
+                            for path in held_git.iterdir()),
+                    "unresolved KAGARI uninstall quarantine requires Human review")
+            state = inventory_state(held_root, receipt)
+            require(state["state"] not in ("CONFLICT",),
+                    "KAGARI scope contains unknown/modified files; preserve and request review")
+            if action == "uninstall":
+                if state["state"] == "ABSENT":
+                    outcome = "ALREADY_ABSENT"
+                else:
+                    remove_owned(held_root, held_git, state["receipt"])
+                    outcome = "UNINSTALLED"
+            elif state["state"] == "ABSENT":
+                assert receipt is not None and files is not None
+                prepare_install(held_root, held_git, receipt, files)
+                outcome = "INSTALLED"
+            elif state["state"] == "HEALTHY":
+                outcome = "UNCHANGED"
             else:
-                remove_owned(target, state["receipt"])
-                outcome = "UNINSTALLED"
-        elif state["state"] == "ABSENT":
-            assert receipt is not None and files is not None
-            prepare_install(target, git_dir, receipt, files)
-            outcome = "INSTALLED"
-        elif state["state"] == "HEALTHY":
-            outcome = "UNCHANGED"
-        else:
-            assert receipt is not None and files is not None
-            repair_missing(target, git_dir, receipt, files, state["missing"])
-            outcome = "REPAIRED"
-        after = inventory_state(target, receipt if action != "uninstall" else None)
-        require(after["state"] == ("ABSENT" if action == "uninstall" else "HEALTHY"),
-                "KAGARI postcondition not confirmed")
+                assert receipt is not None and files is not None
+                repair_missing(held_root, held_git, receipt, files, state["missing"])
+                outcome = "REPAIRED"
+            after = inventory_state(held_root, receipt if action != "uninstall" else None)
+            require(after["state"] == ("ABSENT" if action == "uninstall" else "HEALTHY"),
+                    "KAGARI postcondition not confirmed")
+            # A target renamed while its directory FD was held cannot redirect
+            # the write. It also cannot be reported as success at a new path.
+            try:
+                post = os.stat(target, follow_symlinks=False)
+            except OSError as exc:
+                raise BootstrapError(
+                    "validated Project path disappeared during operation; "
+                    "reinspect original directory and Git-private state"
+                ) from exc
+            require((post.st_dev, post.st_ino) == root_identity,
+                    "validated Project pathname changed during operation; "
+                    "reinspect original directory before retry")
     return {"operation": action, "status": outcome,
             "target": str(target), "version": (receipt or state.get("receipt") or {}).get("version"),
             "changed_paths": state["missing"] if outcome == "REPAIRED" else []}

@@ -377,5 +377,497 @@ class KagariBootstrapTest(unittest.TestCase):
         self.assert_project_preserved()
 
 
+    def test_validated_project_root_replacement_blocks_before_write(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_anchor_swap", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        real_source = bootstrap.source_payload
+        relocated = Path(self.temp.name) / "moved-original"
+        foreign = self.root
+        replacement_written = False
+
+        def changed_after_git_validation(path):
+            nonlocal replacement_written
+            result = real_source(path)
+            self.root.rename(relocated)
+            foreign.mkdir()
+            (foreign / "not-original.txt").write_text("independent Project data")
+            replacement_written = True
+            return result
+
+        try:
+            with mock.patch.object(bootstrap, "source_payload",
+                                   side_effect=changed_after_git_validation):
+                with self.assertRaisesRegex(bootstrap.BootstrapError,
+                                            "changed before anchoring"):
+                    bootstrap.operate(self.root, PAYLOAD, "install")
+            self.assertTrue(replacement_written)
+            self.assertFalse((foreign / ".kagari").exists())
+            self.assertEqual("independent Project data",
+                             (foreign / "not-original.txt").read_text())
+            self.assertFalse((relocated / ".kagari").exists())
+        finally:
+            if replacement_written:
+                shutil.rmtree(foreign)
+                relocated.rename(self.root)
+        self.assert_project_preserved()
+
+    def test_root_rename_after_fd_hold_cannot_redirect_install(self) -> None:
+        import importlib.util
+        from contextlib import contextmanager
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_anchor_held", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        original_lock = bootstrap.writer_lock
+        relocated = Path(self.temp.name) / "moved-original"
+        renamed = False
+
+        @contextmanager
+        def relocate_while_locked(git_dir):
+            nonlocal renamed
+            self.root.rename(relocated)
+            self.root.mkdir()
+            (self.root / "not-original.txt").write_text("must not be modified")
+            renamed = True
+            with original_lock(git_dir):
+                yield
+
+        try:
+            with mock.patch.object(bootstrap, "writer_lock",
+                                   side_effect=relocate_while_locked):
+                with self.assertRaisesRegex(bootstrap.BootstrapError,
+                                            "pathname changed during operation"):
+                    bootstrap.operate(self.root, PAYLOAD, "install")
+            self.assertFalse((self.root / ".kagari").exists())
+            self.assertEqual("must not be modified",
+                             (self.root / "not-original.txt").read_text())
+            self.assertTrue((relocated / ".kagari" / "install.json").exists())
+        finally:
+            if renamed:
+                shutil.rmtree(self.root)
+                relocated.rename(self.root)
+        self.assertEqual("HEALTHY", self.invoke("doctor", source=None)[1]["status"])
+        self.assert_project_preserved()
+
+    def test_late_unknown_file_is_preserved_before_uninstall_deletion(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_unknown_race", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        self.assertEqual("INSTALLED", self.invoke("install")[1]["status"])
+        protected = self.root / ".kagari" / "runtime" / "Justfile"
+        content = protected.read_bytes()
+        original_inventory = bootstrap.inventory_state
+        injected = False
+
+        def inject_after_snapshot(root, expected):
+            nonlocal injected
+            result = original_inventory(root, expected)
+            if not injected and result["state"] == "HEALTHY":
+                (root / ".kagari" / "runtime" / "concurrent-unknown.txt").write_text(
+                    "unrelated user data"
+                )
+                injected = True
+            return result
+
+        with mock.patch.object(bootstrap, "inventory_state",
+                               side_effect=inject_after_snapshot):
+            with self.assertRaisesRegex(bootstrap.BootstrapError,
+                                        "changed while detaching"):
+                bootstrap.operate(self.root, PAYLOAD, "uninstall")
+        self.assertTrue(injected)
+        self.assertEqual(content, protected.read_bytes())
+        self.assertEqual("unrelated user data",
+                         (self.root / ".kagari" / "runtime" /
+                          "concurrent-unknown.txt").read_text())
+        self.assertFalse(list((self.root / ".git").glob("kagari-uninstall-*")))
+        self.assert_project_preserved()
+
+    def test_late_managed_file_replacement_restores_before_delete(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_replace_race", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        self.assertEqual("INSTALLED", self.invoke("install")[1]["status"])
+        protected = self.root / ".kagari" / "runtime" / "Justfile"
+        modified = b"concurrent user edit (do not delete)\n"
+        old_inventory = bootstrap.inventory_state
+        changed = False
+
+        def change_after_snapshot(root, expected):
+            nonlocal changed
+            result = old_inventory(root, expected)
+            if not changed and result["state"] == "HEALTHY":
+                (root / ".kagari" / "runtime" / "Justfile").write_bytes(modified)
+                changed = True
+            return result
+
+        with mock.patch.object(bootstrap, "inventory_state",
+                               side_effect=change_after_snapshot):
+            with self.assertRaisesRegex(bootstrap.BootstrapError,
+                                        "changed while detaching"):
+                bootstrap.operate(self.root, PAYLOAD, "uninstall")
+        self.assertTrue(changed)
+        self.assertEqual(modified, protected.read_bytes())
+        self.assertTrue((self.root / ".kagari" / "install.json").exists())
+        self.assert_project_preserved()
+
+    def test_quarantine_restore_never_overwrites_new_target(self) -> None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("kagari_restore_test", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        private = Path(self.temp.name) / "private-quarantine"
+        private.mkdir()
+        (private / ".kagari").mkdir()
+        target = Path(self.temp.name) / "other-Project"
+        target.mkdir()
+        (target / ".kagari").mkdir()
+        first = os.open(private, os.O_RDONLY | os.O_DIRECTORY)
+        second = os.open(target, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with self.assertRaises(FileExistsError):
+                bootstrap.atomic_restore_dir(first, second)
+            self.assertTrue((target / ".kagari").is_dir())
+            self.assertTrue((private / ".kagari").is_dir())
+            (target / ".kagari").rmdir()
+            bootstrap.atomic_restore_dir(first, second)
+            self.assertTrue((target / ".kagari").is_dir())
+            self.assertFalse((private / ".kagari").exists())
+        finally:
+            os.close(first)
+            os.close(second)
+        self.assert_project_preserved()
+
+
+    def test_interrupted_uninstall_keeps_quarantine_and_blocks_retry(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_partial_uninstall", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        self.assertEqual("INSTALLED", self.invoke("install")[1]["status"])
+
+        def simulated_partial_delete(private_root, _receipt, progress):
+            (private_root / ".kagari" / "runtime" / "Justfile").unlink()
+            progress["deleted"] = True
+            raise OSError("simulated failure after a first unlink")
+
+        with mock.patch.object(bootstrap, "_remove_quarantined",
+                               side_effect=simulated_partial_delete):
+            with self.assertRaisesRegex(bootstrap.BootstrapError,
+                                        "uninstall interrupted after deletion began"):
+                bootstrap.operate(self.root, PAYLOAD, "uninstall")
+        self.assertFalse((self.root / ".kagari").exists())
+        private = list((self.root / ".git").glob("kagari-uninstall-*/.kagari/install.json"))
+        self.assertEqual(1, len(private))
+        self.assertEqual((2, "BLOCKED"), (
+            lambda x: (x[0], x[1]["status"])
+        )(self.invoke("doctor", source=None)))
+        self.assertEqual((2, "BLOCKED"), (
+            lambda x: (x[0], x[1]["status"])
+        )(self.invoke("install")))
+        self.assert_project_preserved()
+
+
+    def test_quarantine_created_while_waiting_for_writer_lock_blocks_install(self) -> None:
+        import importlib.util
+        from contextlib import contextmanager
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_quarantine_lock", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        original_lock = bootstrap.writer_lock
+
+        @contextmanager
+        def interrupted_writer(git_dir):
+            with original_lock(git_dir):
+                orphan = git_dir / "kagari-uninstall-late-reader"
+                orphan.mkdir()
+                try:
+                    yield
+                finally:
+                    orphan.rmdir()
+
+        with mock.patch.object(bootstrap, "writer_lock", side_effect=interrupted_writer):
+            with self.assertRaisesRegex(bootstrap.BootstrapError,
+                                        "unresolved KAGARI uninstall quarantine"):
+                bootstrap.operate(self.root, PAYLOAD, "install")
+        self.assertFalse((self.root / ".kagari").exists())
+        self.assert_project_preserved()
+
+    def test_failure_before_first_unlink_restores_untouched_quarantine(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_pre_unlink_failure", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        self.assertEqual("INSTALLED", self.invoke("install")[1]["status"])
+        original = (self.root / ".kagari" / "runtime" / "Justfile").read_bytes()
+
+        with mock.patch.object(bootstrap, "_remove_quarantined",
+                               side_effect=OSError("denied before first unlink")):
+            with self.assertRaisesRegex(OSError, "denied before first unlink"):
+                bootstrap.operate(self.root, PAYLOAD, "uninstall")
+        self.assertEqual(original, (self.root / ".kagari" / "runtime" / "Justfile").read_bytes())
+        self.assertEqual("HEALTHY", self.invoke("doctor", source=None)[1]["status"])
+        self.assertFalse(list((self.root / ".git").glob("kagari-uninstall-*")))
+        self.assert_project_preserved()
+
+    def test_install_no_replace_preserves_concurrent_empty_directory(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_install_collision", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        original = bootstrap.atomic_restore_dir
+        concurrent = self.root / ".kagari"
+
+        def inject_collision(src_fd, dst_fd, **kwargs):
+            if kwargs.get("source_name", "").startswith("kagari-stage-"):
+                concurrent.mkdir()
+            return original(src_fd, dst_fd, **kwargs)
+
+        with mock.patch.object(bootstrap, "atomic_restore_dir",
+                               side_effect=inject_collision):
+            with self.assertRaises(FileExistsError):
+                bootstrap.operate(self.root, PAYLOAD, "install")
+        self.assertTrue(concurrent.is_dir())
+        self.assertEqual([], list(concurrent.iterdir()))
+        self.assertFalse(list((self.root / ".git").glob("kagari-stage-*")))
+        self.assert_project_preserved()
+
+    def test_no_replace_support_failure_is_before_project_mutation(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_noreplace_support", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        with mock.patch.object(bootstrap, "atomic_restore_dir",
+                               side_effect=OSError(95, "operation not supported")):
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "no-clobber rename"):
+                bootstrap.operate(self.root, PAYLOAD, "install")
+        self.assertFalse((self.root / ".kagari").exists())
+        self.assertEqual("INSTALLED", self.invoke("install")[1]["status"])
+        with mock.patch.object(bootstrap, "atomic_restore_dir",
+                               side_effect=OSError(95, "operation not supported")):
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "no-clobber rename"):
+                bootstrap.operate(self.root, PAYLOAD, "uninstall")
+        self.assertEqual("HEALTHY", self.invoke("doctor", source=None)[1]["status"])
+        self.assert_project_preserved()
+
+
+    def test_root_replacement_between_first_fd_and_path_check_is_blocked(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_first_fd_identity", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        original_is_dir = bootstrap.Path.is_dir
+        relocated = Path(self.temp.name) / "original-moved-before-validation"
+        changed = False
+
+        def replace_root_during_check(path):
+            nonlocal changed
+            if path == self.root and not changed:
+                self.root.rename(relocated)
+                self.root.mkdir()
+                (self.root / "foreign.txt").write_text("independent content")
+                changed = True
+            return original_is_dir(path)
+
+        try:
+            with mock.patch.object(bootstrap.Path, "is_dir", autospec=True,
+                                   side_effect=replace_root_during_check):
+                with self.assertRaisesRegex(bootstrap.BootstrapError,
+                                            "validated target changed before Git root"):
+                    bootstrap.git_project(self.root)
+            self.assertTrue(changed)
+            self.assertFalse((self.root / ".kagari").exists())
+            self.assertEqual("independent content", (self.root / "foreign.txt").read_text())
+        finally:
+            if changed:
+                shutil.rmtree(self.root)
+                relocated.rename(self.root)
+        self.assert_project_preserved()
+
+
+    def test_inherited_git_overrides_do_not_redirect_git_admin(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_scrub_git_env", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        foreign = Path(self.temp.name) / "unrelated-git"
+        foreign.mkdir()
+        call_git(foreign, "init", "-q")
+        overrides = {
+            "GIT_DIR": str(foreign / ".git"),
+            "GIT_WORK_TREE": str(self.root),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.worktree",
+            "GIT_CONFIG_VALUE_0": str(foreign),
+        }
+        with mock.patch.dict(os.environ, overrides):
+            observed_root, observed_git, _, _ = bootstrap.git_project(self.root)
+            self.assertEqual(self.root, observed_root)
+            self.assertEqual((self.root / ".git").resolve(), observed_git)
+            outcome = bootstrap.operate(self.root, PAYLOAD, "install")
+        self.assertEqual("INSTALLED", outcome["status"])
+        self.assertEqual("HEALTHY", self.invoke("doctor", source=None)[1]["status"])
+        self.assertFalse(list((foreign / ".git").glob("kagari-*")))
+        self.assert_project_preserved()
+
+    def test_uninstall_fd_open_failure_reclaims_empty_quarantine(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_quarantine_fd_failure", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        self.assertEqual("INSTALLED", self.invoke("install")[1]["status"])
+        receipt = json.loads((self.root / ".kagari" / "install.json").read_text())
+        normal_open = bootstrap.os.open
+        for target_name in ("root", "quarantine"):
+            with self.subTest(target_name=target_name):
+                def refuse_one_directory(path, flags, *args, **kwargs):
+                    name = Path(path).name
+                    if ((target_name == "root" and Path(path) == self.root) or
+                            (target_name == "quarantine" and
+                             name.startswith("kagari-uninstall-"))):
+                        raise OSError("injected fd opening failure")
+                    return normal_open(path, flags, *args, **kwargs)
+
+                with mock.patch.object(bootstrap.os, "open",
+                                       side_effect=refuse_one_directory):
+                    with self.assertRaisesRegex(OSError, "fd opening failure"):
+                        bootstrap.remove_owned(self.root, self.root / ".git", receipt)
+                self.assertFalse(list((self.root / ".git").glob("kagari-uninstall-*")))
+                self.assertEqual("HEALTHY", self.invoke("doctor", source=None)[1]["status"])
+        self.assert_project_preserved()
+
+
+    def test_doctor_rechecks_orphan_inside_writer_lock(self) -> None:
+        import importlib.util
+        from contextlib import contextmanager
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_doctor_lock", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        self.assertEqual("INSTALLED", self.invoke("install")[1]["status"])
+        original_lock = bootstrap.writer_lock
+
+        @contextmanager
+        def concurrent_uninstall(git_dir):
+            with original_lock(git_dir):
+                orphan = git_dir / "kagari-uninstall-doctor-race"
+                orphan.mkdir()
+                try:
+                    yield
+                finally:
+                    orphan.rmdir()
+
+        with mock.patch.object(bootstrap, "writer_lock", side_effect=concurrent_uninstall):
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "unresolved KAGARI uninstall"):
+                bootstrap.operate(self.root, None, "doctor")
+        self.assertEqual("HEALTHY", self.invoke("doctor", source=None)[1]["status"])
+        self.assert_project_preserved()
+
+    def test_ambiguous_signal_after_unlink_retains_quarantine(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_interrupt_gap", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        self.assertEqual("INSTALLED", self.invoke("install")[1]["status"])
+
+        def signal_after_unlink(private_root, _receipt, progress):
+            progress["attempted"] = True
+            (private_root / ".kagari" / "runtime" / "Justfile").unlink()
+            raise KeyboardInterrupt("interrupt between unlink and marker")
+
+        with mock.patch.object(bootstrap, "_remove_quarantined", side_effect=signal_after_unlink):
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "ambiguous uninstall interruption"):
+                bootstrap.operate(self.root, PAYLOAD, "uninstall")
+        self.assertFalse((self.root / ".kagari").exists())
+        self.assertEqual(1, len(list((self.root / ".git").glob("kagari-uninstall-*/.kagari/install.json"))))
+        self.assertEqual((2, "BLOCKED"), (
+            lambda x: (x[0], x[1]["status"])
+        )(self.invoke("doctor", source=None)))
+        self.assert_project_preserved()
+
+    def test_attempted_but_no_deletion_restores_intact_receipt(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_failed_unlink", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        self.assertEqual("INSTALLED", self.invoke("install")[1]["status"])
+
+        def refused_before_unlink(_private_root, _receipt, progress):
+            progress["attempted"] = True
+            raise OSError("unlink denied before mutation")
+
+        with mock.patch.object(bootstrap, "_remove_quarantined", side_effect=refused_before_unlink):
+            with self.assertRaisesRegex(OSError, "unlink denied before mutation"):
+                bootstrap.operate(self.root, PAYLOAD, "uninstall")
+        self.assertEqual("HEALTHY", self.invoke("doctor", source=None)[1]["status"])
+        self.assertFalse(list((self.root / ".git").glob("kagari-uninstall-*")))
+        self.assert_project_preserved()
+
+    def test_doctor_refuses_replaced_path_after_fd_observation(self) -> None:
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("kagari_doctor_rename", CLI)
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        self.assertEqual("INSTALLED", self.invoke("install")[1]["status"])
+        actual_state = bootstrap.inventory_state
+        relocated = Path(self.temp.name) / "original-during-doctor"
+        changed = False
+
+        def swap_after_snapshot(root, expected):
+            nonlocal changed
+            state = actual_state(root, expected)
+            if not changed:
+                self.root.rename(relocated)
+                self.root.mkdir()
+                changed = True
+            return state
+
+        try:
+            with mock.patch.object(bootstrap, "inventory_state", side_effect=swap_after_snapshot):
+                with self.assertRaisesRegex(bootstrap.BootstrapError,
+                                            "pathname changed during inspection"):
+                    bootstrap.operate(self.root, None, "doctor")
+        finally:
+            if changed:
+                self.root.rmdir()
+                relocated.rename(self.root)
+        self.assertEqual("HEALTHY", self.invoke("doctor", source=None)[1]["status"])
+        self.assert_project_preserved()
+
+
 if __name__ == "__main__":
     unittest.main()
