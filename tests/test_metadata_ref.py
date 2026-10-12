@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import selectors
 import subprocess
 import sys
 import tempfile
@@ -1109,6 +1110,96 @@ class MetadataRefTest(unittest.TestCase):
                 commit,
                 required_objects=(("contract", object_id, "82", subject),),
             )
+
+    def test_git_waits_for_child_without_selecting_on_empty_fds(self) -> None:
+        """A child may close stdout before exiting; no 150ms empty-selector polling."""
+        real_popen = subprocess.Popen
+        real_selector = selectors.DefaultSelector
+
+        class RejectEmptySelector:
+            def __init__(self) -> None:
+                self.delegate = real_selector()
+
+            def __getattr__(self, name: str):
+                return getattr(self.delegate, name)
+
+            def select(self, timeout: float | None = None):
+                if not self.delegate.get_map():
+                    raise AssertionError("empty selector must not be polled")
+                return self.delegate.select(timeout)
+
+        def stdout_closed_child(_command: list[str], **options: Any):
+            return real_popen(
+                [sys.executable, "-c",
+                 "import os,time; os.close(1); time.sleep(0.20)"],
+                **options,
+            )
+
+        with mock.patch.object(
+            metadata_ref_module.subprocess, "Popen", side_effect=stdout_closed_child
+        ), mock.patch.object(
+            metadata_ref_module.selectors, "DefaultSelector",
+            side_effect=RejectEmptySelector,
+        ):
+            self.assertEqual(b"", self.store._git(["stdout-closed-child"], timeout=1))
+
+    def test_git_empty_selector_timeout_still_kills_child(self) -> None:
+        """Prove EOF happened before the bounded wait expires and reaps child."""
+        real_popen = subprocess.Popen
+        real_selector = selectors.DefaultSelector
+        marker = self.temp_root / "child-closed-stdout"
+        launched: list[subprocess.Popen[bytes]] = []
+        empty_fds_seen: list[bool] = []
+
+        class TrackEmptySelector:
+            def __init__(self) -> None:
+                self.delegate = real_selector()
+
+            def __getattr__(self, name: str):
+                return getattr(self.delegate, name)
+
+            def get_map(self):
+                observed = self.delegate.get_map()
+                if not observed:
+                    empty_fds_seen.append(True)
+                return observed
+
+        def closed_stdout_hanging_child(_command: list[str], **options: Any):
+            # Popen returns *after* this child proves stdout is closed,
+            # before MetadataStore._git starts its 50ms command budget.
+            code = (
+                "import os,sys,time; "
+                "os.close(1); "
+                "open(sys.argv[1], 'w').close(); "
+                "time.sleep(5)"
+            )
+            process = real_popen(
+                [sys.executable, "-c", code, str(marker)],
+                **options,
+            )
+            launched.append(process)
+            handshake_deadline = time.monotonic() + 3.0
+            while not marker.is_file():
+                if time.monotonic() >= handshake_deadline or process.poll() is not None:
+                    process.kill()
+                    process.wait(timeout=1)
+                    self.fail("child did not prove stdout closed before deadline")
+                time.sleep(0.005)
+            self.assertIsNone(process.poll())
+            return process
+
+        with mock.patch.object(
+            metadata_ref_module.subprocess, "Popen",
+            side_effect=closed_stdout_hanging_child,
+        ), mock.patch.object(
+            metadata_ref_module.selectors, "DefaultSelector",
+            side_effect=TrackEmptySelector,
+        ):
+            with self.assertRaisesRegex(MetadataRefError, "runtime limit"):
+                self.store._git(["stdout-closed-hang"], timeout=0.05)
+        self.assertTrue(empty_fds_seen, "empty selector wait was not reached")
+        self.assertEqual(1, len(launched))
+        self.assertIsNotNone(launched[0].poll())
 
     def test_git_command_runtime_is_bounded(self) -> None:
         real_popen = subprocess.Popen
