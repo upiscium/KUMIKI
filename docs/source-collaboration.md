@@ -36,6 +36,7 @@ The canonical commands (shown with a placeholder for that absolute store path) a
 <trusted-bin>/templates-source --worktree <task-worktree> commit <issue> <scope-digest> "<message>"
 <trusted-bin>/templates-source --worktree <task-worktree> push <issue> <expected-head>
 <trusted-bin>/templates-source --worktree <task-worktree> pr-create <issue>
+<trusted-bin>/templates-source --worktree <task-worktree> pr-create <issue> --nonclosing
 <trusted-bin>/templates-source --worktree <task-worktree> checkpoint <issue> <pr> <expected-head> "<body>"
 ```
 
@@ -177,6 +178,28 @@ that branch. It scans **all** pages of repository PRs across open, closed and
 merged states, re-observes before creation and after a create attempt (including
 lost acknowledgements), and refuses an incompatible, Human-closed or ambiguous
 identity. It does not mark the PR Ready or merge it.
+
+PR Issue binding is explicit. The existing `Closes #N`, `Fixes #N` or
+`Resolves #N` line remains valid for work that should close the Issue on
+merge. A partial implementation of an umbrella Issue instead uses a visible
+`Refs #N` **opening paragraph**: it must be the first nonempty line of the
+PR body, on its own line, followed by a blank line if more content follows.
+This reference **does not close the Issue on merge**. A reference later in
+prose, a Markdown blockquote (including lazy continuations), code, an HTML
+comment or a mismatched Issue number does not qualify. The same binding check
+applies when adopting an existing exact Draft PR and when posting a checkpoint;
+it never waives same-repository, exact branch/HEAD/base, Draft, or closed-PR
+identity checks.
+
+Ordinary `pr-create <issue>` retains its backward-compatible `Closes #N`
+default. For a *new* partial-implementation Draft PR, choose
+`pr-create <issue> --nonclosing` to create it with `Refs #N` instead.
+An existing Draft PR is adopted only if its own body already has a valid
+closing or non-closing binding; the Guard does **not** rewrite a PR body to
+fabricate that binding. A previously installed Guard without this contract
+must be independently replaced through reviewed host authority activation
+before the new form is relied upon; publishing this source change alone
+does not activate it.
 
 ## Checkpoints
 
