@@ -1429,9 +1429,19 @@ class MetadataStore:
                     timed_out = True
                     terminate_process_group()
                     break
+                # After the final stdout EOF/stdin close there are no
+                # descriptors left to monitor. Selector.select on an empty
+                # selector followed by another sleep can cost ~150ms per Git
+                # invocation even when the child exits immediately. Await the
+                # process itself, under the same mandatory deadline instead.
+                if not selector.get_map():
+                    try:
+                        process.wait(timeout=remaining)
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                        terminate_process_group()
+                    break
                 events = selector.select(min(remaining, 0.1))
-                if not events and not selector.get_map():
-                    time.sleep(min(remaining, 0.05))
                 for key, _mask in events:
                     if key.data == "stdin":
                         assert process.stdin is not None and input_data is not None
