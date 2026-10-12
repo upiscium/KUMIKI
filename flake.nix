@@ -41,6 +41,18 @@
             chmod 755 "$out/lib/templates-source/source_collaboration.py"
             chmod 755 "$out/bin/templates-source"
           '';
+          # This is only a distributable host-owned locator candidate. Building
+          # it from a Task checkout must never imply activating it as authority.
+          # Hosts must install it from an independently approved full revision.
+          packages.source-authority-locator = pkgs.runCommand "kumiki-source-authority-locator" {
+            meta.mainProgram = "kumiki-source";
+          } ''
+            mkdir -p "$out/bin"
+            substitute ${./tools/source_authority_locator.py} "$out/bin/kumiki-source" \
+              --replace-fail '@HOST_DESCRIPTOR_PATH@' '/etc/kumiki/source-authority.json' \
+              --replace-fail '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3 -I'
+            chmod 0555 "$out/bin/kumiki-source"
+          '';
         })
     // {
     templates = {
