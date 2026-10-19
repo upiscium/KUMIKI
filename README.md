@@ -6,6 +6,13 @@ Nix flake templates for reproducible, Agent-ready development environments.
 
 Architecture decisions for KUMIKI / KAGARI are indexed in [docs/adr/README.md](docs/adr/README.md). The ADRs distinguish accepted design goals from the currently deployed Agent Core v3 and staged v4 implementation.
 
+> **Next intended release: KAGARI / KUMIKI 0.1.0 (NOT RELEASED).** Internal v4
+> is an architecture generation, not public SemVer. Further resilience
+> expansion is frozen for this minimal delivery. Review [tracker #271](https://github.com/upiscium/Templates/issues/271)
+> and [ADR-0005](docs/adr/0005-v010-delivery-and-resilience-freeze.md).
+> Current candidate is TEST_ONLY / UNRELEASED; no production authorization.
+> See [v0.1.0 Known Limitations](docs/kagari-v010-known-limitations.md), including the accepted post-v0.1.0 Export write-time disk-bound deferral ([#276](https://github.com/upiscium/Templates/issues/276)).
+
 The repository root `flake.nix` is the development-environment source of truth. Its default devShell provides the repository tools required for normal Templates work, including `just`, `python3`, `git`, and `gh`.
 
 With `direnv` and `nix-direnv` installed on the host, approve the repository once:
@@ -784,3 +791,9 @@ just template::distribution-verify
 ## OpenCode hierarchy
 
 The default Main agent orchestrates Tasks; Task Orchestrators own one Task; leaf agents perform bounded work and cannot re-delegate. Configured role model and effort assignments are fixed and fail closed when unavailable. Depth-2 Ask behavior has a separate reproducible manual smoke procedure under `docs/opencode-depth2-ask-smoke.md` and is not represented as PASS until executed.
+
+For the staged, **unreleased** 0.1.0-rc.1 consumer Work Unit profile, see
+[RC installation and Task limitations](docs/kagari-v010-rc.md). The RC entrypoint
+attaches externally and executes Product Tasks only in independently generated
+Work Unit Clones after exact per-run Human approval; it does not operate directly
+on the source Project, Push, or claim production release readiness.

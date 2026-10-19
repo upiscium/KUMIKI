@@ -23,6 +23,26 @@ jobs:
           fetch-depth: 0
       - name: Verify complete contract inventory
         run: python3 tools/ci_contract_runner.py verify
+      # Discover canonical package-test assignment; it changes as tests grow.
+      # Do not assume that native/composed/smoke stay in shards 5, 6, 7.
+      - name: Discover exact KAGARI CI package requirements
+        id: kagari_pkg_needs
+        shell: bash
+        env:
+          KAGARI_CI_SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          python3 tools/kagari_v010_ci_packages.py             --shard "$KAGARI_CI_SHARD" --requirements-only >> "$GITHUB_OUTPUT"
+      - uses: cachix/install-nix-action@v31
+        if: ${{ steps.kagari_pkg_needs.outputs.needs_nix == 'true' }}
+      - name: Build and verify required KAGARI Nix outputs
+        if: ${{ steps.kagari_pkg_needs.outputs.needs_nix == 'true' }}
+        shell: bash
+        env:
+          KAGARI_CI_SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          python3 tools/kagari_v010_ci_packages.py --shard "$KAGARI_CI_SHARD" >> "$GITHUB_ENV"
       - name: Python contract tests
         run: >-
           python3 tools/ci_contract_runner.py run
