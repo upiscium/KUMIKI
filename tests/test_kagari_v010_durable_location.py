@@ -62,7 +62,11 @@ class DurableLocationTests(unittest.TestCase):
     def test_project_identity_follows_physical_directory_not_head(self):
         first=d.plan(self.project,self.state)
         # Reset cached staged data only within a disposable Git fixture.
-        self.git("commit","-qm","unrelated Product update")
+        # GitHub Actions contracts jobs do not provision a global author;
+        # this disposable fixture must specify its own exact local identity.
+        self.git("-c","user.name=Fixture","-c",
+                 "user.email=fixture@example.invalid",
+                 "commit","-qm","unrelated Product update")
         changed=d.plan(self.project,self.state)
         self.assertEqual(changed["runtime_root"],first["runtime_root"])
         self.assertNotEqual(changed["project"]["head"],first["project"]["head"])

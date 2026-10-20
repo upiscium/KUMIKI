@@ -239,7 +239,9 @@ class RCPrewarmTests(unittest.TestCase):
 
     def test_symlinked_git_metadata_and_aliases_refused(self):
         _,project,jobdir=self.fixture()
-        replacement=jobdir/"gitdata"
+        # Keep the .git alias payload on the same filesystem as the
+        # disposable Git Project. CI TMPDIR may be a different mount.
+        replacement=project.parent/"gitdata"
         (project/".git").rename(replacement)
         (project/".git").symlink_to(replacement,target_is_directory=True)
         with self.assertRaisesRegex(bootstrap.BootstrapBlocked,"independent real Git"):

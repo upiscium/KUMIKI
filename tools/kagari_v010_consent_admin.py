@@ -105,7 +105,12 @@ def roots(project: Path, runtime: Path) -> tuple[Path, Path]:
         raise AdminBlocked(str(exc)) from exc
     root_dir(runtime, name="runtime")
     parent = root_dir(runtime.parent)
-    need(parent.parent == Path(tempfile.gettempdir()).resolve()
+    # The RC lifecycle deliberately creates its disposable Native runtime
+    # under /tmp, whereas GitHub Actions sets TMPDIR to runner/_temp.
+    # Accept either explicit RC /tmp or Python's configured temporary root,
+    # while retaining the private owner, 0700, prefix and disjointness gates.
+    allowed_tmp_roots = {Path("/tmp").resolve(), Path(tempfile.gettempdir()).resolve()}
+    need(parent.parent in allowed_tmp_roots
          and parent.name.startswith("kagari-v010-consent-install-"),
          "Admin runtime must reside in separate disposable private directory")
     need(not project.is_relative_to(parent) and not parent.is_relative_to(project),

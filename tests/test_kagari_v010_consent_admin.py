@@ -80,6 +80,24 @@ class ConsentAdminTests(unittest.TestCase):
             "flake": (self.project / "flake.nix").read_bytes(),
         }
 
+    def test_runtime_under_tmp_is_valid_with_distinct_runner_tmpdir(self):
+        # GitHub Actions TMPDIR is runner/_temp, but RC creates Native
+        # Work Unit runtime explicitly under /tmp. Keep isolation enforced.
+        with tempfile.TemporaryDirectory(
+                prefix="kagari-v010-consent-install-", dir="/tmp") as tmp:
+            runtime = Path(tmp) / "runtime"
+            runtime.mkdir(mode=0o700)
+            with mock.patch.object(admin.tempfile, "gettempdir",
+                                   return_value=str(self.pbase)):
+                self.assertEqual(admin.roots(self.project, runtime),
+                                 (self.project, runtime))
+                invalid = self.pbase / "unapproved-admin-root"
+                invalid.mkdir(mode=0o700)
+                nested = invalid / "runtime"
+                nested.mkdir(mode=0o700)
+                with self.assertRaises(admin.AdminBlocked):
+                    admin.roots(self.project, nested)
+
     def installed(self):
         return admin.install(self.project, self.runtime,
                              self.package, self.identity)
