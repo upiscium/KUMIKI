@@ -23,7 +23,8 @@
               gh
             ];
           };
-          packages.source-collaboration = pkgs.runCommand "templates-source-collaboration" {
+          packages = {
+            source-collaboration = pkgs.runCommand "templates-source-collaboration" {
             meta.mainProgram = "templates-source";
           } ''
             mkdir -p "$out/bin" "$out/lib/templates-source"
@@ -44,7 +45,7 @@
           # This is only a distributable host-owned locator candidate. Building
           # it from a Task checkout must never imply activating it as authority.
           # Hosts must install it from an independently approved full revision.
-          packages.source-authority-locator = pkgs.runCommand "kumiki-source-authority-locator" {
+            source-authority-locator = pkgs.runCommand "kumiki-source-authority-locator" {
             meta.mainProgram = "kumiki-source";
           } ''
             mkdir -p "$out/bin"
@@ -53,6 +54,10 @@
               --replace-fail '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3 -I'
             chmod 0555 "$out/bin/kumiki-source"
           '';
+          } // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            # Limited RC profile only on Linux. Building is not publication.
+            kagari-rc = import ./nix/kagari-v010-rc-candidate.nix { inherit pkgs; };
+          };
         })
     // {
     templates = {

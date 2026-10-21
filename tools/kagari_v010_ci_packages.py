@@ -41,7 +41,7 @@ PACKAGES = {
                  "kagari-0.1.0-composed-unreleased-candidate"),
     "rc": ("kagari-v010-rc-candidate.nix",
            "KAGARI_V010_RC_PACKAGE",
-           "kagari-0.1.0-rc.1-unreleased"),
+           "kagari-0.1.0-rc.1"),
 }
 SHARD_RANGE = range(8)
 
@@ -245,13 +245,15 @@ def verify_package(root: Path, package: str, path: Path) -> None:
                 "composed Native dependency receipt SHA mismatch")
     elif package == "rc":
         data = receipt(path/"share/kagari-v010-rc/receipt.json")
-        require(data.get("qualification")=="RC_CANDIDATE_UNRELEASED"
+        require(data.get("qualification")=="RC_RESTRICTED_PROFILE"
                 and data.get("version")=="0.1.0-rc.1"
                 and data.get("root")==str(path)
                 and data.get("source_baseline_revision")==BASE_REV
-                and data.get("released") is False
+                and data.get("publication_attestation")=="EXTERNAL_UNVERIFIED"
+                and data.get("release_channel")=="prerelease"
+                and "released" not in data
+                and "source_publication_approved" not in data
                 and data.get("production_activation") is False
-                and data.get("source_publication_approved") is False
                 and data.get("managed_isolated_Work_Unit_supported") is True
                 and data.get("direct_live_Project_Task_supported") is False,
                 "RC receipt cannot claim release or direct in-place Project authority")

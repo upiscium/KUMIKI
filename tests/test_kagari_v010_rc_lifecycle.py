@@ -99,14 +99,19 @@ class ReleaseCandidateLifecycleTests(unittest.TestCase):
         for name,before in self.before.items():
             self.assertEqual((self.project/name).read_bytes(),before)
 
-    def test_immutable_rc_identity_does_not_claim_GA(self):
+    def test_immutable_rc_identity_separates_external_release_and_runtime(self):
         p=subprocess.run([str(self.cli),"version"],capture_output=True,text=True)
         self.assertEqual(p.returncode,0,p.stderr)
         d=json.loads(p.stdout)
         self.assertEqual(d["version"],"0.1.0-rc.1")
         self.assertEqual(d["profile"],"RC_MANAGED_ISOLATED_WORKUNIT")
-        self.assertFalse(d["released"])
-        self.assertEqual(self.receipt["qualification"],"RC_CANDIDATE_UNRELEASED")
+        self.assertEqual(d["qualification"],"RC_RESTRICTED_PROFILE")
+        self.assertEqual(d["publication_attestation"],"EXTERNAL_UNVERIFIED")
+        self.assertEqual(d["release_channel"],"prerelease")
+        self.assertIs(d["production_activation"],False)
+        self.assertNotIn("released",d)
+        self.assertEqual(self.receipt["qualification"],"RC_RESTRICTED_PROFILE")
+        self.assertNotIn("released",self.receipt)
         self.assertFalse(self.receipt["direct_live_Project_Task_supported"])
         self.assertIs(self.receipt["managed_isolated_Work_Unit_supported"],True)
         self.assertEqual(self.receipt["cli_sha256"],hashlib.sha256(

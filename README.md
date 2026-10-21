@@ -10,8 +10,13 @@ Architecture decisions for KUMIKI / KAGARI are indexed in [docs/adr/README.md](d
 > is an architecture generation, not public SemVer. Further resilience
 > expansion is frozen for this minimal delivery. Review [tracker #271](https://github.com/upiscium/Templates/issues/271)
 > and [ADR-0005](docs/adr/0005-v010-delivery-and-resilience-freeze.md).
-> Current candidate is TEST_ONLY / UNRELEASED; no production authorization.
-> See [v0.1.0 Known Limitations](docs/kagari-v010-known-limitations.md), including the accepted post-v0.1.0 Export write-time disk-bound deferral ([#276](https://github.com/upiscium/Templates/issues/276)).
+> The proposed 0.1.0-rc.1 profile is restricted: Native internals remain
+> `TEST_ONLY_UNQUALIFIED`, and public Release status must be checked separately.
+> This source exports a candidate package at `#kagari-rc` for an explicitly
+> pinned Linux/Nix revision; a successful build does not authorize Release or
+> production activation. Read the [RC install/Task guide](docs/kagari-v010-rc.md)
+> and [Known Limitations](docs/kagari-v010-known-limitations.md), including the
+> accepted post-v0.1.0 Export write-time disk-bound deferral ([#276](https://github.com/upiscium/Templates/issues/276)).
 
 The repository root `flake.nix` is the development-environment source of truth. Its default devShell provides the repository tools required for normal Templates work, including `just`, `python3`, `git`, and `gh`.
 
