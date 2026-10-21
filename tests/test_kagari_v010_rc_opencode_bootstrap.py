@@ -348,15 +348,16 @@ class RCPrewarmTests(unittest.TestCase):
         self.assertTrue(self.receipt["opencode_dependencies_bootstrapped_before_Native_snapshot"])
         self.assertIs(self.receipt["native_Project_scope_inventory_relaxed"],False)
 
-    def test_rc_user_version_remains_unreleased_and_native_test_only(self):
+    def test_rc_user_version_never_asserts_external_publication(self):
         proc=subprocess.run([str(self.package/"bin/kagari-v010-rc"),"version"],
                             capture_output=True,text=True,timeout=20)
         self.assertEqual(proc.returncode,0,proc.stderr)
         result=json.loads(proc.stdout)
-        self.assertEqual(result["qualification"],"RC_CANDIDATE_UNRELEASED")
+        self.assertEqual(result["qualification"],"RC_RESTRICTED_PROFILE")
         self.assertEqual(result["native_component_qualification"],
                          "TEST_ONLY_UNQUALIFIED")
-        self.assertIs(result["released"],False)
+        self.assertEqual(result["publication_attestation"],"EXTERNAL_UNVERIFIED")
+        self.assertNotIn("released",result)
         self.assertIs(self.receipt["production_activation"],False)
 
 

@@ -1,6 +1,6 @@
 # KAGARI 0.1.0-rc.1 — managed Work Unit RC candidate
 
-**Status:** `RC_CANDIDATE_UNRELEASED`. This is an **unpublished RC build**, not an approved production release. The user-facing operations below do not require `--test-only`, but its immutable Native Task engine remains internally marked `TEST_ONLY_UNQUALIFIED` pending final qualification. An RC installation does not grant model access or authorize GitHub Push, merge or integration into the source Project.
+**Build identity:** `RC_RESTRICTED_PROFILE`, `release_channel=prerelease`, `publication_attestation=EXTERNAL_UNVERIFIED`, `production_activation=false`. These immutable fields describe a restricted RC package, **not** whether a GitHub tag or Release exists. Actual publication must be verified separately against an explicitly approved GitHub prerelease and exact source/package receipts. The inner Native engine deliberately retains `TEST_ONLY_UNQUALIFIED`; a published RC is still not GA or permission for production activation. RC installation never grants model access, GitHub Push/Merge, or integration into the source Project.
 
 ## Supported first RC profile
 
@@ -10,10 +10,13 @@ An existing, euid-owned ordinary Git repository (a real `.git` directory) on Lin
 
 ## Install/diagnose/repair/uninstall
 
-Use an independently built exact Nix Store path with an RC receipt reviewed for the intended source revision. The following is a layout example; substitute your independently verified output and existing Project:
+Use an independently built exact Nix Store path with an RC receipt reviewed for the intended source revision. The root flake exports only `#kagari-rc` for this limited profile. A build does **not** create a GitHub Release or authorize production installation. After verifying the intended exact commit/tag against the separately authorized release record, the Nix command is:
 
 ```bash
-RC="/nix/store/EXACT_RC_OUTPUT/bin/kagari-v010-rc"
+# Substitute an actual, verified immutable source commit or approved Release tag.
+SOURCE="github:upiscium/Templates/<APPROVED_EXACT_REF>"
+RC_OUT="$(nix build --no-link --print-out-paths "${SOURCE}#kagari-rc")"
+RC="$RC_OUT/bin/kagari-v010-rc"
 PROJECT="/absolute/path/to/existing-git-repository"
 STATE="$HOME/.local/state"      # existing canonical directory, owned by you
 
@@ -60,7 +63,7 @@ Uninstall detaches only verified KAGARI owner records and retires pending/approv
 
 ## Known limitations and release gates
 
-- RC candidate status is `UNRELEASED` until independent full exact-source correctness/security review, real-model RC-specific approval/Task acceptance, CI and explicit Human Source Publication, Merge and Release gates pass. Its operational path has not yet been published or validated as a public release.
+- `RC_RESTRICTED_PROFILE` is an immutable support-profile identifier, not a published/unpublished bit or proof of release qualification. `publication_attestation=EXTERNAL_UNVERIFIED` remains true even after public release because the executable does not itself authenticate GitHub metadata. Release existence, exact tag/commit, immutable artifact digest and Human release approval require external evidence. The current source/CI/MUSUBI evidence applies to an earlier immutable package; any changed RC package and Task identity require fresh reviewed scope and exact per-job Human approvals before claiming model-backed acceptance.
 - Initial managed Work Units run from independently generated temporary full-history Clones; they have no Git remotes and do not support automatic Product integration into the original Project.
 - Underlying Native Task internal component is `TEST_ONLY_UNQUALIFIED`, although the user-facing RC adapter is named and scoped independently. Production Task qualification requires a fresh positive RC real-model test and separately approved source.
 - Local foreground TTY Human Ask is **not** cryptographic remote user-identity attestation. Model provider identity is also host-observed, not independently cryptographically attested.

@@ -31,7 +31,7 @@ PREFIX = "attach-"
 RECEIPT = "share/kagari-v010-rc/receipt.json"
 SRC_FILE = "libexec/kagari-v010-rc/kagari_v010_rc_lifecycle.py"
 NATIVE_MAIN = "libexec/kagari-v010-native-generic/tools/kagari_v010_native_generic_task.py"
-STORE_NAME = re.compile(r"[0-9a-df-np-sv-z]{32}-kagari-0\.1\.0-rc\.1-unreleased\Z")
+STORE_NAME = re.compile(r"[0-9a-df-np-sv-z]{32}-kagari-0\.1\.0-rc\.1\Z")
 PROJECT_ID = re.compile(r"attach-[0-9a-f]{24}\Z")
 JOB_ID = re.compile(r"job-[0-9a-f]{24}\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -154,9 +154,9 @@ def verify_package(rc: Path) -> tuple[dict,Path,Path,object,object,object]:
          "RC CLI cannot execute outside the selected immutable package")
     receipt=load(rc/RECEIPT,exact_mode=0o444)
     for key,value in {
-        "version":VERSION,"qualification":"RC_CANDIDATE_UNRELEASED",
-        "released":False,"production_activation":False,
-        "source_publication_approved":False,
+        "version":VERSION,"qualification":"RC_RESTRICTED_PROFILE",
+        "publication_attestation":"EXTERNAL_UNVERIFIED","production_activation":False,
+        "release_channel":"prerelease",
         "managed_isolated_Work_Unit_supported":True,
         "direct_live_Project_Task_supported":False,
         "root":str(rc)
@@ -306,8 +306,8 @@ def namespace_install(namespace:Path,attachment:Path) -> None:
 def installed_view(state:str,project:Path,namespace:Path,attachment:Path,
                    rc:Path,stored:dict|None)->dict:
     return {
-        "status":state,"version":VERSION,"qualification":"RC_CANDIDATE_UNRELEASED",
-        "supported_profile":PROFILE,"released":False,
+        "status":state,"version":VERSION,"qualification":"RC_RESTRICTED_PROFILE",
+        "supported_profile":PROFILE,"publication_attestation":"EXTERNAL_UNVERIFIED",
         "production_activation":False,"direct_Project_edits_allowed":False,
         "Task_mode":"isolated_independent_Git_Work_Unit_only",
         "Project_root":str(project),
@@ -477,7 +477,7 @@ def prepare_task(rc:Path,composed:Path,native:Path,admin:object,
     save_new(job/"job.json",canonical(planned))
     return {
         "status":"RC_WORKUNIT_AWAITING_EXACT_HUMAN_APPROVAL",
-        "qualification":"RC_CANDIDATE_UNRELEASED",
+        "qualification":"RC_RESTRICTED_PROFILE",
         "job_id":jobid,
         "rc_task_request_id":request["request_id"],
         "Project_root":str(project),
@@ -734,7 +734,7 @@ def execute_workunit(jobdir:Path,record:dict,request:dict,
     doc={
        "schema_version":1,"kind":"KAGARI_RC_MANAGED_WORKUNIT_TASK_RESULT",
        "status":"RC_MANAGED_WORKUNIT_TASK_PASS" if success else "BLOCKED",
-       "qualification":"RC_CANDIDATE_UNRELEASED",
+       "qualification":"RC_RESTRICTED_PROFILE",
        "job_id":jobdir.name,
        "original_Project_root":str(project),
        "original_Project_HEAD_unchanged":True,
@@ -749,7 +749,7 @@ def execute_workunit(jobdir:Path,record:dict,request:dict,
            jobdir/"bootstrap-receipt.json",exact_mode=0o600)),
        "Native_Project_strict_scope_guard_retained":True,
        "source_remote_push":False,
-       "released":False,"recorded_at":now()
+       "publication_attestation":"EXTERNAL_UNVERIFIED","recorded_at":now()
     }
     save_new(jobdir/"result.json",canonical(doc))
     return doc
@@ -769,8 +769,9 @@ def revoke_job_if_installed(jobdir:Path,record:dict,native:Path,
 def operate(args,rc:Path,receipt:dict,native:Path,location:object,
             admin:object,task_spec:object)->dict:
     if args.operation=="version":
-        return {"version":VERSION,"qualification":"RC_CANDIDATE_UNRELEASED",
-                "profile":PROFILE,"released":False,
+        return {"version":VERSION,"qualification":"RC_RESTRICTED_PROFILE",
+                "profile":PROFILE,"publication_attestation":"EXTERNAL_UNVERIFIED",
+                "production_activation":False,"release_channel":"prerelease",
                 "native_component_qualification":"TEST_ONLY_UNQUALIFIED"}
     need(args.project_root is not None,"explicit --project-root required")
     project=Path(args.project_root)
@@ -841,13 +842,13 @@ def operate(args,rc:Path,receipt:dict,native:Path,location:object,
         attachment.rmdir()
         state,_=attachment_state(attachment,expected)
         need(state=="ABSENT","RC Uninstall owner detach incomplete")
-        return {"status":"ABSENT","qualification":"RC_CANDIDATE_UNRELEASED",
+        return {"status":"ABSENT","qualification":"RC_RESTRICTED_PROFILE",
                 "Project_mutations":[],
                 "retired_native_asks":revoked,
                 "historical_jobs_preserved":preserved_history,
                 "task_history_retained":True,
                 "source_remote_push":False,
-                "released":False}
+                "publication_attestation":"EXTERNAL_UNVERIFIED"}
     need(args.job_id is not None,"explicit --job-id required for Task actions")
     jobdir=job_folder(namespace,args.job_id)
     job,request=verify_job(jobdir,rc,installed,project,ident,receipt)
@@ -900,8 +901,8 @@ def main(argv:list[str]|None=None) -> int:
         return 0 if view.get("status")!="BLOCKED" else 2
     except (RCBlocked,OSError,ValueError,KeyError,TypeError,
             subprocess.SubprocessError) as exc:
-        print(json.dumps({"status":"BLOCKED","qualification":"RC_CANDIDATE_UNRELEASED",
-                          "reason":str(exc)[:600],"released":False},
+        print(json.dumps({"status":"BLOCKED","qualification":"RC_RESTRICTED_PROFILE",
+                          "reason":str(exc)[:600],"publication_attestation":"EXTERNAL_UNVERIFIED"},
                          sort_keys=True,ensure_ascii=False))
         return 2
 

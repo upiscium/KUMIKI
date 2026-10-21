@@ -138,8 +138,10 @@ class CIPackageSetupTests(unittest.TestCase):
         data=p.receipt(path/"share/kagari-v010-rc/receipt.json")
         self.assertEqual(data["cli_sha256"],
                          p.sha(ROOT/"tools/kagari_v010_rc_lifecycle.py"))
-        self.assertEqual(data["qualification"],"RC_CANDIDATE_UNRELEASED")
-        self.assertFalse(data["released"])
+        self.assertEqual(data["qualification"],"RC_RESTRICTED_PROFILE")
+        self.assertEqual(data["publication_attestation"],"EXTERNAL_UNVERIFIED")
+        self.assertEqual(data["release_channel"],"prerelease")
+        self.assertNotIn("released",data)
         self.assertFalse(data["direct_live_Project_Task_supported"])
 
     def test_Nix_failure_and_invalid_build_output_never_return_package_env(self):

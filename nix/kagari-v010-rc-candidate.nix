@@ -1,6 +1,6 @@
 # KAGARI 0.1.0-rc.1 — isolated Work Unit RC candidate.
-# Not a release: source publication, CI, Human Release and production activation
-# remain distinct gates. The existing native engine retains its tested internal
+# Public release occurrence is externally attested, not embedded in build bytes.
+# Human Release and production activation remain distinct gates. The existing native engine retains its tested internal
 # TEST_ONLY qualification while the RC adapter adds non-disposable consumer
 # attachment, immutable Task-specific consent and isolated Work Unit execution.
 { pkgs }:
@@ -13,12 +13,12 @@ let
   bun = pkgs.bun;
 in
 assert pkgs.stdenv.hostPlatform.isLinux;
-pkgs.runCommand "kagari-0.1.0-rc.1-unreleased" {
+pkgs.runCommand "kagari-0.1.0-rc.1" {
   nativeBuildInputs = [ pkgs.python3 pkgs.coreutils ];
   passthru = {
     version = "0.1.0-rc.1";
-    qualification = "RC_CANDIDATE_UNRELEASED";
-    released = false;
+    qualification = "RC_RESTRICTED_PROFILE";
+    publicationAttestation = "EXTERNAL_UNVERIFIED";
     productionActivation = false;
     consumerAttachedOutsideProject = true;
     isolatedWorkUnitTaskProfile = true;
@@ -60,7 +60,7 @@ pkgs.runCommand "kagari-0.1.0-rc.1-unreleased" {
   data={
     "schema_version":1,
     "version":"0.1.0-rc.1",
-    "qualification":"RC_CANDIDATE_UNRELEASED",
+    "qualification":"RC_RESTRICTED_PROFILE",
     "root":str(root),
     "cli_sha256":h(script),
     "opencode_bootstrap_sha256":h(prewarm),
@@ -78,9 +78,9 @@ pkgs.runCommand "kagari-0.1.0-rc.1-unreleased" {
     "native_planner_sha256":nref["tool_sha256"]["kagari_v010_auto_planning.py"],
     "native_generic_task_sha256":nref["tool_sha256"]["kagari_v010_native_generic_task.py"],
     "source_baseline_revision":nref["baseline_source_revision"],
-    "released":False,
+    "release_channel":"prerelease",
+    "publication_attestation":"EXTERNAL_UNVERIFIED",
     "production_activation":False,
-    "source_publication_approved":False,
     "managed_isolated_Work_Unit_supported":True,
     "direct_live_Project_Task_supported":False,
     "native_component_qualification":"TEST_ONLY_UNQUALIFIED",

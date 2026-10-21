@@ -1,7 +1,6 @@
 # KAGARI / KUMIKI 0.1.0 — Known Limitations
 
-**Target version:** 0.1.0. **Current candidate status:** UNRELEASED / NOT PRODUCTION QUALIFIED.
-This is disclosure of the proposed release scope, not a claim that 0.1.0 has shipped.
+**Target version:** 0.1.0; first prerelease profile: 0.1.0-rc.1. **Build qualification:** `RC_RESTRICTED_PROFILE`, `publication_attestation=EXTERNAL_UNVERIFIED`, `production_activation=false`. This does not assert whether a tag/Release exists, nor that a production/GA version has shipped. External GitHub Release evidence and a distinct Human Release approval are required.
 
 ## OpenCode Session Export output size (accepted for v0.1.0)
 
@@ -33,8 +32,9 @@ reintroducing the historic PIPE truncation.
 
 ## Other restrictions (NOT waived by Issue #276)
 
-- The current Nix package is a TEST_ONLY / UNRELEASED candidate, **not** a
-  qualified production installer or public release.
+- The RC wrapper is a restricted prerelease profile, **not** a qualified
+  production installer or automatic evidence of a public release; its inner
+  Native Task implementation retains `TEST_ONLY_UNQUALIFIED`.
 - Native Planning and child session provenance are host-observed; independent
   cryptographic model/provider attestation is not established.
 - Local interactive TTY approval is not proof of remote cryptographically
