@@ -17,8 +17,10 @@ import sys
 from typing import Any
 
 
-CANONICAL_REPO = "upiscium/Templates"
-CANONICAL_GIT_URL = "https://github.com/upiscium/Templates.git"
+CANONICAL_REPO = "upiscium/KUMIKI"
+# Exact historical v1 Issue #117 receipt identity; never a live origin alias.
+LEGACY_ISSUE_117_REPO = "upiscium/Templates"
+CANONICAL_GIT_URL = "https://github.com/upiscium/KUMIKI.git"
 CANONICAL_WORKFLOW_PATH = ".github/workflows/template-ci.yml"
 DOWNSTREAM_REPO = "upiscium/AgentKnowledgeVault"
 DEFAULT_BRANCH = "main"
@@ -45,7 +47,7 @@ PR_RE = re.compile(r"[1-9][0-9]{0,8}")
 OPERATION_RE = re.compile(r"[a-z][a-z0-9._-]{0,63}")
 VERSION_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?")
 CANONICAL_REMOTE_RE = re.compile(
-    r"https://github\.com/upiscium/Templates(?:\.git)?",
+    r"https://github\.com/upiscium/KUMIKI(?:\.git)?",
     re.IGNORECASE,
 )
 UNSAFE_LOCAL_CONFIG_RE = re.compile(
@@ -533,7 +535,8 @@ def release_ready_check(root: Path, number: str) -> dict[str, Any]:
     matching = [
         (record, digest)
         for record, digest in records
-        if record["pr"] == checked["pr"]
+        if record["repo"] == CANONICAL_REPO
+        and record["pr"] == checked["pr"]
         and record["head"] == checked["head"]
         and record["tree"] == checked["tree"]
     ]
@@ -764,7 +767,19 @@ def validate_evidence_payload(value: Any) -> dict[str, Any]:
         raise GateError("evidence record has an unexpected schema")
     if value["schema"] != "agent-core-release-gate" or version not in {1, 2}:
         raise GateError("evidence schema version is unsupported")
-    if value["repo"] != CANONICAL_REPO or value["downstreamRepo"] != DOWNSTREAM_REPO:
+    repo = value["repo"]
+    historical_issue_117 = (
+        version == 1
+        and repo == LEGACY_ISSUE_117_REPO
+        and value["pr"] == ISSUE_117_COMPATIBILITY["pr"]
+        and value["head"] == ISSUE_117_COMPATIBILITY["head"]
+        and value["tree"] == ISSUE_117_COMPATIBILITY["tree"]
+    )
+    # Previously recorded v2 evidence may coexist with new v2 receipts after
+    # GitHub renaming. The OLD literal is readable only as historical data:
+    # release_ready_check/post_merge_gate never promote it to current authority.
+    historical_v2 = version == 2 and repo == LEGACY_ISSUE_117_REPO
+    if (repo != CANONICAL_REPO and not historical_issue_117 and not historical_v2) or value["downstreamRepo"] != DOWNSTREAM_REPO:
         raise GateError("evidence repository binding is invalid")
     if isinstance(value["pr"], bool) or not isinstance(value["pr"], int) or value["pr"] <= 0:
         raise GateError("evidence pull request is invalid")
@@ -891,7 +906,8 @@ def record_evidence(
     same_subject = [
         item
         for item in existing
-        if item["pr"] == checked["pr"]
+        if item["repo"] == CANONICAL_REPO
+        and item["pr"] == checked["pr"]
         and item["head"] == checked["head"]
         and item["tree"] == checked["tree"]
     ]
@@ -1023,6 +1039,7 @@ def evidence_matches_issue_117(
 ) -> bool:
     return (
         evidence["version"] == 1
+        and evidence["repo"] == LEGACY_ISSUE_117_REPO
         and pr == ISSUE_117_COMPATIBILITY["pr"]
         and head == ISSUE_117_COMPATIBILITY["head"]
         and tree == ISSUE_117_COMPATIBILITY["tree"]
@@ -1101,7 +1118,9 @@ def post_merge_gate(
     matching = [
         (item, digest)
         for item, digest in records
-        if item["pr"] == int(number)
+        if (item["repo"] == CANONICAL_REPO or
+            (item["version"] == 1 and item["repo"] == LEGACY_ISSUE_117_REPO))
+        and item["pr"] == int(number)
         and item["head"] == dogfood_head
         and item["tree"] == dogfood_tree
     ]

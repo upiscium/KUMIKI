@@ -42,7 +42,7 @@ class SourceCollaborationTest(unittest.TestCase):
         git(self.root, "add", ".")
         git(self.root, "commit", "-qm", "base")
         git(self.root, "branch", "-M", "main")
-        git(self.root, "remote", "add", "origin", "git@github.com:upiscium/Templates.git")
+        git(self.root, "remote", "add", "origin", "git@github.com:upiscium/KUMIKI.git")
         git(self.root, "update-ref", "refs/remotes/origin/main", "HEAD")
         self.approved_base = git(self.root, "rev-parse", "HEAD")
         git_path = Path(shutil.which("git") or "missing-git").resolve()
@@ -67,7 +67,7 @@ class SourceCollaborationTest(unittest.TestCase):
 
     def pr(self, **changes):
         record = {
-            "id": 700, "number": 7, "html_url": "https://github.com/upiscium/Templates/pull/7",
+            "id": 700, "number": 7, "html_url": "https://github.com/upiscium/KUMIKI/pull/7",
             "state": "open", "draft": True, "body": "Closes #215",
             "head": {"ref": "feat/215-source-collaboration",
                      "sha": git(self.root, "rev-parse", "HEAD"),
@@ -88,7 +88,7 @@ class SourceCollaborationTest(unittest.TestCase):
     def comment(self, number: int, body: str, *, principal: int = 42,
                 issue_url: str | None = None) -> dict:
         return {"id": number, "body": body, "user": {"id": principal, "type": "User"},
-                "issue_url": issue_url or "https://api.github.com/repos/upiscium/Templates/issues/7"}
+                "issue_url": issue_url or "https://api.github.com/repos/upiscium/KUMIKI/issues/7"}
 
     def checkpoint_api(self, comments: list[dict], calls: list[str], *, actor: int = 42):
         def api(_root: Path, _api: str, endpoint: str):
@@ -121,26 +121,32 @@ class SourceCollaborationTest(unittest.TestCase):
 
     def test_canonical_and_mixed_case_github_origins(self) -> None:
         for origin in (
-            "git@github.com:upiscium/Templates.git",
-            "ssh://git@github.com/upiscium/Templates.git",
-            "https://github.com/uPiscium/Templates.git",
-            "git@GitHub.com:UPISCIUM/templates.git",
-            "https://GitHub.com/Upiscium/TEMPLATES/",
+            "git@github.com:upiscium/KUMIKI.git",
+            "ssh://git@github.com/upiscium/KUMIKI.git",
+            "https://github.com/uPiscium/KUMIKI.git",
+            "git@GitHub.com:UPISCIUM/kumiki.git",
+            "https://GitHub.com/Upiscium/KUMIKI/",
         ):
             with self.subTest(origin=origin):
                 git(self.root, "remote", "set-url", "origin", origin)
                 self.assertEqual(self.root.resolve(), self.ctx()["root"])
                 self.assertEqual(origin, git(self.root, "remote", "get-url", "origin"))
 
+    def test_previous_Templates_slug_rejected_after_strict_cutover(self) -> None:
+        git(self.root, "remote", "set-url", "origin",
+            "https://github.com/upiscium/Templates.git")
+        with self.assertRaisesRegex(source.GuardError, "origin"):
+            self.ctx()
+
     def test_different_or_unsupported_origin_fails_closed(self) -> None:
         for origin in (
             "git@github.com:another/Templates.git",
             "https://github.com/upiscium/Another.git",
-            "https://gitlab.com/upiscium/Templates.git",
-            "https://github.com.evil.invalid/upiscium/Templates.git",
-            "http://github.com/upiscium/Templates.git",
-            "https://github.com/upiscium/Templates/other.git",
-            "https://github.com/upiscium/Templates.git?redirect=1",
+            "https://gitlab.com/upiscium/KUMIKI.git",
+            "https://github.com.evil.invalid/upiscium/KUMIKI.git",
+            "http://github.com/upiscium/KUMIKI.git",
+            "https://github.com/upiscium/KUMIKI/other.git",
+            "https://github.com/upiscium/KUMIKI.git?redirect=1",
             "https://github.com/upiscium/Templateſ.git",
         ):
             with self.subTest(origin=origin):
@@ -941,7 +947,7 @@ class SourceCollaborationTest(unittest.TestCase):
         current = git(self.root, "rev-parse", "HEAD")
         for url in (
             "https://github.com/other/Templates.git",
-            "https://gitlab.com/upiscium/Templates.git",
+            "https://gitlab.com/upiscium/KUMIKI.git",
         ):
             with self.subTest(url=url):
                 git(self.root, "config", "remote.origin.pushurl", url)
@@ -951,21 +957,21 @@ class SourceCollaborationTest(unittest.TestCase):
                     with self.assertRaises(source.GuardError):
                         source.push(215, current, self.root)
                     remote.assert_not_called()
-        git(self.root, "config", "remote.origin.pushurl", "https://github.com/uPiscium/Templates.git")
+        git(self.root, "config", "remote.origin.pushurl", "https://github.com/uPiscium/KUMIKI.git")
         self.assertEqual(
-            "https://github.com/uPiscium/Templates.git", source.push_destination(self.root)
+            "https://github.com/uPiscium/KUMIKI.git", source.push_destination(self.root)
         )
-        git(self.root, "config", "--add", "remote.origin.pushurl", "git@github.com:upiscium/Templates.git")
+        git(self.root, "config", "--add", "remote.origin.pushurl", "git@github.com:upiscium/KUMIKI.git")
         with self.assertRaisesRegex(source.GuardError, "exactly one"):
             source.push_destination(self.root)
 
     def test_push_destination_rejects_second_git_url_rewrite(self) -> None:
         git(self.root, "config", "remote.origin.pushurl", "source-alias:repo")
-        git(self.root, "config", "url.https://github.com/upiscium/Templates.git.insteadOf", "source-alias:repo")
+        git(self.root, "config", "url.https://github.com/upiscium/KUMIKI.git.insteadOf", "source-alias:repo")
         git(self.root, "config", "url.https://gitlab.com/attacker/Templates.git.insteadOf",
-            "https://github.com/upiscium/Templates.git")
+            "https://github.com/upiscium/KUMIKI.git")
         self.assertEqual(
-            "https://github.com/upiscium/Templates.git",
+            "https://github.com/upiscium/KUMIKI.git",
             git(self.root, "remote", "get-url", "--push", "--all", "origin"),
         )
         with self.assertRaisesRegex(source.GuardError, "subject to Git URL rewriting"):
@@ -1033,7 +1039,7 @@ class SourceCollaborationTest(unittest.TestCase):
                     recorded.append(args)
                     return subprocess.CompletedProcess(
                         args=[], returncode=0,
-                        stdout="https://github.com/upiscium/Templates/pull/7\n",
+                        stdout="https://github.com/upiscium/KUMIKI/pull/7\n",
                         stderr="",
                     )
 
@@ -1183,7 +1189,7 @@ class SourceCollaborationTest(unittest.TestCase):
     def test_pr_create_detects_concurrent_duplicate_or_changed_ack(self) -> None:
         current = git(self.root, "rev-parse", "HEAD")
         created = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="https://github.com/upiscium/Templates/pull/8\n", stderr=""
+            args=[], returncode=0, stdout="https://github.com/upiscium/KUMIKI/pull/8\n", stderr=""
         )
         for found, message in (
             ([self.pr(), self.pr(id=701, number=8)], "multiple PR identities"),
@@ -1238,7 +1244,7 @@ class SourceCollaborationTest(unittest.TestCase):
                         git(self.root, "symbolic-ref", "HEAD", "refs/heads/feat/215-other")
                         return subprocess.CompletedProcess(
                             args=[], returncode=0,
-                            stdout="https://github.com/upiscium/Templates/pull/7\n", stderr="",
+                            stdout="https://github.com/upiscium/KUMIKI/pull/7\n", stderr="",
                         )
                     return original_run(root, *args, **kwargs)
 
@@ -1269,21 +1275,21 @@ class SourceCollaborationTest(unittest.TestCase):
         ctx = {
             "root": self.root, "issue": 215, "branch": "feat/215-source-collaboration",
             "head": current, "title": "Source collaboration",
-            "origin": "git@github.com:upiscium/Templates.git",
+            "origin": "git@github.com:upiscium/KUMIKI.git",
         }
         failed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="lost ack")
         with mock.patch.object(source, "context", return_value=ctx), mock.patch.object(
             source, "require_clean"
         ), mock.patch.object(source, "require_approved_lineage"
-        ), mock.patch.object(source, "push_destination", return_value="git@github.com:upiscium/Templates.git"
+        ), mock.patch.object(source, "push_destination", return_value="git@github.com:upiscium/KUMIKI.git"
         ), mock.patch.object(source, "remote_head", side_effect=[None, current]), mock.patch.object(
             source, "transport_push", return_value=failed
         ) as transport:
             result = source.push(215, current, self.root)
         self.assertEqual("PUSHED", result["status"])
         transport.assert_called_once_with(
-            self.root, "git@github.com:upiscium/Templates.git",
-            "git@github.com:upiscium/Templates.git", "feat/215-source-collaboration", current, None,
+            self.root, "git@github.com:upiscium/KUMIKI.git",
+            "git@github.com:upiscium/KUMIKI.git", "feat/215-source-collaboration", current, None,
         )
 
     def test_checkpoint_recovers_lost_acknowledgement(self) -> None:

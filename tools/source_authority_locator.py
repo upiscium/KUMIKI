@@ -19,7 +19,7 @@ from typing import Any
 
 
 HOST_DESCRIPTOR_PATH = "@HOST_DESCRIPTOR_PATH@"
-REPOSITORY = "upiscium/Templates"
+REPOSITORY = "upiscium/KUMIKI"
 REPOSITORY_ID = 1183254623
 SCHEMA_VERSION = 2
 DEFAULT_STORE = Path("/nix/store")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guarded collaboration API for Templates source-development worktrees."""
+"""Guarded collaboration API for KUMIKI source-development worktrees."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import urllib.parse
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-REPO = "upiscium/Templates"
+REPO = "upiscium/KUMIKI"
 DEFAULT = "main"
 REMOTE = "origin"
 # Only the Nix-installed copy receives a reviewed revision during its build.

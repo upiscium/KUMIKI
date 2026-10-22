@@ -359,7 +359,7 @@ class ReleaseGateTest(unittest.TestCase):
         return record
 
     def issue_117_evidence(self) -> dict:
-        return {"schema": "agent-core-release-gate", "version": 1, "repo": gate.CANONICAL_REPO,
+        return {"schema": "agent-core-release-gate", "version": 1, "repo": gate.LEGACY_ISSUE_117_REPO,
                 "pr": 117, "head": gate.ISSUE_117_COMPATIBILITY["head"],
                 "tree": gate.ISSUE_117_COMPATIBILITY["tree"],
                 "downstreamRepo": gate.DOWNSTREAM_REPO, "task": 22, "downstreamPr": 23,
@@ -378,6 +378,39 @@ class ReleaseGateTest(unittest.TestCase):
                 content = json.dumps(record) + "\n"
             target.write_text(content, encoding="utf-8")
             os.chmod(target, 0o600)
+
+    def test_old_v2_evidence_is_readable_but_does_not_authorize_current_release(self) -> None:
+        old = self.evidence()
+        old["repo"] = gate.LEGACY_ISSUE_117_REPO
+        self.write_evidence(old, canonical_bytes=True)
+        with mock.patch.object(gate, "gh", side_effect=self.gh_candidate()):
+            with self.assertRaisesRegex(gate.GateError, "exact current dogfood evidence is missing"):
+                gate.release_ready_check(self.root, "115")
+
+    def test_old_v2_allows_new_v2_for_same_pr_after_repo_rename(self) -> None:
+        old = self.evidence()
+        old["repo"] = gate.LEGACY_ISSUE_117_REPO
+        self.write_evidence(old, canonical_bytes=True)
+        oldfile = gate.evidence_root(self.root, create=False) / gate.evidence_filename(old)
+        exact_historical_bytes = oldfile.read_bytes()
+        with mock.patch.object(gate, "gh", side_effect=self.gh_candidate()):
+            created = gate.record_evidence(self.root, "115", "dogfood", "116", "7")
+        self.assertEqual(created["repo"], gate.CANONICAL_REPO)
+        self.assertEqual(created["version"], 2)
+        self.assertEqual(oldfile.read_bytes(), exact_historical_bytes)
+        newfile = gate.evidence_root(self.root, create=False) / gate.evidence_filename(created)
+        self.assertTrue(newfile.is_file())
+        self.assertNotEqual(newfile.name, oldfile.name)
+        with mock.patch.object(gate, "gh", side_effect=self.gh_candidate()):
+            ready = gate.release_ready_check(self.root, "115")
+        self.assertEqual(ready["status"], "READY_FOR_MERGE")
+
+    def test_current_v2_duplicate_still_refused_after_repo_rename(self) -> None:
+        record = self.evidence()
+        self.write_evidence(record, canonical_bytes=True)
+        with mock.patch.object(gate, "gh", side_effect=self.gh_candidate()):
+            with self.assertRaisesRegex(gate.GateError, "dogfood evidence for this exact candidate already exists"):
+                gate.record_evidence(self.root, "115", "dogfood", "116", "7")
 
     def test_release_ready_accepts_exact_open_candidate_and_v2_evidence(self) -> None:
         record = self.evidence()
@@ -628,7 +661,7 @@ class ReleaseGateTest(unittest.TestCase):
     def test_github_api_is_pinned_to_public_github(self) -> None:
         response = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
         with mock.patch.object(gate, "command", return_value=response) as runner:
-            gate.gh(["api", "repos/upiscium/Templates/pulls/115"], self.root)
+            gate.gh(["api", "repos/upiscium/KUMIKI/pulls/115"], self.root)
         argv = runner.call_args.args[0]
         self.assertEqual(argv[:4], ["gh", "api", "--hostname", "github.com"])
 
@@ -638,6 +671,12 @@ class ReleaseGateTest(unittest.TestCase):
             gate.CANONICAL_GIT_URL,
         )
         run_git(self.root, "remote", "set-url", "origin", "https://example.invalid/Templates.git")
+        with self.assertRaisesRegex(gate.GateError, "canonical Templates"):
+            gate.validate_local_git_configuration(self.root)
+
+    def test_old_Templates_canonical_remote_rejected_after_strict_KUMIKI_cutover(self) -> None:
+        run_git(self.root, "remote", "set-url", "origin",
+                "https://github.com/upiscium/Templates.git")
         with self.assertRaisesRegex(gate.GateError, "canonical Templates"):
             gate.validate_local_git_configuration(self.root)
 
