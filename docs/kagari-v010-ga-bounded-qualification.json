@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "kind": "KAGARI_0_1_0_BOUNDED_GA_QUALIFICATION_BASIS",
+  "scope_id": "linux-nix-owned-ordinary-git-isolated-workunit-v1",
+  "intended_release": "v0.1.0",
+  "qualification": "GA_BOUNDED_PROFILE_QUALIFIED",
+  "native_component_qualification": "TEST_ONLY_UNQUALIFIED",
+  "external_publication_attestation": "EXTERNAL_UNVERIFIED",
+  "production_activation": false,
+  "profile_constraints": [
+    "Linux Nix immutable Store runner, package hash/receipt verified",
+    "Current-user-owned ordinary Git Project with real .git directory, no linked worktrees",
+    "OpenCode 1.18.35 and pinned Bun 1.3.13 initial supported dependencies",
+    "Per-job exact package- and TaskSpec-bound foreground TTY consent",
+    "Two scoped native concurrent child edits in private full-history no-remote Work Unit",
+    "Host-owned tests and Product-only local commit, native-v4 readback",
+    "External bounded sha-bound durable binary Product patch, independent replay",
+    "AGENTS exact preimage restoration and both grants revoked on uninstall",
+    "No direct edits, Git Push, PR, Merge or production activation"
+  ],
+  "receipt_bound_basis": {
+    "frozen_GA_candidate_manifest_sha256": "4bbd17dbee1c90aaf33f66150bf07b1ea40181d2bfc227c451b7397b8d57e81f",
+    "GA_candidate_receipt_sha256": "103afa9951d347ac0249593b2e641f6312da419fb9202e4c0ab5be945eb6c1cc",
+    "canonical_tests": 1696,
+    "canonical_inventory_sha256": "402b5044eaee8d0279389eb5f0b960e6a453cbeab4176aeff3c85bc4d3fa0e2f",
+    "native_model_product_tests": 156,
+    "model_accepted_Product_commit": "a1a4bdd80be54fcb1900048ef7ae397c99a9c742",
+    "real_parallel_child_overlap_ms": 30084,
+    "model_audit_sha256": "a641811b3422f8335ce253504525a1774352c0478e30a576b597da36e78f7638",
+    "independent_durable_replay_sha256": "cb9dcb08be9792b31ccd7c93524dca9834d589cecec441420bb7f687864be2ce",
+    "post_uninstall_audit_sha256": "90b3e8c56708ef7ab3b91337dc87a8f358ace5fb8adb5a4c0c7cdc7501937078",
+    "source": "https://github.com/upiscium/Templates/issues/283#issuecomment-6317274168"
+  },
+  "qualification_limitations": [
+    "This basis is maintainer-maintained audit metadata, not independent cryptographic certification",
+    "Provider identity observed in host logs, not cryptographically attested",
+    "Inner native engine retains TEST_ONLY_UNQUALIFIED identity; standalone/general-purpose Native unsupported",
+    "Same-UID adversarial tamper, powerloss-wide resilience, non-Nix execution, linked Git worktrees unsupported",
+    "Automatically merging Product changes or remote PR creation unsupported",
+    "Release publication/GA tag and production install each require separately verified action"
+  ]
+}

@@ -57,6 +57,9 @@
           } // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
             # Limited RC profile only on Linux. Building is not publication.
             kagari-rc = import ./nix/kagari-v010-rc-candidate.nix { inherit pkgs; };
+            # Independently isolated GA candidate: never replaces the public RC.
+            kagari-candidate = import ./nix/kagari-v010-ga-candidate.nix { inherit pkgs; };
+            kagari = import ./nix/kagari-v010-ga-stable.nix { inherit pkgs; };
           };
         })
     // {

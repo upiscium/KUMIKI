@@ -13,29 +13,35 @@ import kagari_v010_ci_packages as p
 
 class CIPackageSetupTests(unittest.TestCase):
     def test_source_package_profiles_are_exact(self):
-        self.assertEqual(set(p.PACKAGES), {"native","existing","composed","rc"})
+        self.assertEqual(set(p.PACKAGES), {"native","existing","composed","rc","ga","ga-stable"})
         self.assertEqual(set(p.CORE_PACKAGE_TEST_MODULES), {
           "test_kagari_v010_native_package",
           "test_kagari_v010_existing_smoke_package",
           "test_kagari_v010_composed_candidate",
           "test_kagari_v010_durable_admin_preview",
-          "test_kagari_v010_rc_lifecycle"})
+          "test_kagari_v010_rc_lifecycle",
+          "test_kagari_v010_ga_lifecycle",
+          "test_kagari_v010_ga_stable_lifecycle"})
         observed=p.package_module_requirements(ROOT)
         self.assertEqual(observed["test_kagari_v010_durable_admin_preview"],
                          {"composed"})
         self.assertEqual(observed["test_kagari_v010_rc_lifecycle"], {"rc"})
+        self.assertEqual(observed["test_kagari_v010_ga_lifecycle"], {"ga"})
+        self.assertEqual(observed["test_kagari_v010_ga_stable_lifecycle"], {"ga-stable"})
         self.assertEqual(observed["test_kagari_v010_rc_opencode_bootstrap"], {"rc"})
         # Core modules remain mandatory, but new package-backed test
         # modules are discovered automatically rather than forbidden.
         self.assertTrue(set(p.CORE_PACKAGE_TEST_MODULES)<=set(observed))
-        self.assertEqual(observed["test_kagari_v010_ci_packages"], {"composed","rc"})
+        self.assertEqual(observed["test_kagari_v010_ci_packages"], {"composed","rc","ga"})
         self.assertEqual(observed["test_kagari_v010_durable_task_bridge"],
                          {"composed"})
         self.assertEqual(set(x[1] for x in p.PACKAGES.values()),{
           "KAGARI_V010_NATIVE_GENERIC_PACKAGE",
           "KAGARI_V010_COMPOSED_PACKAGE",
           "KAGARI_V010_EXISTING_SMOKE_PACKAGE",
-          "KAGARI_V010_RC_PACKAGE"})
+          "KAGARI_V010_RC_PACKAGE",
+          "KAGARI_V010_GA_PACKAGE",
+          "KAGARI_V010_GA_STABLE_PACKAGE"})
 
     def test_new_test_module_package_env_is_discovered_and_unknown_is_blocked(self):
         self.assertEqual(p.source_package_reads(
@@ -47,6 +53,10 @@ class CIPackageSetupTests(unittest.TestCase):
         self.assertEqual(p.source_package_reads(
             'import os\nx=os.environ.get("KAGARI_V010_RC_PACKAGE")\n'),
             {"rc"})
+        self.assertEqual(p.source_package_reads(
+            'import os\nx=os.environ.get("KAGARI_V010_GA_PACKAGE")\n'),{"ga"})
+        self.assertEqual(p.source_package_reads(
+            'import os\nx=os.getenv("KAGARI_V010_GA_STABLE_PACKAGE")\n'), {"ga-stable"})
         with self.assertRaisesRegex(p.CIBlocked,"unrecognized KAGARI"):
             p.source_package_reads(
                 'import os\nx=os.environ.get("KAGARI_V010_UNKNOWN_PACKAGE")\n')
@@ -143,6 +153,21 @@ class CIPackageSetupTests(unittest.TestCase):
         self.assertEqual(data["release_channel"],"prerelease")
         self.assertNotIn("released",data)
         self.assertFalse(data["direct_live_Project_Task_supported"])
+
+    def test_ga_package_verifies_separate_candidate_source_and_native(self):
+        import os
+        value=os.environ.get("KAGARI_V010_GA_PACKAGE")
+        if not value:
+            self.skipTest("GA candidate package must be built by canonical CI")
+        package=Path(value)
+        p.verify_package(ROOT,"ga",package)
+        receipt=p.receipt(package/"share/kagari-v010-ga/receipt.json")
+        self.assertEqual(receipt["qualification"],"GA_CANDIDATE_NOT_QUALIFIED")
+        self.assertEqual(receipt["native_component_qualification"],"TEST_ONLY_UNQUALIFIED")
+        self.assertFalse(receipt["production_activation"])
+        self.assertEqual(receipt["release_channel"],"ga-candidate")
+        self.assertEqual(receipt["durable_product_archive_sha256"],
+                         p.sha(ROOT/"tools/kagari_v010_ga_product_archive.py"))
 
     def test_Nix_failure_and_invalid_build_output_never_return_package_env(self):
         with patch.object(p.subprocess,"run") as run:

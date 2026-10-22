@@ -28,6 +28,8 @@ CORE_PACKAGE_TEST_MODULES = {
     "test_kagari_v010_composed_candidate": "composed",
     "test_kagari_v010_durable_admin_preview": "composed",
     "test_kagari_v010_rc_lifecycle": "rc",
+    "test_kagari_v010_ga_lifecycle": "ga",
+    "test_kagari_v010_ga_stable_lifecycle": "ga-stable",
 }
 PACKAGES = {
     "native": ("kagari-v010-native-generic-package.nix",
@@ -42,6 +44,12 @@ PACKAGES = {
     "rc": ("kagari-v010-rc-candidate.nix",
            "KAGARI_V010_RC_PACKAGE",
            "kagari-0.1.0-rc.1"),
+    "ga": ("kagari-v010-ga-candidate.nix",
+           "KAGARI_V010_GA_PACKAGE",
+           "kagari-0.1.0-ga-candidate"),
+    "ga-stable": ("kagari-v010-ga-stable.nix",
+           "KAGARI_V010_GA_STABLE_PACKAGE",
+           "kagari-0.1.0"),
 }
 SHARD_RANGE = range(8)
 
@@ -297,6 +305,92 @@ def verify_package(root: Path, package: str, path: Path) -> None:
         require(data.get("native_component_qualification")=="TEST_ONLY_UNQUALIFIED"
                 and data.get("git_remote_Push_implemented") is False,
                 "RC must declare its internal Native limitation and no Push")
+    elif package == "ga":
+        data = receipt(path/"share/kagari-v010-ga/receipt.json")
+        require(data.get("qualification")=="GA_CANDIDATE_NOT_QUALIFIED"
+                and data.get("version")=="0.1.0"
+                and data.get("root")==str(path)
+                and data.get("release_channel")=="ga-candidate"
+                and data.get("publication_attestation")=="EXTERNAL_UNVERIFIED"
+                and data.get("production_activation") is False
+                and data.get("native_component_qualification")=="TEST_ONLY_UNQUALIFIED"
+                and data.get("managed_isolated_Work_Unit_supported") is True
+                and data.get("direct_live_Project_Task_supported") is False
+                and "released" not in data
+                and "source_publication_approved" not in data,
+                "GA candidate must not silently claim GA qualification/release")
+        for src,dst,key in (
+             ("tools/kagari_v010_ga_lifecycle.py",
+              "libexec/kagari-v010-ga/kagari_v010_ga_lifecycle.py","cli_sha256"),
+             ("tools/kagari_v010_ga_opencode_bootstrap.py",
+              "libexec/kagari-v010-ga/kagari_v010_ga_opencode_bootstrap.py","opencode_bootstrap_sha256"),
+             ("tools/kagari_v010_ga_product_archive.py",
+              "libexec/kagari-v010-ga/kagari_v010_ga_product_archive.py","durable_product_archive_sha256"),
+             ("nix/kagari-v010-rc-opencode-plugin-lock.json",
+              "share/kagari-v010-ga/opencode-plugin-package-lock.json","opencode_plugin_lock_sha256"),
+             ("nix/kagari-v010-rc-opencode-node-modules-lock.json",
+              "share/kagari-v010-ga/opencode-node-modules-package-lock.json",
+              "opencode_node_modules_lock_sha256")):
+            require(data.get(key)==sha(root/src)==sha(path/dst),
+                    "GA immutable source/receipt field differs: "+key)
+        require(data.get("bun_version")=="1.3.13"
+                and data.get("opencode_plugin_version")=="1.18.35"
+                and data.get("native_Project_scope_inventory_relaxed") is False
+                and data.get("git_remote_Push_implemented") is False,
+                "GA candidate Bun/Native/Git controls changed")
+        composed_root=Path(str(data.get("composed_root","")))
+        native_root=Path(str(data.get("native_root","")))
+        require(composed_root.parent==Path("/nix/store")
+                and data.get("composed_receipt_sha256")==
+                sha(composed_root/"share/kagari-v010-composed/receipt.json")
+                and native_root.parent==Path("/nix/store")
+                and data.get("native_receipt_sha256")==
+                sha(native_root/"share/kagari-v010-native-generic/receipt.json"),
+                "GA external immutable component chain not receipt-bound")
+        verify_package(root,"composed",composed_root)
+        verify_package(root,"native",native_root)
+    elif package == "ga-stable":
+        data=receipt(path/"share/kagari-v010-ga/receipt.json")
+        basis=receipt(path/"share/kagari-v010-ga/bounded-qualification.json")
+        require(data.get("version")=="0.1.0"
+                and data.get("qualification")=="GA_BOUNDED_PROFILE_QUALIFIED"
+                and data.get("native_component_qualification")=="TEST_ONLY_UNQUALIFIED"
+                and data.get("release_channel")=="stable"
+                and data.get("publication_attestation")=="EXTERNAL_UNVERIFIED"
+                and data.get("production_activation") is False
+                and data.get("root")==str(path),
+                "GA stable support profile must remain exact and limited")
+        require(basis.get("kind")=="KAGARI_0_1_0_BOUNDED_GA_QUALIFICATION_BASIS"
+                and basis.get("qualification")=="GA_BOUNDED_PROFILE_QUALIFIED"
+                and basis.get("native_component_qualification")=="TEST_ONLY_UNQUALIFIED"
+                and data.get("bounded_profile_id")==basis.get("scope_id")
+                and data.get("bounded_qualification_sha256")==
+                     sha(root/"docs/kagari-v010-ga-bounded-qualification.json")
+                ==sha(path/"share/kagari-v010-ga/bounded-qualification.json"),
+                "GA support qualification evidence/source/receipt mismatch")
+        for src,inst,key in (
+            ("tools/kagari_v010_ga_stable_lifecycle.py",
+             "libexec/kagari-v010-ga/kagari_v010_ga_stable_lifecycle.py","cli_sha256"),
+            ("tools/kagari_v010_ga_opencode_bootstrap.py",
+             "libexec/kagari-v010-ga/kagari_v010_ga_opencode_bootstrap.py","opencode_bootstrap_sha256"),
+            ("tools/kagari_v010_ga_product_archive.py",
+             "libexec/kagari-v010-ga/kagari_v010_ga_product_archive.py","durable_product_archive_sha256"),
+            ("nix/kagari-v010-rc-opencode-plugin-lock.json",
+             "share/kagari-v010-ga/opencode-plugin-package-lock.json","opencode_plugin_lock_sha256"),
+            ("nix/kagari-v010-rc-opencode-node-modules-lock.json",
+             "share/kagari-v010-ga/opencode-node-modules-package-lock.json","opencode_node_modules_lock_sha256")):
+            require(data.get(key)==sha(root/src)==sha(path/inst),
+                    "GA stable immutable source/Receipt not exact: "+key)
+        composed=Path(str(data.get("composed_root","")))
+        native=Path(str(data.get("native_root","")))
+        require(composed.parent==native.parent==Path("/nix/store")
+                and data.get("composed_receipt_sha256")==
+                    sha(composed/"share/kagari-v010-composed/receipt.json")
+                and data.get("native_receipt_sha256")==
+                    sha(native/"share/kagari-v010-native-generic/receipt.json"),
+                "GA stable native/composed immutable source receipts mismatch")
+        verify_package(root,"composed",composed)
+        verify_package(root,"native",native)
     else:
         raise CIBlocked("unsupported immutable KAGARI package")
 
