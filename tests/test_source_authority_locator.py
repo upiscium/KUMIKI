@@ -53,7 +53,7 @@ class SourceAuthorityLocatorTest(unittest.TestCase):
         self.policy.chmod(0o555)
         self.data = {
             "schema_version": 2,
-            "repository": "upiscium/Templates",
+            "repository": "upiscium/KUMIKI",
             "repository_id": 1183254623,
             "revision": self.REVISION,
             "output_path": str(self.output),
@@ -115,6 +115,11 @@ class SourceAuthorityLocatorTest(unittest.TestCase):
         self.persist()
         self.blocked("host-approved locator must be an exact Nix-store")
 
+    def test_old_Templates_slug_blocked_after_explicit_KUMIKI_cutover(self) -> None:
+        self.data["repository"] = "upiscium/Templates"
+        self.persist()
+        self.blocked("repository identity")
+
     def test_wrong_repository_name(self) -> None:
         self.data["repository"] = "upiscium/Another"
         self.persist()
@@ -137,7 +142,7 @@ class SourceAuthorityLocatorTest(unittest.TestCase):
 
     def test_descriptor_duplicate_json_key_rejected(self) -> None:
         raw = self.descriptor.read_text()
-        self.descriptor.write_text(raw[:-1] + ', "repository": "upiscium/Templates"}')
+        self.descriptor.write_text(raw[:-1] + ', "repository": "upiscium/KUMIKI"}')
         self.blocked("duplicate descriptor")
 
     def test_stale_revision_rejected_even_with_matching_digests(self) -> None:

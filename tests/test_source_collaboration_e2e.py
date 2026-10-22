@@ -21,7 +21,7 @@ AUTHORITY_FILES = (
     "tools/render_templates.py",
     "flake.nix",
 )
-ISSUE_VIEW = "issue view 215 --repo upiscium/Templates --json number,state,title,url"
+ISSUE_VIEW = "issue view 215 --repo upiscium/KUMIKI --json number,state,title,url"
 
 
 def git(root: Path, *args: str) -> str:
@@ -102,7 +102,7 @@ class SourceCollaborationE2ETest(unittest.TestCase):
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "fixture base")
         git(self.repo, "branch", "-M", "main")
-        git(self.repo, "remote", "add", "origin", "git@github.com:upiscium/Templates.git")
+        git(self.repo, "remote", "add", "origin", "git@github.com:upiscium/KUMIKI.git")
         git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
         self.approved_base = git(self.repo, "rev-parse", "HEAD")
         git(self.repo, "checkout", "-qb", "feat/215-source-collaboration")
