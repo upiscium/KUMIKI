@@ -18,7 +18,7 @@ The user-facing flow is `install` / `inspect` / `doctor` / `repair` / `uninstall
 
 The inner Native Task engine remains `TEST_ONLY_UNQUALIFIED`, the standalone source authority is not migrated by this package, and `production_activation=false`. The GA label does not promote arbitrary legacy/v3/v4 internals, cryptographically attest model identity or authorize use in unrestricted Project layouts.
 
-The separate `#kagari-rc` package and `v0.1.0-rc.1` tag are immutable historical release evidence. See [GA readiness](kagari-v010-ga-readiness.md), [known limitations](kagari-v010-known-limitations.md), and [release tracker](https://github.com/upiscium/KUMIKI/issues/283).
+The separate `#kagari-rc` package and `v0.1.0-rc.1` tag are immutable historical release evidence. See [historical pre-release GA readiness record](kagari-v010-ga-readiness.md), [known limitations](kagari-v010-known-limitations.md), and [release tracker](https://github.com/upiscium/KUMIKI/issues/283).
 
 ## Technical identifiers that remain unchanged
 
