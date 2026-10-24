@@ -1,24 +1,16 @@
-# Templates
+# KUMIKI（組木）
 
-Nix flake templates for reproducible, Agent-ready development environments.
+**KUMIKI** is a composable framework for reproducible, Agent-ready development environments and Git/Nix project scaffolds. **KAGARI（篝）** — formerly *AgentCore* — is the agent execution, approval and evidence-governance framework delivered within KUMIKI. The naming evokes an *andon* (行灯): KUMIKI provides the interlocking wooden structure, while KAGARI provides the light within.
 
-## Develop Templates
+> **Canonical repository:** [upiscium/KUMIKI](https://github.com/upiscium/KUMIKI) (original GitHub repository ID `1183254623`). The [trusted Source Authority migration](https://github.com/upiscium/KUMIKI/issues/246) was completed and independently verified after the repository rename; old `Templates` links are historical aliases, not source-publication authority. Existing projects and generated `.automation/UPSTREAM` values are migrated separately under [#245](https://github.com/upiscium/KUMIKI/issues/245).
 
-Architecture decisions for KUMIKI / KAGARI are indexed in [docs/adr/README.md](docs/adr/README.md). The ADRs distinguish accepted design goals from the currently deployed Agent Core v3 and staged v4 implementation.
+> **KAGARI / KUMIKI v0.1.0 bounded GA is published.** See the [GA Release](https://github.com/upiscium/KUMIKI/releases/tag/v0.1.0), the [supported Linux/Nix Work Unit profile (historical pre-release readiness snapshot)](docs/kagari-v010-ga-readiness.md), and [Known Limitations](docs/kagari-v010-known-limitations.md). The standalone Native engine remains `TEST_ONLY_UNQUALIFIED`; production activation, automatic Product integration and Source Guard replacement are not granted by the Release. The current `#kagari`, historical `#kagari-rc` and GA-candidate outputs are separate identities.
 
-> **Next intended release: KAGARI / KUMIKI 0.1.0 (NOT RELEASED).** Internal v4
-> is an architecture generation, not public SemVer. Further resilience
-> expansion is frozen for this minimal delivery. Review [tracker #271](https://github.com/upiscium/Templates/issues/271)
-> and [ADR-0005](docs/adr/0005-v010-delivery-and-resilience-freeze.md).
-> The proposed 0.1.0-rc.1 profile is restricted: Native internals remain
-> `TEST_ONLY_UNQUALIFIED`, and public Release status must be checked separately.
-> This source exports a candidate package at `#kagari-rc` for an explicitly
-> pinned Linux/Nix revision; a successful build does not authorize Release or
-> production activation. Read the [RC install/Task guide](docs/kagari-v010-rc.md)
-> and [Known Limitations](docs/kagari-v010-known-limitations.md), including the
-> accepted post-v0.1.0 Export write-time disk-bound deferral ([#276](https://github.com/upiscium/Templates/issues/276)).
+See [KUMIKI and KAGARI naming and migration](docs/kumiki-kagari-identity.md) and [architecture decisions](docs/adr/README.md). Historical Agent Core v3 and internal v4 protocol names remain unchanged for compatibility.
 
-The repository root `flake.nix` is the development-environment source of truth. Its default devShell provides the repository tools required for normal Templates work, including `just`, `python3`, `git`, and `gh`.
+## Develop KUMIKI
+
+The repository root `flake.nix` is the development-environment source of truth. Its default devShell provides the repository tools required for KUMIKI development, including `just`, `python3`, `git`, and `gh`.
 
 With `direnv` and `nix-direnv` installed on the host, approve the repository once:
 
@@ -55,13 +47,15 @@ The GitHub distribution repositories are generated artifacts synchronized from t
 Local Nix templates remain available:
 
 ```sh
-nix flake init -t github:upiscium/Templates#agent-base
-nix flake init -t github:upiscium/Templates#agent-python
-nix flake init -t github:upiscium/Templates#agent-rust
-nix flake init -t github:upiscium/Templates#agent-nix
-nix flake init -t github:upiscium/Templates#agent-cpp-cmake
-nix flake init -t github:upiscium/Templates#agent-typescript-node
+nix flake init -t github:upiscium/KUMIKI#agent-base
+nix flake init -t github:upiscium/KUMIKI#agent-python
+nix flake init -t github:upiscium/KUMIKI#agent-rust
+nix flake init -t github:upiscium/KUMIKI#agent-nix
+nix flake init -t github:upiscium/KUMIKI#agent-cpp-cmake
+nix flake init -t github:upiscium/KUMIKI#agent-typescript-node
 ```
+
+The new KUMIKI URL is supported. Generated UPSTREAM metadata still uses the historical Templates value until the separate #245 migration is published.
 
 Compatibility aliases remain available:
 
