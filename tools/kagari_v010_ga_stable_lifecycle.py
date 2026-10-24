@@ -413,6 +413,9 @@ def prepare_task(rc:Path,composed:Path,native:Path,admin:object,
     need(not git(project,"diff","HEAD","--name-only","--","AGENTS.md","opencode.json").stdout.strip(),
          "dirty Project AGENTS/opencode must be reviewed before source clone")
     spec=task_spec.load_task_spec(spec_file,project)
+    # Share Native Planning validation before allocating a one-shot Job/Ask.
+    import kagari_v010_basic_plan as native_plan
+    native_plan.validate_task_spec(spec)
     need(spec["base_revision"]==ident["head"],
          "TaskSpec baseline must match exact attached Git Project HEAD")
     digest=sha(bytes_regular(spec_file,max_bytes=1024*1024))

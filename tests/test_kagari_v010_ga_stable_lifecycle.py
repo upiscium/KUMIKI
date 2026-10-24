@@ -312,6 +312,29 @@ class ReleaseCandidateLifecycleTests(unittest.TestCase):
                         path.index('save_new(jobdir/"result.json",canonical(doc))'))
         self.assertNotIn('product_archive.verify(jobdir)\n    return doc',source)
 
+    def test_native_task_text_limit_checked_before_job_and_consent(self):
+        self.assertEqual(self.run_cli("install")[0],0)
+        original=json.loads(self.task.read_text())
+        for field in ("goal","acceptance"):
+            with self.subTest(field=field):
+                invalid={**original,field:"x"*4097}
+                self.task.write_text(json.dumps(invalid)+"\n")
+                code,blocked=self.run_cli("prepare-task",*self.task_options())
+                self.assertEqual(code,2,blocked)
+                self.assertIn("invalid "+field,blocked["reason"])
+                # Failure is pre-admission: no one-shot dispatch slot is spent.
+                self.assertFalse((self.state/"kagari-v010-ga-stable"/"history").exists())
+                self.unchanged()
+        valid={**original,"goal":"x"*4096}
+        self.task.write_text(json.dumps(valid)+"\n")
+        code,pending=self.run_cli("prepare-task",*self.task_options())
+        self.assertEqual(code,0,pending)
+        self.assertEqual(pending["status"],
+                         "GA_WORKUNIT_AWAITING_EXACT_HUMAN_APPROVAL")
+        self.assertTrue((self.state/"kagari-v010-ga-stable"/"history"/
+                         pending["job_id"]).is_dir())
+        self.unchanged()
+
     def test_original_task_input_edit_refused_before_WorkUnit_preparation(self):
         self.assertEqual(self.run_cli("install")[0],0)
         changed=json.loads(self.task.read_bytes())
