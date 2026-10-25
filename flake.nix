@@ -60,6 +60,8 @@
             # Independently isolated GA candidate: never replaces the public RC.
             kagari-candidate = import ./nix/kagari-v010-ga-candidate.nix { inherit pkgs; };
             kagari = import ./nix/kagari-v010-ga-stable.nix { inherit pkgs; };
+            # vNext Task Ask/status facade, deliberately separate from GA.
+            kagari-control = import ./nix/kagari-vnext-control.nix { inherit pkgs; };
           };
         })
     // {
