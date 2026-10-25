@@ -224,6 +224,13 @@ class IssueWorktreeAllocator:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
                 self._authority(task, base_revision, branch_ref, expected_contract_id)
+                # A cleaned or partially cleaned Issue must never be silently
+                # recreated by a stale Main dispatch after Merge.
+                cleanup_marker = (self.common_dir /
+                                  "kagari-issue-worktree-cleanups" /
+                                  (task + ".json"))
+                if cleanup_marker.exists() or cleanup_marker.is_symlink():
+                    raise IssueWorktreeError("WORKTREE_CLEANED_OR_CLEANUP_PENDING")
                 inventory = _worktree_inventory(self.project)
                 matches = [e for e in inventory if e.get("worktree") == str(target)]
                 if matches:

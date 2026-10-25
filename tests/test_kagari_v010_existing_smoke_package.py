@@ -24,7 +24,9 @@ MODULES = {
     "task_integration.py", "task_record.py", "task_view.py",
 }
 # Source-only opt-in next-MVI code. Not part of the fixed GA package manifest.
-UNRELEASED_NEXT_MVI_MODULES = {"issue_worktree.py"}
+UNRELEASED_NEXT_MVI_MODULES = {
+    "issue_worktree.py", "issue_worktree_cleanup.py",
+}
 
 
 def check_cli(test, argv):
