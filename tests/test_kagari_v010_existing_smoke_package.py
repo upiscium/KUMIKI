@@ -23,6 +23,8 @@ MODULES = {
     "operation_prerequisites.py", "task_cleanup.py", "task_collaboration.py",
     "task_integration.py", "task_record.py", "task_view.py",
 }
+# Source-only opt-in next-MVI code. Not part of the fixed GA package manifest.
+UNRELEASED_NEXT_MVI_MODULES = {"issue_worktree.py"}
 
 
 def check_cli(test, argv):
@@ -53,7 +55,9 @@ class ExistingSmokePackageTests(unittest.TestCase):
         for name, sha in SOURCES.items():
             self.assertEqual(hashlib.sha256((ROOT / "tools" / name).read_bytes()).hexdigest(), sha)
             self.assertIn(sha, expression)
-        self.assertEqual({p.name for p in (ROOT / "components/agent-core-v4").glob("*.py")}, MODULES)
+        source_modules = {p.name for p in (ROOT / "components/agent-core-v4").glob("*.py")}
+        self.assertEqual(source_modules, MODULES | UNRELEASED_NEXT_MVI_MODULES)
+        self.assertTrue(UNRELEASED_NEXT_MVI_MODULES.isdisjoint(MODULES))
 
     def test_nix_expression_parses(self):
         nix = shutil.which("nix-instantiate")
