@@ -55,7 +55,7 @@ nix flake init -t github:upiscium/KUMIKI#agent-cpp-cmake
 nix flake init -t github:upiscium/KUMIKI#agent-typescript-node
 ```
 
-The new KUMIKI URL is supported. Generated UPSTREAM metadata still uses the historical Templates value until the separate #245 migration is published.
+The canonical `github:upiscium/KUMIKI` URL is used for newly generated `.automation/UPSTREAM` metadata under [#245](https://github.com/upiscium/KUMIKI/issues/245). Older installed Projects may retain the historical `github:upiscium/Templates` value; they are not silently rewritten.
 
 Compatibility aliases remain available:
 

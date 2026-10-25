@@ -122,6 +122,50 @@ class AgentsCompatibilityTests(unittest.TestCase):
         self.assertIsNone(result["ask_candidate"])
         self.assertFalse(result["task_compatibility_proven"])
 
+    def test_repo_name_cutover_is_structural_not_authority(self):
+        self.v3()
+        self.rules(subset=[])
+        upstream = self.project / ".automation" / "UPSTREAM"
+        for repository, classification in (
+            ("github:upiscium/KUMIKI", "V3_STRUCTURALLY_IDENTIFIED"),
+            ("github:upiscium/Templates", "V3_STRUCTURALLY_IDENTIFIED"),
+            ("github:another-owner/KUMIKI", "PARTIAL_OR_FOREIGN_AUTOMATION"),
+        ):
+            with self.subTest(repository=repository):
+                upstream.write_text(
+                    f'repository = "{repository}"\n'
+                    'ref = "main"\n'
+                    'component = "components/agent-core"\n'
+                )
+                report = compat.inspect(self.project)
+                self.assertEqual(report["legacy"]["classification"], classification)
+                self.assertFalse(report["legacy"]["source_cryptographically_authenticated"])
+                self.assertFalse(report["task_compatibility_proven"])
+                self.assertFalse(report["human_permission_granted"])
+                self.assertIsNone(report["ask_candidate"])
+
+    def test_non_string_upstream_repository_is_not_structurally_authoritative(self):
+        self.v3()
+        self.rules(subset=[])
+        upstream = self.project / ".automation" / "UPSTREAM"
+        for repository_line in (
+            "repository = []",
+            'repository = { owner = "upiscium" }',
+        ):
+            with self.subTest(repository_line=repository_line):
+                upstream.write_text(
+                    repository_line + "\n"
+                    'ref = "main"\n'
+                    'component = "components/agent-core"\n'
+                )
+                result = compat.inspect(self.project)
+                self.assertEqual(
+                    result["legacy"]["classification"], "PARTIAL_OR_FOREIGN_AUTOMATION"
+                )
+                self.assertFalse(result["legacy"]["source_cryptographically_authenticated"])
+                self.assertFalse(result["task_compatibility_proven"])
+                self.assertIsNone(result["ask_candidate"])
+
     def test_normal_foreign_agents_remain_unchanged_and_unqualified(self):
         self.rules(subset=[
             "- Run the exact repository tests after touching files.",

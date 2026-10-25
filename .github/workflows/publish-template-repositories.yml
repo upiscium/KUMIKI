@@ -19,7 +19,7 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       is_current_main: ${{ steps.current.outputs.is_current_main }}
     steps:
-      - name: Checkout verified Templates revision
+      - name: Checkout verified KUMIKI revision
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -60,7 +60,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
-      - name: Checkout verified Templates revision
+      - name: Checkout verified KUMIKI revision
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -108,5 +108,5 @@ jobs:
           fi
           git config user.name "Templates Publisher"
           git config user.email "templates-publisher@users.noreply.github.com"
-          git commit -m "Sync from upiscium/Templates@$VERIFIED_SHA"
+          git commit -m "Sync from upiscium/KUMIKI@$VERIFIED_SHA"
           git push origin "HEAD:${{ matrix.default_branch }}"

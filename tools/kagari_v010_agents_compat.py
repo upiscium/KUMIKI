@@ -25,7 +25,10 @@ MAX_METADATA = 64 * 1024
 BEGIN = "<!-- BEGIN KAGARI v0.1.0 SCOPED SESSION ADDENDUM -->"
 END = "<!-- END KAGARI v0.1.0 SCOPED SESSION ADDENDUM -->"
 CONSUMER = "KAGARI_NATIVE_V4_TASK"
-UPSTREAM = "github:upiscium/Templates"
+UPSTREAM = "github:upiscium/KUMIKI"
+HISTORICAL_UPSTREAM = "github:upiscium/Templates"
+# Read-only structural identification, not publication or execution authority.
+STRUCTURALLY_KNOWN_UPSTREAMS = frozenset({UPSTREAM, HISTORICAL_UPSTREAM})
 # Python interprets the \u0060 sequences below as literal Markdown backticks.
 KNOWN_CONFLICTS: tuple[dict[str, str], ...] = (
     {
@@ -305,9 +308,12 @@ def legacy_identity(project: Path) -> dict[str, Any]:
     parsed_upstream = parse_toml(upstream, "UPSTREAM")
     parsed_ownership = parse_toml(ownership, "ownership.toml")
     installed_v3 = version in (b"3", b"3\n")
-    declared_templates = bool(parsed_upstream
-                              and parsed_upstream.get("repository") == UPSTREAM
-                              and parsed_upstream.get("component") == "components/agent-core")
+    declared_repository = parsed_upstream.get("repository") if parsed_upstream else None
+    declared_templates = bool(
+        type(declared_repository) is str
+        and declared_repository in STRUCTURALLY_KNOWN_UPSTREAMS
+        and parsed_upstream.get("component") == "components/agent-core"
+    )
     owners = parsed_ownership.get("paths", {}) if parsed_ownership else {}
     owns_agents = type(owners) is dict and owners.get("AGENTS.md") == "replace"
     classification = (
