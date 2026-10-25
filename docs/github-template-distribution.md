@@ -1,6 +1,6 @@
 # GitHub Template Repository distribution
 
-`upiscium/Templates` is the only source of truth. Published GitHub Template Repositories are generated distribution artifacts and must not be edited directly.
+`upiscium/KUMIKI` is the only source of truth. Published GitHub Template Repositories are generated distribution artifacts and must not be edited directly.
 
 ## Channels
 
@@ -32,7 +32,7 @@ Create the five public repositories with an initial branch, using the descriptio
 ```sh
 gh repo create upiscium/Template-Agent-Python \
   --public --add-readme --disable-issues --disable-wiki \
-  --description 'Generated Agent-ready Python + uv template. Source: upiscium/Templates; do not edit directly.'
+  --description 'Generated Agent-ready Python + uv template. Source: upiscium/KUMIKI; do not edit directly.'
 ```
 
 Repeat for Rust, Nix, C++/CMake, and TypeScript/Node. Confirm every repository has `main` as its default branch before enabling publication. If the account's new-repository default differs, rename the initial branch to `main` through GitHub before continuing.
@@ -72,17 +72,17 @@ is_template = true
 
 Create a fine-grained personal access token scoped to exactly these five distribution repositories. The recurring publisher requires only repository **Contents: Read and write**. Do not grant Administration permission to this token.
 
-Store it only as an Actions secret on `upiscium/Templates`:
+Store it only as an Actions secret on `upiscium/KUMIKI`:
 
 ```sh
-gh secret set TEMPLATE_PUBLISH_TOKEN --repo upiscium/Templates
+gh secret set TEMPLATE_PUBLISH_TOKEN --repo upiscium/KUMIKI
 ```
 
 Publication is disabled unless the repository variable is explicitly enabled:
 
 ```sh
 gh variable set TEMPLATE_PUBLISH_ENABLED \
-  --repo upiscium/Templates \
+  --repo upiscium/KUMIKI \
   --body true
 ```
 
@@ -90,7 +90,7 @@ To stop publication without deleting the credential:
 
 ```sh
 gh variable set TEMPLATE_PUBLISH_ENABLED \
-  --repo upiscium/Templates \
+  --repo upiscium/KUMIKI \
   --body false
 ```
 
@@ -169,13 +169,13 @@ The existing local path remains supported independently:
 ```sh
 mkdir my-project
 cd my-project
-nix flake init -t github:upiscium/Templates#agent-python
+nix flake init -t github:upiscium/KUMIKI#agent-python
 nix develop --command just project::bootstrap
 ```
 
 ## Ownership and failure policy
 
-- Changes belong in `components/agent-core/**` or `components/adapters/**`, followed by normal rendering and review in `upiscium/Templates`.
+- Changes belong in `components/agent-core/**` or `components/adapters/**`, followed by normal rendering and review in `upiscium/KUMIKI`.
 - Never fix a distribution repository directly.
 - A distribution drift is evidence of manual/out-of-band mutation; the next verified publication replaces it from the source of truth.
 - Publish failures must remain visible as failed Actions jobs.

@@ -53,11 +53,11 @@ class OpencodeSelfContainmentTest(unittest.TestCase):
                 for identity in ("opencodeContract", "OpencodeContract", "opencode-contract"):
                     self.assertNotIn(identity, flake)
 
-    def test_agent_core_v3_version_and_upstream_identity_are_retained(self) -> None:
+    def test_agent_core_v3_version_retained_and_current_upstream_is_kumiki(self) -> None:
         core = ROOT / "components" / "agent-core" / ".automation"
         self.assertEqual("3\n", (core / "VERSION").read_text(encoding="utf-8"))
         self.assertEqual(
-            'repository = "github:upiscium/Templates"\n'
+            'repository = "github:upiscium/KUMIKI"\n'
             'ref = "main"\n'
             'component = "components/agent-core"\n',
             (core / "UPSTREAM").read_text(encoding="utf-8"),

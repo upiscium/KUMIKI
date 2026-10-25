@@ -10,31 +10,31 @@
       "published": true,
       "repository": "Template-Agent-Cpp-CMake",
       "default_branch": "main",
-      "description": "Generated Agent-ready C++/CMake template. Source: upiscium/Templates; do not edit directly."
+      "description": "Generated Agent-ready C++/CMake template. Source: upiscium/KUMIKI; do not edit directly."
     },
     "agent-nix": {
       "published": true,
       "repository": "Template-Agent-Nix",
       "default_branch": "main",
-      "description": "Generated Agent-ready Nix template. Source: upiscium/Templates; do not edit directly."
+      "description": "Generated Agent-ready Nix template. Source: upiscium/KUMIKI; do not edit directly."
     },
     "agent-python": {
       "published": true,
       "repository": "Template-Agent-Python",
       "default_branch": "main",
-      "description": "Generated Agent-ready Python + uv template. Source: upiscium/Templates; do not edit directly."
+      "description": "Generated Agent-ready Python + uv template. Source: upiscium/KUMIKI; do not edit directly."
     },
     "agent-rust": {
       "published": true,
       "repository": "Template-Agent-Rust",
       "default_branch": "main",
-      "description": "Generated Agent-ready Rust template. Source: upiscium/Templates; do not edit directly."
+      "description": "Generated Agent-ready Rust template. Source: upiscium/KUMIKI; do not edit directly."
     },
     "agent-typescript-node": {
       "published": true,
       "repository": "Template-Agent-TypeScript-Node",
       "default_branch": "main",
-      "description": "Generated Agent-ready TypeScript + Node.js + npm template. Source: upiscium/Templates; do not edit directly."
+      "description": "Generated Agent-ready TypeScript + Node.js + npm template. Source: upiscium/KUMIKI; do not edit directly."
     }
   }
 }

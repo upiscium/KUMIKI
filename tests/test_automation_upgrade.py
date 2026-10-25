@@ -539,7 +539,8 @@ mod project 'just/project/mod.just'
     def test_upstream_and_generated_parity(self) -> None:
         upstream = ROOT / "components" / "agent-core" / ".automation" / "UPSTREAM"
         ownership = ROOT / "components" / "agent-core" / ".automation" / "ownership.toml"
-        self.assertIn('repository = "github:upiscium/Templates"', upstream.read_text())
+        self.assertIn('repository = "github:upiscium/KUMIKI"', upstream.read_text())
+        self.assertNotIn('repository = "github:upiscium/Templates"', upstream.read_text())
         self.assertIn('"AGENTS.md" = "replace"', ownership.read_text())
         for template in ("agent-base", "agent-python", "agent-rust", "agent-nix", "agent-cpp-cmake", "agent-typescript-node"):
             self.assertEqual(
