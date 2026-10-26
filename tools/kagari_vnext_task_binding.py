@@ -87,17 +87,25 @@ def worktree_registered(project: Path, worktree: Path, branch_ref: str) -> None:
         raise ControlError("WORKTREE_MISMATCH", "Exact Git Worktree registration is absent")
 
 
-def resolve(args: argparse.Namespace) -> TaskBinding:
+def verify_task_record(args: argparse.Namespace) -> tuple[Path, str]:
+    """Re-use the #191/Worktree authority check before root Session creation.
+
+    This observes an already approved Task. It does not approve Issues or
+    modify their Worktrees, so Main remains responsible for eligibility.
+    """
     project = exact_dir(args.project_root, "Project")
     worktree = exact_dir(args.worktree, "Task Worktree")
-    if args.issue < 1:
+    if type(args.issue) is not int or args.issue < 1:
         raise ControlError("TASK_BINDING_INVALID", "Issue must be positive")
     worktree_registered(project, worktree, args.branch_ref)
     try:
         store = MetadataStore(project, args.repository, args.remote)
         tip = store.fetch_tip()
-        if tip is None:
-            raise ControlError("TASK_RECORD_ABSENT", "No canonical v4 metadata ref")
+    except (MetadataRefError, TypeError, ValueError):
+        raise ControlError("TASK_RECORD_INVALID", "Cannot verify Task Record/Contract") from None
+    if tip is None:
+        raise ControlError("TASK_RECORD_ABSENT", "No canonical v4 metadata ref")
+    try:
         records = TaskRecords(store, authorize=lambda _request: False)
         found = records.read(
             tip, task=str(args.issue), branch_ref=args.branch_ref,
@@ -109,7 +117,11 @@ def resolve(args: argparse.Namespace) -> TaskBinding:
     _record_id, record, _contract = found
     if "disposition" in record["payload"]:
         raise ControlError("TASK_RETIRED", "Task has a Human terminal disposition")
-    contract_id = record["payload"]["contract_id"]
+    return worktree, record["payload"]["contract_id"]
+
+
+def resolve(args: argparse.Namespace) -> TaskBinding:
+    worktree, contract_id = verify_task_record(args)
     candidate = TaskBinding.from_mapping({
         "schema_version": 1,
         "repository": args.repository,
