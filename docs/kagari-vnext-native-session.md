@@ -8,10 +8,13 @@ authority is created here.
 
 ## Minimal session start
 
-The Nix `.#kagari-control` package now exposes
-`kagari-vnext-session` alongside the existing `kagari-vnext-task`.
-Main can call the **host** session launcher as follows; these arguments
-are Main-side location inputs, not routine commands for end users.
+The Nix `.#kagari-control` package exposes `kagari-vnext-session`,
+`kagari-vnext-task`, and the opt-in host-side `kagari-vnext-worktree-install`.
+The latter must be used during linked-Worktree MVI install/repair to safely
+prepare the original Project root `.gitignore` (Issue #301); it does not
+change the existing GA package or authorize a Task. Main can call the
+**host** session launcher as follows; these arguments are Main-side
+location inputs, not routine commands for end users.
 
 ```sh
 kagari-vnext-session \
