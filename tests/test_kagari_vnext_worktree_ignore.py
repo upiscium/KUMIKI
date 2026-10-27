@@ -95,6 +95,20 @@ class WorktreeIgnoreTests(unittest.TestCase):
         self.assertEqual(helper.operate(self.project, "repair")["status"], "UPDATED")
         self.assertEqual(self.ignore.read_bytes(), b"build/\n/.worktrees/\n")
 
+    def test_prior_negation_followed_by_exact_rule_is_effective_noop(self):
+        original = b"!/.worktrees/\n/.worktrees/\n"
+        self.ignore.write_bytes(original)
+        before = self.git("rev-parse", "HEAD")
+        index = (self.project / ".git/index").read_bytes()
+        result = helper.operate(self.project, "install")
+        self.assertEqual(result["status"], "UNCHANGED")
+        self.assertTrue(result["git_ignore_effective"])
+        self.assertEqual(result["changed_paths"], [])
+        self.assertEqual(self.ignore.read_bytes(), original)
+        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+        self.assertEqual((self.project / ".git/index").read_bytes(), index)
+        self.assertEqual(helper.operate(self.project, "repair")["status"], "UNCHANGED")
+
     def test_existing_rule_masked_by_negation_blocks(self):
         original = b"/.worktrees/\n!/.worktrees/\n"
         self.ignore.write_bytes(original)

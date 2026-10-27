@@ -408,10 +408,12 @@ def operate(project: Path, operation: str) -> dict[str, Any]:
             original = before[0] if before else None
             demand(original is None or b"\x00" not in original,
                    "GITIGNORE_INVALID_CONTENT")
-            if original and conflicting_negation(original):
-                raise IgnoreBlocked("GITIGNORE_NEGATION_CONFLICT")
             ignored = effective_ignore(project)
             exact = original is not None and contains_rule(original)
+            # Preserve Git's last-matching-rule semantics. A negation that
+            # precedes a valid positive rule is not an effective conflict.
+            if original and not (exact and ignored) and conflicting_negation(original):
+                raise IgnoreBlocked("GITIGNORE_NEGATION_CONFLICT")
             if exact and not ignored:
                 raise IgnoreBlocked("GITIGNORE_RULE_NOT_EFFECTIVE")
             needs_change = not exact
