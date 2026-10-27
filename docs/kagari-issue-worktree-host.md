@@ -1,10 +1,11 @@
 # KAGARI #286 — opt-in Issue-linked Worktree host, P1 candidate
 
-**Status:** Source-only opt-in next-MVI candidate in Draft PR #299,
-not Merge-approved, not activated in KAGARI GA and not yet integrated with
-#163 Session dispatch / #291 Main Orchestrator. The allocator P1 and
-explicit post-Merge cleanup are separate host operations. Existing
-independent-clone GA remains the default.
+**Status:** The opt-in next-MVI Issue Worktree host was integrated by
+PR #299. It is not activated in KAGARI GA, and complete #163 Session
+dispatch / #291 Main Orchestrator integration remains separately qualified.
+The allocator P1, host install/repair prerequisite (#301) and explicit
+post-Merge cleanup are separate host operations. Existing independent-clone
+GA remains the default.
 
 ## Responsibility and minimal contract
 
@@ -38,9 +39,30 @@ primary Git Project and canonical owner/repository. Its `origin` is the
 existing Task metadata remote. No extra credentials, grant store, or
 `KAGARI_WORKTREE_APPROVED=true` style authorization is introduced.
 
-The primary Project's **tracked** `/.worktrees/` Git ignore rule must already
-exist; the allocator refuses an unignored managed namespace rather than
-silently making the user's original checkout dirty.
+Before the opt-in Issue-linked Worktree MVI is assigned an Issue, the trusted
+KAGARI **install/repair host** must run the #301 reconciliation command
+`tools/kagari_vnext_worktree_ignore.py install|repair --project-root <absolute-repo>`
+(or call its `operate()` function under the same restricted host authority).
+This prepares the Project-owned root `.gitignore` to contain `/.worktrees/`
+without an ordinary per-install Human Ask. It is not run by Task agents.
+Existing root `.gitignore` rewrites preserve the old inode in a Git-private
+backup (reported as `preserved_preimage`) rather than deleting data that a
+concurrent editor may still be writing through an open file descriptor.
+
+The allocator itself stays **read-only** with respect to `.gitignore`: it
+rejects `MANAGED_WORKTREE_NOT_IGNORED` if the rule is ineffective. #301 does
+not `git add` or commit the new rule. On a first install the rule may exist
+only in the original Project's working tree; the installer reports
+`needs_commit_for_new_clones=true` until the owning Project authorizes
+recording the rule in Git. This warning is not a per-Task launch approval or
+permission for KAGARI to commit on the user's behalf. A verified effective
+local ignore is sufficient for this allocator's namespace precondition,
+while durable propagation to other clones requires an ordinary separate
+Project commit. The legacy v0.1.0 GA independent Clone remains unchanged.
+The standalone host preflight is available as `kagari-vnext-worktree-install`
+in the opt-in `.#kagari-control` package. See
+[the MVI ignore installer](kagari-worktree-ignore-install.md) for
+examples, refusal cases and the explicit qualification boundary.
 
 ## Lifecycle
 
