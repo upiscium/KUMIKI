@@ -1,7 +1,7 @@
 { pkgs }:
 
-# KAGARI-owned opt-in vNext Task, Session, ignore-preflight and host prepare
-# entrypoints. None replaces the shipped GA or automatically starts a Task.
+# KAGARI opt-in vNext Task, Session, Worktree ignore, host prepare and Main.
+# Preserve shipped GA; Main must not auto-launch unauthorized Tasks.
 let
   sources = pkgs.runCommand "kagari-vnext-control-sources" {} ''
     mkdir -p "$out/tools" "$out/components/agent-core-v4"
@@ -10,6 +10,19 @@ let
     cp ${../tools/kagari_vnext_session.py} "$out/tools/kagari_vnext_session.py"
     cp ${../tools/kagari_vnext_worktree_ignore.py} "$out/tools/kagari_vnext_worktree_ignore.py"
     cp ${../tools/kagari_vnext_host_prepare.py} "$out/tools/kagari_vnext_host_prepare.py"
+    cp ${../tools/kagari_vnext_main.py} "$out/tools/kagari_vnext_main.py"
+    cp ${../tools/kagari_vnext_main_observation.py} "$out/tools/kagari_vnext_main_observation.py"
+    cp ${../tools/kagari_vnext_main_service.py} "$out/tools/kagari_vnext_main_service.py"
+    cp ${../tools/kagari_vnext_issue_bootstrap.py} "$out/tools/kagari_vnext_issue_bootstrap.py"
+    cp ${../tools/kagari_vnext_progress.py} "$out/tools/kagari_vnext_progress.py"
+    cp ${../tools/kagari_vnext_test_evidence.py} "$out/tools/kagari_vnext_test_evidence.py"
+    cp ${../components/agent-core-v4/issue_worktree.py} "$out/components/agent-core-v4/issue_worktree.py"
+    cp ${../components/agent-core-v4/issue_worktree_cleanup.py} "$out/components/agent-core-v4/issue_worktree_cleanup.py"
+    cp ${../components/agent-core-v4/evidence.py} "$out/components/agent-core-v4/evidence.py"
+    cp ${../components/agent-core-v4/task_view.py} "$out/components/agent-core-v4/task_view.py"
+    cp ${../components/agent-core-v4/task_collaboration.py} "$out/components/agent-core-v4/task_collaboration.py"
+    cp ${../components/agent-core-v4/collaboration_git.py} "$out/components/agent-core-v4/collaboration_git.py"
+    cp ${../components/agent-core-v4/operation_prerequisites.py} "$out/components/agent-core-v4/operation_prerequisites.py"
     cp ${../components/agent-core-v4/metadata_codec.py} "$out/components/agent-core-v4/metadata_codec.py"
     cp ${../components/agent-core-v4/metadata_ref.py} "$out/components/agent-core-v4/metadata_ref.py"
     cp ${../components/agent-core-v4/task_record.py} "$out/components/agent-core-v4/task_record.py"
@@ -42,7 +55,14 @@ let
       exec ${pkgs.python3}/bin/python3 -B ${sources}/tools/kagari_vnext_host_prepare.py "$@"
     '';
   };
+  main = pkgs.writeShellApplication {
+    name = "kagari-vnext-main";
+    runtimeInputs = [ pkgs.git pkgs.gh ];
+    text = ''
+      exec ${pkgs.python3}/bin/python3 -B ${sources}/tools/kagari_vnext_main_service.py "$@"
+    '';
+  };
 in pkgs.symlinkJoin {
   name = "kagari-vnext-control";
-  paths = [ task session worktreeInstall hostPrepare ];
+  paths = [ task session worktreeInstall hostPrepare main ];
 }
