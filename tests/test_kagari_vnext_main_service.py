@@ -119,6 +119,58 @@ except MainError as e:
         with service.MainSupervisor(fake(second,"acme/widgets")):
             pass
 
+    def test_first_run_missing_passwd_state_is_created_with_owner_only_lock_dir(self):
+        from types import SimpleNamespace
+        login_home = self.source.fixture.temp_root / "fresh-login-home"
+        login_home.mkdir(mode=0o700)
+        state = login_home / ".local" / "state"
+        self.assertFalse(state.exists())
+        with patch.object(service.pwd, "getpwuid",
+                          return_value=SimpleNamespace(pw_dir=str(login_home))):
+            with patch.object(service, "_host_state_home", return_value=state):
+                with service.MainSupervisor(self.main):
+                    self.assertTrue(state.is_dir())
+                    self.assertTrue((state / "kagari" /
+                                     "repository-main-locks").is_dir())
+                    for directory in (
+                        state.parent, state, state / "kagari",
+                        state / "kagari" / "repository-main-locks",
+                    ):
+                        self.assertFalse(directory.is_symlink())
+                        self.assertEqual(directory.stat().st_uid, os.geteuid())
+                        self.assertEqual(directory.stat().st_mode & 0o077, 0)
+                # After the first run, reopening uses the same canonical path
+                # and must not reset or replace lock ownership.
+                with service.MainSupervisor(self.main):
+                    pass
+        self.assertEqual(len(self.source.prompts()), 0)
+
+    def test_first_run_rejects_foreign_or_symlinked_passwd_parent(self):
+        from types import SimpleNamespace
+        login_home = self.source.fixture.temp_root / "unsafe-login-home"
+        login_home.mkdir(mode=0o700)
+        target = self.source.fixture.temp_root / "untrusted-local-parent"
+        target.mkdir(mode=0o700)
+        (login_home / ".local").symlink_to(target, target_is_directory=True)
+        state = login_home / ".local" / "state"
+        with patch.object(service.pwd, "getpwuid",
+                          return_value=SimpleNamespace(pw_dir=str(login_home))):
+            with patch.object(service, "_host_state_home", return_value=state):
+                with self.assertRaises(MainError) as error:
+                    service._host_repo_lock("acme/widgets")
+        self.assertEqual(error.exception.code, "MAIN_LOCK_NAMESPACE_UNSAFE")
+        self.assertFalse((target / "state").exists())
+        self.assertEqual(len(self.source.prompts()), 0)
+
+    def test_missing_noncanonical_lock_root_remains_refused(self):
+        unknown = self.source.fixture.temp_root / "operator-supplied-extra-state"
+        self.assertFalse(unknown.exists())
+        with patch.object(service, "_host_state_home", return_value=unknown):
+            with self.assertRaises(MainError) as error:
+                service._host_repo_lock("acme/widgets")
+        self.assertEqual(error.exception.code, "MAIN_LOCK_NAMESPACE_UNSAFE")
+        self.assertFalse(unknown.exists())
+
     def test_unsafe_host_lock_namespace_refuses_without_model(self):
         other = self.source.fixture.temp_root / "symlinked-main-state"
         target = self.source.fixture.temp_root / "some-real-state"

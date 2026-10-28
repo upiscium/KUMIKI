@@ -282,8 +282,33 @@ def _host_repo_lock(repository: str) -> Path:
             or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repository)):
         raise MainError("MAIN_REPOSITORY_INVALID")
     home = _host_state_home()
-    if (not home.is_absolute() or home.is_symlink()
-            or not home.is_dir() or home.resolve(strict=True) != home):
+    if not home.is_absolute() or home.is_symlink():
+        raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
+    if not home.is_dir():
+        # A fresh Linux user (including an ephemeral GitHub CI runner) may
+        # have no ~/.local/state yet. Bootstrap ONLY the OS passwd-derived
+        # user namespace; never allow HOME, XDG, Project config or a patched
+        # arbitrary path to select a host repository lock namespace.
+        owner_home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+        if (home != owner_home / ".local" / "state"
+                or not owner_home.is_absolute()
+                or owner_home.is_symlink()
+                or not owner_home.is_dir()
+                or owner_home.resolve(strict=True) != owner_home):
+            raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
+        _owned_directory(owner_home, private=False)
+        for ancestor in (home.parent, home):
+            try:
+                ancestor.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            except OSError:
+                raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE") from None
+            if (ancestor.is_symlink()
+                    or ancestor.resolve(strict=True) != ancestor):
+                raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
+            _owned_directory(ancestor, private=False)
+    if (not home.is_dir() or home.resolve(strict=True) != home):
         raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
     _owned_directory(home, private=False)
     for ancestor in (home / "kagari", home / "kagari" / "repository-main-locks"):

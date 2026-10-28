@@ -183,6 +183,23 @@ class CIPackageSetupTests(unittest.TestCase):
         self.assertIn("flake.packages.x86_64-linux.kagari-control",expression)
         self.assertNotIn("kagari-0.1.0",expression)
 
+    def test_vnext_entrypoint_inventory_includes_host_attach_and_main(self):
+        expected = {
+            "kagari-vnext-task": "tools/kagari_vnext_task_binding.py",
+            "kagari-vnext-session": "tools/kagari_vnext_session.py",
+            "kagari-vnext-worktree-install": "tools/kagari_vnext_worktree_ignore.py",
+            "kagari-vnext-host-prepare": "tools/kagari_vnext_host_prepare.py",
+            "kagari-vnext-attach": "tools/kagari_vnext_attach.py",
+            "kagari-vnext-main": "tools/kagari_vnext_main_service.py",
+        }
+        self.assertEqual(p.VNEXT_MAIN_ENTRYPOINTS, expected)
+        nix = (ROOT / "nix/kagari-vnext-control.nix").read_text()
+        for command, source in expected.items():
+            with self.subTest(command=command):
+                self.assertIn('name = "' + command + '"', nix)
+                self.assertIn("cp $" + "{../" + source + "}", nix)
+                self.assertIn("$" + "{sources}/" + source, nix)
+
     def test_vnext_package_verification_refuses_missing_binary(self):
         with tempfile.TemporaryDirectory(prefix="ci-vnext-guard-") as tmp:
             with self.assertRaisesRegex(p.CIBlocked,"missing executable"):

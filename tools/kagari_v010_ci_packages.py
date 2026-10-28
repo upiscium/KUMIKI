@@ -59,6 +59,15 @@ PACKAGES = {
                    "KAGARI_VNEXT_MAIN_PACKAGE",
                    "kagari-vnext-control"),
 }
+# Verify every opt-in Nix wrapper; an omitted binary must fail CI.
+VNEXT_MAIN_ENTRYPOINTS = {
+    "kagari-vnext-task": "tools/kagari_vnext_task_binding.py",
+    "kagari-vnext-session": "tools/kagari_vnext_session.py",
+    "kagari-vnext-worktree-install": "tools/kagari_vnext_worktree_ignore.py",
+    "kagari-vnext-host-prepare": "tools/kagari_vnext_host_prepare.py",
+    "kagari-vnext-attach": "tools/kagari_vnext_attach.py",
+    "kagari-vnext-main": "tools/kagari_vnext_main_service.py",
+}
 SHARD_RANGE = range(8)
 
 
@@ -385,13 +394,7 @@ def verify_package(root: Path, package: str, path: Path) -> None:
     elif package == "vnext-main":
         # This symlinkJoin has no GA qualification receipt. Verify all five
         # entrypoints and their single shared immutable source copy instead.
-        expected = {
-            "kagari-vnext-task": "tools/kagari_vnext_task_binding.py",
-            "kagari-vnext-session": "tools/kagari_vnext_session.py",
-            "kagari-vnext-worktree-install": "tools/kagari_vnext_worktree_ignore.py",
-            "kagari-vnext-host-prepare": "tools/kagari_vnext_host_prepare.py",
-            "kagari-vnext-main": "tools/kagari_vnext_main_service.py",
-        }
+        expected = VNEXT_MAIN_ENTRYPOINTS
         roots = set()
         store_root = re.compile(
             r"/nix/store/[0-9a-df-np-sv-z]{32}-kagari-vnext-control-sources")
