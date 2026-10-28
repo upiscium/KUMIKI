@@ -46,9 +46,10 @@ cleaner, or permission to edit a consumer's Task State directly.
 
    The Digest is a state-comparison token, **not** proof of human approval;
    operator authority must be established independently before invoking the
-   mutation. The tool revalidates inspection evidence and the immutable
-   Main/Task refs before removing only those two files. It never transitions
-   Task State. A partially
+   mutation. The tool revalidates the Task's committed-file fingerprints,
+   tracked/untracked cleanliness, inspection evidence, and immutable Main/Task
+   refs while holding terminal locks just before deleting only those two files.
+   It never transitions Task State. A partially
    completed two-file deletion must be reported and re-evaluated, not retried
    blindly.
 

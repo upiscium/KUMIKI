@@ -252,7 +252,9 @@ class FirstAdoptionFinalizeBridgeTest(unittest.TestCase):
             self.assertEqual(state.read_bytes(), first_state)
             self.assertIn("- Status: merged", first_state.decode("utf-8"))
             self.assertEqual(first_state.count(b"### Maintenance publication"), 1)
-            self.assertEqual(receipts.call_count, 4)
+            # Each finalized/idempotent run now rechecks the committed Task
+            # worktree inside its terminal lock in addition to preflight.
+            self.assertEqual(receipts.call_count, 6)
             self.assertEqual(publications.call_count, 4)
             self.assertEqual(prs.call_count, 4)
             self.assertTrue(all(call.args[1] == "23" for call in prs.call_args_list))

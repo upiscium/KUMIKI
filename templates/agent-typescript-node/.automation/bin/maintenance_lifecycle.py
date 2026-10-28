@@ -1351,6 +1351,13 @@ def maintenance_finalize(
         )
         lifecycle.assert_task_identity(record, task)
         _require_committed_task_head(record, commit)
+        # This reader performs only local Git/receipt/fingerprint/cleanliness
+        # checks; it does not acquire the Task State lock or reconstruct
+        # publication metadata. Run it under the existing terminal locks to
+        # reject tracked/untracked Task worktree drift just before the CAS.
+        terminal_receipt = _validate_consumed_receipt(record, task)
+        if terminal_receipt != receipt_after:
+            raise MaintenanceError("maintenance receipt changed before terminal transition")
         _require_terminal_snapshot_unchanged(record, terminal_snapshot, directory_fd)
 
     result = _mark_maintenance_merged(

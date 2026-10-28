@@ -80,6 +80,18 @@ class LegacyRefLockRecoveryTest(unittest.TestCase):
         self, root: Path, record, main_head: str, task_head: str,
         *, digest: str | None = None, creator_pid: int = 999999999
     ):
+        def validated_receipt(task_record, task_id):
+            self.assertEqual(task_id, "15")
+            result = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=all"],
+                cwd=task_record.path, text=True, capture_output=True, check=True,
+            )
+            if result.stdout.strip():
+                raise maintenance.MaintenanceError(
+                    "maintenance Task worktree is not clean after commit"
+                )
+            return {"commit_sha": task_head}
+
         with (
             mock.patch.object(
                 maintenance, "_stored_contract",
@@ -90,7 +102,7 @@ class LegacyRefLockRecoveryTest(unittest.TestCase):
             ) as live_issue,
             mock.patch.object(
                 maintenance, "_validate_consumed_receipt",
-                return_value={"commit_sha": task_head},
+                side_effect=validated_receipt,
             ),
             mock.patch.object(
                 maintenance, "_publication_evidence",
@@ -237,6 +249,55 @@ class LegacyRefLockRecoveryTest(unittest.TestCase):
                     "initialized",
                 )
 
+    def test_late_tracked_or_untracked_task_worktree_drift_blocks_lock_deletion(self):
+        # HEAD and all six Task State evidence files stay unchanged. Mutate
+        # only a product file after the inspector has opened the exact locks.
+        # The final locked clean-worktree check must reject before first unlink.
+        for variant in ("tracked", "untracked"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root, record, locks, main_head, task_head = self.fixture(
+                    Path(directory) / "repo"
+                )
+                approved = self.run_recovery(
+                    root, record, main_head, task_head
+                )["recoveryDigest"]
+                real_check = bridge._require_ref_lock_snapshots
+                observed = []
+
+                def mutate_after_initial_lock_check(items):
+                    real_check(items)
+                    observed.append(True)
+                    if len(observed) == 1:
+                        if variant == "tracked":
+                            (record.path / "data.txt").write_text(
+                                "late tracked edit\n", encoding="utf-8"
+                            )
+                        else:
+                            (record.path / "unscheduled.txt").write_text(
+                                "late untracked edit\n", encoding="utf-8"
+                            )
+
+                with mock.patch.object(
+                    bridge, "_require_ref_lock_snapshots",
+                    side_effect=mutate_after_initial_lock_check,
+                ):
+                    with self.assertRaisesRegex(
+                        maintenance.MaintenanceError,
+                        "maintenance Task worktree is not clean",
+                    ):
+                        self.run_recovery(
+                            root, record, main_head, task_head, digest=approved
+                        )
+                self.assertEqual(len(observed), 1)
+                self.assertTrue(all(lock.is_file() for lock in locks))
+                self.assertEqual(
+                    maintenance.lifecycle.state_status(
+                        record.path / ".task-state" / "task.md"
+                    ),
+                    "initialized",
+                )
+                self.assertEqual(self.git(record.path, "rev-parse", "HEAD"), task_head)
+
     def test_late_content_change_after_lease_break_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root, record, locks, main_head, task_head = self.fixture(
@@ -343,7 +404,9 @@ class LegacyRefLockRecoveryTest(unittest.TestCase):
             # synthetic fixture, not any real repository ref.
             task_ref = root / ".git/refs/heads/task/15-maintenance"
             task_ref.write_text(main_head + "\n", encoding="ascii")
-            with self.assertRaisesRegex(bridge.BridgeError, "Task HEAD no longer matches"):
+            # The stricter clean-tree check can catch this drift before the
+            # explicit Task HEAD check. Either fail-closed rejection is valid.
+            with self.assertRaises((bridge.BridgeError, maintenance.MaintenanceError)):
                 self.run_recovery(root, record, main_head, task_head)
             self.assertTrue(all(lock.exists() for lock in locks))
             self.assertEqual(

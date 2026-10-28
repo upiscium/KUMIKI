@@ -851,6 +851,9 @@ def _maintenance_ref_lock_recovery(
     with lifecycle.work_units_lock(record) as directory_fd:
         lifecycle.assert_task_identity(record, task)
         _require_exact_synced_refs(root_path, branch, expected_main, lifecycle)
+        locked_receipt = maintenance._validate_consumed_receipt(record, task)
+        if locked_receipt != receipt:
+            raise BridgeError("maintenance consumed receipt changed during recovery")
         maintenance._require_terminal_snapshot_unchanged(record, frozen, directory_fd)
         with _inspected_terminal_ref_locks(record, refs, lifecycle) as locks:
             _require_expected_task_head(maintenance, record, expected_task)
@@ -876,6 +879,9 @@ def _maintenance_ref_lock_recovery(
             _require_terminated_lock_creator(creator_pid)
             _require_exact_synced_refs(root_path, branch, expected_main, lifecycle)
             _require_expected_task_head(maintenance, record, expected_task)
+            final_receipt = maintenance._validate_consumed_receipt(record, task)
+            if final_receipt != receipt:
+                raise BridgeError("maintenance consumed receipt changed before removal")
             _require_exclusive_ref_leases(locks)
             _require_ref_lock_snapshots(locks)
             removed = []

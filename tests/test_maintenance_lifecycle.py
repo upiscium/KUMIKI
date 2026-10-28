@@ -1360,6 +1360,83 @@ class MaintenanceLifecycleTest(unittest.TestCase):
                             )
                     self.assertEqual(maintenance.lifecycle.state_status(path), "initialized")
 
+    def test_finalize_terminal_rejects_late_dirty_task_worktree_under_real_locks(self):
+        # No mocked terminal Task/ref locking. Change only an ordinary Task
+        # file after preflight verification and immediately before the final
+        # callback, while both canonical locks are held.
+        for variant in ("tracked", "untracked"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "repo"
+                root.mkdir()
+                self._init_repo(root)
+                (root / ".git" / "info" / "exclude").write_text(
+                    "/.task-state/\n/.worktrees/\n", encoding="utf-8"
+                )
+                self._write(root, "tracked.txt", "baseline\n")
+                main_head = self._commit(root, "main baseline")
+                task = root / ".worktrees" / "21-maintenance"
+                branch = "task/21-agent-core-v3-1-5"
+                self._git(root, "worktree", "add", "-b", branch, str(task))
+                self._write(task, "tracked.txt", "maintenance\n")
+                task_head = self._commit(task, "maintenance subject")
+                self._state(task)
+                state_dir = task / ".task-state"
+                for name in maintenance._TERMINAL_EVIDENCE_FILES:
+                    if name != "task.md":
+                        (state_dir / name).write_text("{}\n", encoding="utf-8")
+                record = maintenance.lifecycle.WorktreeRecord(task, branch, task_head)
+                receipt = {"commit_sha": task_head}
+                original_mark = maintenance._mark_maintenance_merged
+                injected = []
+
+                def validates_worktree(task_record, task_id):
+                    self.assertEqual(task_id, "21")
+                    dirty = self._git(
+                        task_record.path, "status", "--porcelain", "--untracked-files=all"
+                    )
+                    if dirty:
+                        raise maintenance.MaintenanceError(
+                            "maintenance Task worktree is not clean after commit"
+                        )
+                    return receipt
+
+                def inject_under_terminal_lock(task_record, task_id, **kwargs):
+                    callback = kwargs["validate_before_write"]
+
+                    def wrapped_callback(directory_fd):
+                        injected.append(True)
+                        if variant == "tracked":
+                            self._write(task, "tracked.txt", "late edit\n")
+                        else:
+                            self._write(task, "untracked.txt", "late file\n")
+                        return callback(directory_fd)
+
+                    kwargs["validate_before_write"] = wrapped_callback
+                    return original_mark(task_record, task_id, **kwargs)
+
+                with (
+                    mock.patch.object(maintenance.lifecycle, "require_main_worktree"),
+                    mock.patch.object(maintenance, "_stored_contract", return_value=(record, {"repository": "example/repo"})),
+                    mock.patch.object(maintenance, "_require_live_maintenance_contract"),
+                    mock.patch.object(maintenance, "_validate_consumed_receipt", side_effect=validates_worktree),
+                    mock.patch.object(maintenance, "_publication_evidence", return_value=([], "21: maintenance", "body")),
+                    mock.patch.object(maintenance, "_merged_pr", return_value={"mergeCommitOid": main_head}),
+                    mock.patch.object(maintenance.lifecycle, "synchronize_default_branch", return_value={"branch": "main", "revision": main_head}),
+                    mock.patch.object(maintenance.lifecycle, "require_synchronized_default_branch_revision"),
+                    mock.patch.object(maintenance.lifecycle, "require_resolved_contract"),
+                    mock.patch.object(maintenance, "_mark_maintenance_merged", side_effect=inject_under_terminal_lock),
+                ):
+                    with self.assertRaisesRegex(
+                        maintenance.MaintenanceError, "worktree is not clean"
+                    ):
+                        maintenance.maintenance_finalize(root, "21", 22)
+
+                self.assertEqual(injected, [True])
+                self.assertEqual(maintenance.lifecycle.state_status(state_dir / "task.md"), "initialized")
+                self.assertEqual(self._git(task, "rev-parse", "HEAD"), task_head)
+                for name in ("main.lock", "task/21-agent-core-v3-1-5.lock"):
+                    self.assertFalse((root / ".git" / "refs" / "heads" / name).exists())
+
     def test_terminal_transition_revalidates_before_writing_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
