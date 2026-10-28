@@ -204,7 +204,9 @@ def repository_identity(root: Path) -> str:
     return identity
 
 
-def fetch_issue(root: Path, issue: str, runner=None) -> tuple[str, dict]:
+def fetch_issue(
+    root: Path, issue: str, runner=None, *, allow_closed: bool = False
+) -> tuple[str, dict]:
     number = validate_issue_number(issue)
     identity = repository_identity(root)
     env = os.environ.copy()
@@ -247,7 +249,8 @@ def fetch_issue(root: Path, issue: str, runner=None) -> tuple[str, dict]:
     ):
         raise ContractError("Issue URL/repository identity mismatch")
     if payload.get("state") != "open":
-        raise ContractError("Issue must be open")
+        if not (allow_closed is True and payload.get("state") == "closed"):
+            raise ContractError("Issue must be open")
     if len(title) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in title):
         raise ContractError("Issue title contains control characters")
     if len(body.encode("utf-8")) > 1024 * 1024:

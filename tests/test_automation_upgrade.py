@@ -2891,8 +2891,16 @@ mod project 'just/project/mod.just'
         self.assertIn("tools/automation_recovery_bridge.py", justfile)
         self.assertIn("recover-maintenance-authority", justfile)
         self.assertIn("commit-recovered-maintenance", justfile)
-        for forbidden in ("git push", "git merge", "apply"):
+        # Issue #85 recovery recipes must never run a broad apply or raw
+        # Git publication. A later, separately approved maintenance-ref-locks
+        # operation may expose an explicit --apply-digest argument, so do not
+        # reject that unrelated recipe via a whole-file substring check.
+        for forbidden in ("git push", "git merge"):
             self.assertNotIn(forbidden, justfile)
+        authority_recipe = justfile.split("\nrecover-maintenance-authority target:", 1)[1].split("\n[working-directory: root]", 1)[0]
+        commit_recipe = justfile.split("\ncommit-recovered-maintenance target task message=", 1)[1].split("\n[working-directory: root]", 1)[0]
+        self.assertNotIn("apply", authority_recipe)
+        self.assertNotIn("apply", commit_recipe)
         if shutil.which("just") is None:
             self.skipTest("just is unavailable")
         with tempfile.TemporaryDirectory() as directory:

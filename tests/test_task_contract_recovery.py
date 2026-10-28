@@ -318,7 +318,9 @@ class TaskContractRecoveryTest(unittest.TestCase):
              mock.patch("sys.stdout", new_callable=io.StringIO) as output:
             verified.return_value.__enter__.return_value = {"maintenance_lifecycle": maintenance}
             self.assertEqual(bridge.main(), 0)
-        maintenance.maintenance_finalize.assert_called_once_with(target, "112", 7)
+        maintenance.maintenance_finalize.assert_called_once_with(
+            target, "112", 7, issue_runner=bridge.trusted_gh_run
+        )
         self.assertEqual(json.loads(output.getvalue())["implementationRevision"], "b" * 40)
 
     def test_verified_maintenance_modules_are_private_and_restore_process_state(self) -> None:
