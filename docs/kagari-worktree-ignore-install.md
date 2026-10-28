@@ -17,8 +17,12 @@ Worktree and honor a BLOCKED result. From a separate KUMIKI source checkout:
 
 The opt-in KUMIKI Nix package .#kagari-control also exposes
 bin/kagari-vnext-worktree-install with the same plan/install/repair/doctor
-arguments. The trusted MVI host should use that external, pinned executable
-during its eventual complete attach workflow.
+arguments. For the first host-owned opt-in integration slice (#304), the separate
+`kagari-vnext-host-prepare` command invokes that preflight during an
+explicit `linked-worktree-mvi-preview` Install/Repair preparation. See
+[host preparation](kagari-vnext-host-prepare.md). It records readiness
+outside the Project but does **not** install a v4 runtime or start Tasks.
+The future complete native-v4 attach host must incorporate this contract.
 
 The Nix environment belongs to KUMIKI; it is never evaluated from the
 target Project. Plan/doctor inspect without changing Project content.
