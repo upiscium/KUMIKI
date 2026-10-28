@@ -310,6 +310,41 @@ class HostPrepareTests(unittest.TestCase):
                          self.before_head)
         self.assertFalse(list((self.home / host.STATE_DIR).glob("attach-*.json")))
 
+    def test_project_swapped_during_validation_never_pins_foreign_root(self):
+        # The outer host must hold the selected inode *before* it invokes
+        # the Git root validator. Switching to a second valid repo after
+        # validation must never turn that repo into the approved target.
+        original_validator = ignore.primary_project
+        selected = self.project
+        moved_original = self.base / "original-during-validation"
+        before_fds = len(os.listdir("/proc/self/fd"))
+
+        def swap_after_git_validation(project):
+            result = original_validator(project)
+            selected.rename(moved_original)
+            selected.mkdir()
+            subprocess.run(
+                ["git", "-C", str(selected), "init", "-q", "-b", "main"],
+                check=True, capture_output=True,
+            )
+            (selected / "README.md").write_bytes(b"foreign repository\n")
+            return result
+
+        with patch.object(ignore, "primary_project",
+                          side_effect=swap_after_git_validation):
+            self.blocked("PROJECT_IDENTITY_CHANGED_DURING_VALIDATION")
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before_fds)
+        self.assertFalse((selected / ".gitignore").exists())
+        self.assertFalse((moved_original / ".gitignore").exists())
+        self.assertEqual((selected / "README.md").read_bytes(),
+                         b"foreign repository\n")
+        self.assertEqual((moved_original / "README.md").read_bytes(),
+                         b"baseline\n")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=moved_original),
+                         self.before_head)
+        state_namespace = self.home / host.STATE_DIR
+        self.assertFalse(state_namespace.exists())
+
     def test_helper_identity_pin_stops_bad_expected_inode_before_mutation(self):
         with self.assertRaises(ignore.IgnoreBlocked) as ctx:
             ignore.operate(

@@ -69,10 +69,28 @@ def source_sha() -> str:
 
 
 def project_identity(project: Path) -> dict[str, Any]:
-    project, _git_dir = ignore.primary_project(project)
-    meta = project.stat()
-    return {"project_root": str(project),
-            "project_device": meta.st_dev, "project_inode": meta.st_ino}
+    # Pin the original caller-selected inode BEFORE Git root validation.
+    # A valid foreign checkout substituted by a concurrent rename during
+    # validation must not become the identity authorized for this operation.
+    need(project.is_absolute() and not project.is_symlink(),
+         "PROJECT_ROOT_NOT_CANONICAL")
+    try:
+        fd = os.open(project, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise HostBlocked("PROJECT_ROOT_UNAVAILABLE", str(exc)) from exc
+    try:
+        original = os.fstat(fd)
+        project, _git_dir = ignore.primary_project(project)
+        current = os.stat(project, follow_symlinks=False)
+        need(stat.S_ISDIR(original.st_mode) and stat.S_ISDIR(current.st_mode)
+             and (original.st_dev, original.st_ino) ==
+             (current.st_dev, current.st_ino),
+             "PROJECT_IDENTITY_CHANGED_DURING_VALIDATION")
+        return {"project_root": str(project),
+                "project_device": original.st_dev,
+                "project_inode": original.st_ino}
+    finally:
+        os.close(fd)
 
 
 def state_name(identity: dict[str, Any]) -> str:
