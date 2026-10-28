@@ -404,7 +404,37 @@ def _maintenance_stage(
 
 
 def maintenance_check(root_path: Path, task: str) -> dict:
-    record, contract = _validated_contract(root_path, task)
+    try:
+        record, contract = _validated_contract(root_path, task)
+    except MaintenanceError as exc:
+        if str(exc) != "Issue must be open":
+            raise
+    else:
+        return _maintenance_stage(record, task, contract)
+
+    # A merged maintenance PR normally closes its Issue. Only this exact
+    # closed-Issue condition may use the frozen Task Contract, and only after
+    # proving the immutable PR/verification/terminal publication evidence.
+    record, contract = _stored_contract(root_path, task)
+    if lifecycle.state_status(lifecycle.state_path(record.path)) != "merged":
+        raise MaintenanceError("closed Issue cannot resume an unmerged maintenance Task")
+    receipt = _validate_consumed_receipt(record, task)
+    commit = receipt["commit_sha"]
+    _, title, body = _publication_evidence(record, task, receipt)
+    pr = _pr_evidence(record, contract["repository"], commit)
+    if pr is None or pr.get("state") != "MERGED":
+        raise MaintenanceError("merged maintenance Task has no exact merged PR")
+    live = _merged_pr(
+        root_path, record, contract["repository"], pr["number"], commit, title, body
+    )
+    publication_line = (
+        f"PR #{pr['number']} merged from {commit}; "
+        f"merge commit {live['mergeCommitOid']}; finalization finalized"
+    )
+    _validate_finalized_publication(
+        lifecycle.state_path(record.path).read_text(encoding="utf-8"),
+        publication_line,
+    )
     return _maintenance_stage(record, task, contract)
 
 
@@ -1037,12 +1067,59 @@ def _merged_pr(
     return {**details, "mergeCommitOid": merge_oid.lower()}
 
 
+# These files carry the canonical post-merge maintenance authority. Snapshot
+# them with the Task State lock *before* entering the terminal critical section;
+# compare through its existing directory FD at commit time. Never re-enter
+# contract_state_lock while work_units_lock is held.
+_TERMINAL_EVIDENCE_FILES = (
+    "task.md",
+    "contract.json",
+    "issue.json",
+    "work-units.json",
+    "verification.json",
+    "automation-maintenance.consumed.json",
+)
+
+
+def _terminal_evidence_snapshot(record: lifecycle.WorktreeRecord) -> dict[str, bytes]:
+    try:
+        with lifecycle.work_units_lock(record) as directory_fd:
+            task_contract._assert_state_dir_binding(record.path, directory_fd)
+            values = {
+                name: task_contract._read_state_file(directory_fd, name)
+                for name in _TERMINAL_EVIDENCE_FILES
+            }
+            if any(value is None for value in values.values()):
+                raise MaintenanceError("maintenance terminal evidence file is missing")
+            return {name: value for name, value in values.items() if value is not None}
+    except (lifecycle.LifecycleError, OSError) as exc:
+        raise MaintenanceError("maintenance terminal evidence is unavailable or unsafe") from exc
+
+
+def _require_terminal_snapshot_unchanged(
+    record: lifecycle.WorktreeRecord,
+    expected: dict[str, bytes],
+    directory_fd: int,
+) -> None:
+    """CAS immutable evidence using the caller's already-acquired Task lock."""
+    try:
+        task_contract._assert_state_dir_binding(record.path, directory_fd)
+        for name in _TERMINAL_EVIDENCE_FILES:
+            if task_contract._read_state_file(directory_fd, name) != expected[name]:
+                raise MaintenanceError(
+                    "maintenance terminal evidence changed before state transition: " + name
+                )
+    except (lifecycle.LifecycleError, OSError) as exc:
+        raise MaintenanceError("maintenance terminal evidence is unavailable or unsafe") from exc
+
+
+
 def _mark_maintenance_merged(
     record: lifecycle.WorktreeRecord,
     task: str,
     *,
     publication_line: str | None = None,
-    validate_before_write: Callable[[], None] | None = None,
+    validate_before_write: Callable[[int], None] | None = None,
     default_branch: str | None = None,
     default_revision: str | None = None,
 ) -> str:
@@ -1055,7 +1132,7 @@ def _mark_maintenance_merged(
     """
     lifecycle.validate_task(task)
     lifecycle.require_resolved_contract(record, task)
-    with lifecycle.work_units_lock(record):
+    with lifecycle.work_units_lock(record) as directory_fd:
         lifecycle.assert_task_identity(record, task)
         with _terminal_ref_locks(
             record,
@@ -1063,7 +1140,9 @@ def _mark_maintenance_merged(
             default_revision=default_revision,
         ):
             if validate_before_write is not None:
-                validate_before_write()
+                # The callback must use this already-locked directory FD. A
+                # second contract_state_lock() call would self-deadlock.
+                validate_before_write(directory_fd)
             path = lifecycle.state_path(record.path)
             previous = lifecycle.state_status(path)
             if previous == "merged":
@@ -1200,26 +1279,17 @@ def maintenance_finalize(root_path: Path, task: str, pr_number: int) -> dict:
         "finalization finalized"
     )
 
-    def validate_terminal_evidence() -> None:
+    # All GitHub, reconstruction and full project evidence checks above were
+    # performed before locking. Freeze their backing Task State bytes so the
+    # final CAS can reject drift without reentering the non-reentrant lock.
+    terminal_snapshot = _terminal_evidence_snapshot(record)
+
+    def validate_terminal_evidence(directory_fd: int) -> None:
         lifecycle.require_synchronized_default_branch_revision(
             root_path, sync["branch"], sync["revision"]
         )
-        terminal_receipt = _validate_consumed_receipt(record, task)
-        if terminal_receipt != receipt_after:
-            raise MaintenanceError(
-                "maintenance receipt changed before terminal transition"
-            )
-        if _publication_evidence(record, task, terminal_receipt) != publication_evidence:
-            raise MaintenanceError(
-                "maintenance publication reconstruction changed before terminal transition"
-            )
-        terminal_pr = _merged_pr(
-            root_path, record, contract["repository"], pr_number, commit, title, body
-        )
-        if terminal_pr["mergeCommitOid"] != merge_oid:
-            raise MaintenanceError(
-                "maintenance pull request merge evidence changed before terminal transition"
-            )
+        lifecycle.assert_task_identity(record, task)
+        _require_terminal_snapshot_unchanged(record, terminal_snapshot, directory_fd)
 
     result = _mark_maintenance_merged(
         record,

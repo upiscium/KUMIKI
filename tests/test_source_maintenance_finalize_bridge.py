@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import io
 import json
@@ -137,6 +138,13 @@ class FirstAdoptionFinalizeBridgeTest(unittest.TestCase):
                 "- Status: initialized\n- Blockers: none\n- Unverified: none\n",
                 encoding="utf-8",
             )
+            # The terminal CAS must see all of its actual persisted authority
+            # files, even when this bridge fixture mocks remote GitHub reads.
+            for filename in (
+                "contract.json", "issue.json", "work-units.json",
+                "verification.json", "automation-maintenance.consumed.json",
+            ):
+                (state_dir / filename).write_text("{}\n", encoding="utf-8")
 
             subprocess.run(
                 ("git", "clone", str(remote), str(publisher)),
@@ -159,6 +167,21 @@ class FirstAdoptionFinalizeBridgeTest(unittest.TestCase):
             canonical_body = "canonical body"
             live_body = canonical_body + "\n"
             publication = (["Justfile"], "22: maintenance", canonical_body)
+            # Real Linux FLOCK (nonblocking): reconstructing publication
+            # evidence while already in the terminal Task lock must fail.
+            # The old finalizer executed this for a third time and deadlocked.
+            with maintenance.lifecycle.work_units_lock(record):
+                pass
+            lock_path = state_dir / "work-units.lock"
+
+            def reconstruct_with_real_lock(*_args):
+                with lock_path.open("rb") as locked_file:
+                    fcntl.flock(locked_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    try:
+                        return publication
+                    finally:
+                        fcntl.flock(locked_file.fileno(), fcntl.LOCK_UN)
+
             merged = {
                 "number": 23,
                 "title": "22: maintenance",
@@ -199,7 +222,7 @@ class FirstAdoptionFinalizeBridgeTest(unittest.TestCase):
             ), mock.patch.object(
                 maintenance, "_validate_consumed_receipt", return_value={"commit_sha": task_head}
             ) as receipts, mock.patch.object(
-                maintenance, "_publication_evidence", return_value=publication
+                maintenance, "_publication_evidence", side_effect=reconstruct_with_real_lock
             ) as publications, mock.patch.object(
                 maintenance.agent_core, "pr_details", return_value=merged
             ) as prs, mock.patch.object(
@@ -222,13 +245,67 @@ class FirstAdoptionFinalizeBridgeTest(unittest.TestCase):
             self.assertEqual(state.read_bytes(), first_state)
             self.assertIn("- Status: merged", first_state.decode("utf-8"))
             self.assertEqual(first_state.count(b"### Maintenance publication"), 1)
-            self.assertEqual(receipts.call_count, 6)
-            self.assertEqual(publications.call_count, 6)
-            self.assertEqual(prs.call_count, 6)
+            self.assertEqual(receipts.call_count, 4)
+            self.assertEqual(publications.call_count, 4)
+            self.assertEqual(prs.call_count, 4)
             self.assertTrue(all(call.args[1] == "23" for call in prs.call_args_list))
             self.assertEqual(merged["body"], live_body)
             self.assertEqual(live_body.count("\n"), 1)
             self.assertEqual(publication[2].rstrip("\n"), publication[2])
+
+
+    def test_source_ref_lock_recovery_dispatch_binds_exact_identity_and_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "consumer"
+            target.mkdir()
+            revision = "a" * 40
+            merged = "b" * 40
+            task_head = "c" * 40
+            digest = "d" * 64
+            fake = mock.Mock()
+            initial_report = {"status": "INSPECT_ONLY", "recoveryDigest": digest}
+            with (
+                mock.patch.object(bridge, "_clean_root", return_value=revision),
+                mock.patch.object(bridge, "_verify_bootstrap"),
+                mock.patch.object(bridge, "_validate_target_git_configuration"),
+                mock.patch.object(bridge, "maintenance_environment", return_value=nullcontext()),
+                mock.patch.object(bridge, "_verified_modules") as module_context,
+                mock.patch.object(bridge, "_maintenance_ref_lock_recovery", return_value=initial_report) as recovery,
+            ):
+                module_context.return_value.__enter__.return_value = {
+                    "maintenance_lifecycle": fake,
+                }
+
+                def run(args: list[str]) -> dict:
+                    with (
+                        mock.patch.object(sys, "argv", args),
+                        mock.patch("sys.stdout", new_callable=io.StringIO) as output,
+                    ):
+                        self.assertEqual(bridge.main(), 0)
+                    return json.loads(output.getvalue())
+
+                args = [
+                    "bridge", "maintenance-ref-locks", str(target),
+                    "15", "17", merged, task_head, "1757545", revision,
+                ]
+                inspected = run(args)
+                self.assertEqual(inspected["status"], "INSPECT_ONLY")
+                self.assertEqual(inspected["implementationRevision"], revision)
+                recovery.assert_called_with(
+                    {"maintenance_lifecycle": fake}, target, "15", 17, merged, task_head,
+                    1757545, apply_digest=None,
+                )
+
+                recovery.return_value = {
+                    "status": "EXACT_REF_LOCKS_RECOVERED", "recoveryDigest": digest,
+                }
+                applied = run(args + ["--apply-digest", digest])
+                self.assertEqual(applied["status"], "EXACT_REF_LOCKS_RECOVERED")
+                recovery.assert_called_with(
+                    {"maintenance_lifecycle": fake}, target, "15", 17, merged, task_head,
+                    1757545, apply_digest=digest,
+                )
+
 
 
 if __name__ == "__main__":

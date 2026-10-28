@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -19,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping
-from contextlib import contextmanager, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -620,6 +621,217 @@ def maintenance_environment():
             os.environ.update(previous)
 
 
+# Legacy v3 consumer-only crash recovery. Not installed in KAGARI templates.
+def _require_terminated_lock_creator(pid: int) -> None:
+    if type(pid) is not int or pid <= 1:
+        raise BridgeError("terminal lock recovery requires the exact dead creator PID")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    except PermissionError as exc:
+        raise BridgeError("terminal lock creator process status is inaccessible") from exc
+    raise BridgeError("terminal ref lock creator PID is still alive or reused")
+
+
+def _ref_lock_parent(record, branch: str, lifecycle) -> tuple[Path, str]:
+    lifecycle.validate_branch_name(branch)
+    common = lifecycle.common_git_dir(record.path)
+    current = common
+    for component in ("refs", "heads", *branch.split("/")[:-1]):
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise BridgeError("terminal ref lock directory is unavailable") from exc
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise BridgeError("terminal ref lock directory is unsafe")
+        current = current / component
+    try:
+        metadata = current.lstat()
+    except OSError as exc:
+        raise BridgeError("terminal ref lock directory is unavailable") from exc
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise BridgeError("terminal ref lock directory is unsafe")
+    return current, branch.split("/")[-1] + ".lock"
+
+
+def _no_other_lock_holders(identities: set[tuple[int, int]]) -> None:
+    """Fail closed if any same-UID process still has a referenced inode open."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        raise BridgeError("Linux process FD inspection is required for ref lock recovery")
+    try:
+        processes = list(proc.iterdir())
+    except OSError as exc:
+        raise BridgeError("cannot inspect local processes") from exc
+    for process in processes:
+        if not process.name.isdecimal() or int(process.name) == os.getpid():
+            continue
+        try:
+            owner = process.stat().st_uid
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise BridgeError("cannot validate process owner during lock recovery") from exc
+        if owner != os.getuid():
+            continue
+        try:
+            descriptors = list((process / "fd").iterdir())
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise BridgeError("cannot inspect same-user process descriptors") from exc
+        for descriptor in descriptors:
+            try:
+                opened = descriptor.stat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise BridgeError("cannot inspect same-user open descriptors") from exc
+            if (opened.st_dev, opened.st_ino) in identities:
+                raise BridgeError("terminal ref lock is still open by another process")
+
+
+@contextmanager
+def _inspected_terminal_ref_locks(
+    record,
+    refs: tuple[tuple[str, str], ...],
+    lifecycle,
+):
+    """Pin the exact two existing Git lock files without creating new ref files."""
+    with ExitStack() as stack:
+        checked = []
+        for branch, head in refs:
+            if not isinstance(head, str) or lifecycle.OID_RE.fullmatch(head) is None:
+                raise BridgeError("terminal ref recovery HEAD identity is invalid")
+            parent, name = _ref_lock_parent(record, branch, lifecycle)
+            flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                parent_fd = os.open(parent, flags)
+                stack.callback(os.close, parent_fd)
+                lock_fd = os.open(
+                    name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                    dir_fd=parent_fd,
+                )
+                stack.callback(os.close, lock_fd)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                before = os.fstat(lock_fd)
+                expected = (head + "\n").encode("ascii")
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or stat.S_IMODE(before.st_mode) != 0o600
+                    or before.st_uid != os.getuid()
+                    or before.st_gid != os.getgid()
+                    or before.st_nlink != 1
+                    or before.st_size != len(expected)
+                    or os.read(lock_fd, len(expected) + 1) != expected
+                ):
+                    raise BridgeError("terminal ref lock content or ownership mismatch")
+                after = os.fstat(lock_fd)
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                attributes = ("st_dev", "st_ino", "st_mode", "st_nlink",
+                              "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+                if any(getattr(before, key) != getattr(after, key)
+                       or getattr(before, key) != getattr(current, key)
+                       for key in attributes):
+                    raise BridgeError("terminal ref lock changed during inspection")
+                checked.append({
+                    "branch": branch,
+                    "head": head,
+                    "path": f"refs/heads/{branch}.lock",
+                    "device": before.st_dev,
+                    "inode": before.st_ino,
+                    "mtimeNs": before.st_mtime_ns,
+                    "ctimeNs": before.st_ctime_ns,
+                    "parentFd": parent_fd,
+                    "fileFd": lock_fd,
+                    "name": name,
+                })
+            except (OSError, BlockingIOError) as exc:
+                raise BridgeError("terminal ref lock is unavailable or actively held") from exc
+        yield checked
+
+
+def _require_exact_synced_refs(root_path: Path, branch: str, head: str, lifecycle) -> None:
+    try:
+        lifecycle.require_synchronized_default_branch_revision(root_path, branch, head)
+    except lifecycle.LifecycleError as exc:
+        raise BridgeError("maintenance ref lock recovery default branch is not synchronized") from exc
+
+
+def _maintenance_ref_lock_recovery(
+    modules,
+    root_path: Path,
+    task: str,
+    pr_number: int,
+    expected_main: str,
+    expected_task: str,
+    creator_pid: int,
+    *,
+    apply_digest: str | None = None,
+) -> dict:
+    """Inspect, then separately authorize exact stale ref lock removal.
+
+    This source-side operation never finalizes Task State, edits product files,
+    or scans/removes arbitrary Git lock paths. No implicit --apply.
+    """
+    maintenance = modules["maintenance_lifecycle"]
+    lifecycle = modules["task_lifecycle"]
+    lifecycle.require_main_worktree(root_path)
+    record, contract = maintenance._stored_contract(root_path, task)
+    if lifecycle.state_status(lifecycle.state_path(record.path)) != "initialized":
+        raise BridgeError("ref lock recovery requires unfinalized maintenance Task")
+    receipt = maintenance._validate_consumed_receipt(record, task)
+    if receipt["commit_sha"] != expected_task:
+        raise BridgeError("expected maintenance commit changed")
+    _, title, body = maintenance._publication_evidence(record, task, receipt)
+    merged = maintenance._merged_pr(
+        root_path, record, contract["repository"], pr_number, expected_task, title, body
+    )
+    if merged["mergeCommitOid"] != expected_main:
+        raise BridgeError("expected merged PR commit changed")
+    branch = lifecycle.default_branch(root_path)
+    _require_exact_synced_refs(root_path, branch, expected_main, lifecycle)
+    _require_terminated_lock_creator(creator_pid)
+    frozen = maintenance._terminal_evidence_snapshot(record)
+    refs = ((branch, expected_main), (record.branch, expected_task))
+    with lifecycle.work_units_lock(record) as directory_fd:
+        lifecycle.assert_task_identity(record, task)
+        _require_exact_synced_refs(root_path, branch, expected_main, lifecycle)
+        maintenance._require_terminal_snapshot_unchanged(record, frozen, directory_fd)
+        with _inspected_terminal_ref_locks(record, refs, lifecycle) as locks:
+            _no_other_lock_holders({(lock["device"], lock["inode"]) for lock in locks})
+            evidence = {
+                "task": task, "pr": pr_number,
+                "mainHead": expected_main, "taskHead": expected_task,
+                "deadCreatorPid": creator_pid,
+                "locks": [{key: value for key, value in lock.items()
+                           if key in {"branch", "head", "path", "device", "inode", "mtimeNs", "ctimeNs"}}
+                          for lock in locks],
+            }
+            digest = hashlib.sha256(
+                json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if apply_digest is None:
+                return {"status": "INSPECT_ONLY", "recoveryDigest": digest, **evidence}
+            if not isinstance(apply_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", apply_digest):
+                raise BridgeError("recovery requires approved exact inspection digest")
+            if digest != apply_digest:
+                raise BridgeError("terminal ref lock recovery inspection is stale")
+            _require_terminated_lock_creator(creator_pid)
+            _no_other_lock_holders({(lock["device"], lock["inode"]) for lock in locks})
+            for lock in locks:
+                current = os.stat(lock["name"], dir_fd=lock["parentFd"], follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (lock["device"], lock["inode"]):
+                    raise BridgeError("terminal ref lock changed before removal")
+            for lock in locks:
+                os.unlink(lock["name"], dir_fd=lock["parentFd"])
+                os.fsync(lock["parentFd"])
+    return {"status": "EXACT_REF_LOCKS_RECOVERED", "recoveryDigest": digest, **evidence}
+
+
+
+
 def parser() -> argparse.ArgumentParser:
     result = BoundedArgumentParser(description="Templates source-side maintenance recovery bridge")
     sub = result.add_subparsers(dest="command", required=True, parser_class=BoundedArgumentParser)
@@ -655,6 +867,15 @@ def parser() -> argparse.ArgumentParser:
     finalize.add_argument("task", type=_issue_argument)
     finalize.add_argument("pr", type=_issue_argument)
     finalize.add_argument("expected_implementation_revision", type=_revision_argument)
+    ref_locks = sub.add_parser("maintenance-ref-locks")
+    ref_locks.add_argument("target", type=Path)
+    ref_locks.add_argument("task", type=_issue_argument)
+    ref_locks.add_argument("pr", type=_issue_argument)
+    ref_locks.add_argument("expected_main", type=_revision_argument)
+    ref_locks.add_argument("expected_task", type=_revision_argument)
+    ref_locks.add_argument("creator_pid", type=int)
+    ref_locks.add_argument("expected_implementation_revision", type=_revision_argument)
+    ref_locks.add_argument("--apply-digest", type=_digest_argument, default=None)
     publication = sub.add_parser("publication-recover")
     publication.add_argument("target", type=Path)
     publication.add_argument("task", type=_issue_argument)
@@ -2180,6 +2401,7 @@ def main() -> int:
             args.expected_implementation_revision
             if args.command in {
                 "maintenance-finalize",
+                "maintenance-ref-locks",
                 "post-merge-publication-recover",
                 "publication-ready-recover",
                 "publication-recover",
@@ -2192,9 +2414,9 @@ def main() -> int:
         _verify_bootstrap(ROOT, revision)
         _clean_root(ROOT, revision)
         target = args.target.resolve()
-        if args.command in {"maintenance-finalize", "post-merge-publication-recover", "publication-ready-recover", "publication-recover", "bootstrap-upgrade", "maintenance-contract-refresh-inspect", "maintenance-contract-refresh", "recover-missing-task-state"} and target == ROOT:
+        if args.command in {"maintenance-finalize", "maintenance-ref-locks", "post-merge-publication-recover", "publication-ready-recover", "publication-recover", "bootstrap-upgrade", "maintenance-contract-refresh-inspect", "maintenance-contract-refresh", "recover-missing-task-state"} and target == ROOT:
             raise BridgeError(f"{args.command} target must not be the source root")
-        if args.command in {"maintenance-finalize", "post-merge-publication-recover", "publication-ready-recover", "publication-recover", "bootstrap-upgrade", "maintenance-contract-refresh-inspect", "maintenance-contract-refresh", "recover-missing-task-state"}:
+        if args.command in {"maintenance-finalize", "maintenance-ref-locks", "post-merge-publication-recover", "publication-ready-recover", "publication-recover", "bootstrap-upgrade", "maintenance-contract-refresh-inspect", "maintenance-contract-refresh", "recover-missing-task-state"}:
             _validate_target_git_configuration(target)
         with maintenance_environment():
             if args.command in {"recover-task-contract-from-issue", "resume-contract-check"}:
@@ -2223,6 +2445,15 @@ def main() -> int:
                     _clean_root(ROOT, revision)
                     value = modules["maintenance_lifecycle"].maintenance_finalize(
                         target, args.task, int(args.pr)
+                    )
+                    result = {**value, "implementationRevision": revision}
+            elif args.command == "maintenance-ref-locks":
+                with _verified_modules(ROOT, revision) as modules:
+                    _clean_root(ROOT, revision)
+                    value = _maintenance_ref_lock_recovery(
+                        modules,
+                        target, args.task, int(args.pr), args.expected_main,
+                        args.expected_task, args.creator_pid, apply_digest=args.apply_digest,
                     )
                     result = {**value, "implementationRevision": revision}
             elif args.command in {"maintenance-contract-refresh-inspect", "maintenance-contract-refresh"}:

@@ -747,6 +747,7 @@ class MaintenanceLifecycleTest(unittest.TestCase):
                 mock.patch.object(maintenance.lifecycle, "synchronize_default_branch", return_value=sync),
                 mock.patch.object(maintenance.lifecycle, "run", return_value=Result()),
                 mock.patch.object(maintenance.lifecycle, "require_synchronized_default_branch_revision"),
+                mock.patch.object(maintenance, "_terminal_evidence_snapshot", return_value={}),
                 mock.patch.object(maintenance, "_mark_maintenance_merged", return_value="finalized") as mark,
                 mock.patch.object(maintenance.lifecycle, "append_task_evidence"),
             ):
@@ -783,6 +784,42 @@ class MaintenanceLifecycleTest(unittest.TestCase):
                 self.assertRaisesRegex(maintenance.MaintenanceError, "verification evidence is stale"),
             ):
                 maintenance._publication_evidence(record, "21", receipt)
+
+    def test_merged_maintenance_check_validates_closed_issue_via_exact_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._state(root, "merged")
+            record = self._record(root)
+            line = (
+                f"PR #22 merged from {self.HEAD}; merge commit {self.MERGE}; "
+                "finalization finalized"
+            )
+            task_path = root / ".task-state" / "task.md"
+            task_path.write_text(
+                maintenance._add_finalized_publication(
+                    task_path.read_text(encoding="utf-8"), line
+                ),
+                encoding="utf-8",
+            )
+            pr = {"number": 22, "state": "MERGED"}
+            with (
+                mock.patch.object(maintenance, "_validated_contract", side_effect=maintenance.MaintenanceError("Issue must be open")),
+                mock.patch.object(maintenance, "_stored_contract", return_value=(record, self._contract(root))),
+                mock.patch.object(maintenance, "_validate_consumed_receipt", return_value={"commit_sha": self.HEAD}),
+                mock.patch.object(maintenance, "_publication_evidence", return_value=([], "title", "body")),
+                mock.patch.object(maintenance, "_pr_evidence", return_value=pr),
+                mock.patch.object(maintenance, "_merged_pr", return_value={"mergeCommitOid": self.MERGE}) as merged_check,
+                mock.patch.object(maintenance.task_contract, "_validate_authoritative_issue") as live_issue,
+            ):
+                result = maintenance.maintenance_check(root, "21")
+                self.assertEqual(result["status"], "COMPLETED")
+                self.assertEqual(result["stage"], "merged")
+                live_issue.assert_not_called()
+                merged_check.assert_called_once()
+
+                pr["state"] = "OPEN"
+                with self.assertRaisesRegex(maintenance.MaintenanceError, "no exact merged PR"):
+                    maintenance.maintenance_check(root, "21")
 
     def test_merged_pr_requires_canonical_title_and_body(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -909,6 +946,33 @@ class MaintenanceLifecycleTest(unittest.TestCase):
                             "canonical body",
                         )
 
+    def test_terminal_snapshot_cas_detects_drift_with_real_work_unit_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._state(root)
+            record = self._record(root)
+            state_dir = root / ".task-state"
+            for name in maintenance._TERMINAL_EVIDENCE_FILES:
+                if name != "task.md":
+                    (state_dir / name).write_bytes(b"{}\n")
+
+            frozen = maintenance._terminal_evidence_snapshot(record)
+            with maintenance.lifecycle.work_units_lock(record) as directory_fd:
+                maintenance._require_terminal_snapshot_unchanged(
+                    record, frozen, directory_fd
+                )
+
+            (state_dir / "work-units.json").write_bytes(b'{"tampered":true}\n')
+            with maintenance.lifecycle.work_units_lock(record) as directory_fd:
+                with self.assertRaisesRegex(
+                    maintenance.MaintenanceError,
+                    "terminal evidence changed.*work-units.json",
+                ):
+                    maintenance._require_terminal_snapshot_unchanged(
+                        record, frozen, directory_fd
+                    )
+            self.assertEqual(maintenance.lifecycle.state_status(state_dir / "task.md"), "initialized")
+
     def test_dedicated_terminal_transition_does_not_change_normal_transition_table(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1005,7 +1069,7 @@ class MaintenanceLifecycleTest(unittest.TestCase):
             self._state(root)
             record = self._record(root)
 
-            def moved() -> None:
+            def moved(_directory_fd: int) -> None:
                 raise maintenance.MaintenanceError(
                     "maintenance receipt changed before terminal transition"
                 )
