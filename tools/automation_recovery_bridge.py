@@ -13,6 +13,7 @@ import os
 import pwd
 import re
 import secrets
+import signal
 import shlex
 import shutil
 import stat
@@ -655,41 +656,51 @@ def _ref_lock_parent(record, branch: str, lifecycle) -> tuple[Path, str]:
     return current, branch.split("/")[-1] + ".lock"
 
 
-def _no_other_lock_holders(identities: set[tuple[int, int]]) -> None:
-    """Fail closed if any same-UID process still has a referenced inode open."""
-    proc = Path("/proc")
-    if not proc.is_dir():
-        raise BridgeError("Linux process FD inspection is required for ref lock recovery")
+def _release_ref_lease(fd: int) -> None:
+    """Release a held lease if still present; close always follows separately."""
     try:
-        processes = list(proc.iterdir())
+        if fcntl.fcntl(fd, fcntl.F_GETLEASE) != fcntl.F_UNLCK:
+            fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_UNLCK)
     except OSError as exc:
-        raise BridgeError("cannot inspect local processes") from exc
-    for process in processes:
-        if not process.name.isdecimal() or int(process.name) == os.getpid():
-            continue
+        raise BridgeError("terminal ref lock lease could not be released") from exc
+
+
+def _require_ref_lock_snapshots(locks: list[dict]) -> None:
+    """Recheck pinned FD contents and *all* original inode/path attributes."""
+    keys = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+            "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+    for lock in locks:
         try:
-            owner = process.stat().st_uid
-        except FileNotFoundError:
-            continue
+            handle = os.fstat(lock["fileFd"])
+            current = os.stat(
+                lock["name"], dir_fd=lock["parentFd"], follow_symlinks=False
+            )
+            os.lseek(lock["fileFd"], 0, os.SEEK_SET)
+            content = os.read(lock["fileFd"], len(lock["contents"]) + 1)
         except OSError as exc:
-            raise BridgeError("cannot validate process owner during lock recovery") from exc
-        if owner != os.getuid():
-            continue
+            raise BridgeError("terminal ref lock changed or became inaccessible") from exc
+        if (
+            content != lock["contents"]
+            or any(
+                getattr(metadata, name) != lock["metadata"][name]
+                for name in keys
+                for metadata in (handle, current)
+            )
+        ):
+            raise BridgeError("terminal ref lock approved contents or metadata changed")
+
+
+def _require_exclusive_ref_leases(locks: list[dict]) -> None:
+    """The kernel must confirm neither target has a conflicting open FD."""
+    if not hasattr(fcntl, "F_GETLEASE"):
+        raise BridgeError("kernel file lease verification is unavailable")
+    for lock in locks:
         try:
-            descriptors = list((process / "fd").iterdir())
-        except FileNotFoundError:
-            continue
+            lease = fcntl.fcntl(lock["fileFd"], fcntl.F_GETLEASE)
         except OSError as exc:
-            raise BridgeError("cannot inspect same-user process descriptors") from exc
-        for descriptor in descriptors:
-            try:
-                opened = descriptor.stat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise BridgeError("cannot inspect same-user open descriptors") from exc
-            if (opened.st_dev, opened.st_ino) in identities:
-                raise BridgeError("terminal ref lock is still open by another process")
+            raise BridgeError("terminal ref lock lease became unverifiable") from exc
+        if lease != fcntl.F_WRLCK:
+            raise BridgeError("terminal ref lock exclusive lease was broken")
 
 
 @contextmanager
@@ -698,8 +709,22 @@ def _inspected_terminal_ref_locks(
     refs: tuple[tuple[str, str], ...],
     lifecycle,
 ):
-    """Pin the exact two existing Git lock files without creating new ref files."""
+    """Pin both exact ref locks with kernel-enforced exclusive file leases.
+
+    Unlike /proc/<pid>/fd scanning, F_WRLCK succeeds only when no other
+    process holds an open file description for the inode. This is a legacy
+    source-side recovery process, so SIGIO is ignored only while the leases
+    exist, and the previous handler is restored on exit.
+    """
+    if not all(hasattr(fcntl, name) for name in ("F_SETLEASE", "F_GETLEASE", "F_WRLCK", "F_UNLCK")):
+        raise BridgeError("Linux exclusive file leases are unavailable")
     with ExitStack() as stack:
+        try:
+            previous_sigio = signal.getsignal(signal.SIGIO)
+            signal.signal(signal.SIGIO, signal.SIG_IGN)
+        except (ValueError, OSError) as exc:
+            raise BridgeError("cannot safely handle lease-break signals") from exc
+        stack.callback(signal.signal, signal.SIGIO, previous_sigio)
         checked = []
         for branch, head in refs:
             if not isinstance(head, str) or lifecycle.OID_RE.fullmatch(head) is None:
@@ -724,8 +749,14 @@ def _inspected_terminal_ref_locks(
                     or before.st_gid != os.getgid()
                     or before.st_nlink != 1
                     or before.st_size != len(expected)
-                    or os.read(lock_fd, len(expected) + 1) != expected
                 ):
+                    raise BridgeError("terminal ref lock content or ownership mismatch")
+                try:
+                    fcntl.fcntl(lock_fd, fcntl.F_SETLEASE, fcntl.F_WRLCK)
+                except OSError as exc:
+                    raise BridgeError("terminal ref lock has an open holder or leases are unsupported") from exc
+                stack.callback(_release_ref_lease, lock_fd)
+                if os.read(lock_fd, len(expected) + 1) != expected:
                     raise BridgeError("terminal ref lock content or ownership mismatch")
                 after = os.fstat(lock_fd)
                 current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -743,12 +774,21 @@ def _inspected_terminal_ref_locks(
                     "inode": before.st_ino,
                     "mtimeNs": before.st_mtime_ns,
                     "ctimeNs": before.st_ctime_ns,
+                    "mode": stat.S_IMODE(before.st_mode),
+                    "uid": before.st_uid,
+                    "gid": before.st_gid,
+                    "nlink": before.st_nlink,
+                    "size": before.st_size,
+                    "contentSha256": hashlib.sha256(expected).hexdigest(),
+                    "metadata": {key: getattr(before, key) for key in attributes},
+                    "contents": expected,
                     "parentFd": parent_fd,
                     "fileFd": lock_fd,
                     "name": name,
                 })
             except (OSError, BlockingIOError) as exc:
                 raise BridgeError("terminal ref lock is unavailable or actively held") from exc
+        _require_exclusive_ref_leases(checked)
         yield checked
 
 
@@ -814,13 +854,14 @@ def _maintenance_ref_lock_recovery(
         maintenance._require_terminal_snapshot_unchanged(record, frozen, directory_fd)
         with _inspected_terminal_ref_locks(record, refs, lifecycle) as locks:
             _require_expected_task_head(maintenance, record, expected_task)
-            _no_other_lock_holders({(lock["device"], lock["inode"]) for lock in locks})
+            _require_exclusive_ref_leases(locks)
+            _require_ref_lock_snapshots(locks)
             evidence = {
                 "task": task, "pr": pr_number,
                 "mainHead": expected_main, "taskHead": expected_task,
                 "deadCreatorPid": creator_pid,
                 "locks": [{key: value for key, value in lock.items()
-                           if key in {"branch", "head", "path", "device", "inode", "mtimeNs", "ctimeNs"}}
+                           if key in {"branch", "head", "path", "device", "inode", "mtimeNs", "ctimeNs", "mode", "uid", "gid", "nlink", "size", "contentSha256"}}
                           for lock in locks],
             }
             digest = hashlib.sha256(
@@ -833,15 +874,25 @@ def _maintenance_ref_lock_recovery(
             if digest != apply_digest:
                 raise BridgeError("terminal ref lock recovery inspection is stale")
             _require_terminated_lock_creator(creator_pid)
+            _require_exact_synced_refs(root_path, branch, expected_main, lifecycle)
             _require_expected_task_head(maintenance, record, expected_task)
-            _no_other_lock_holders({(lock["device"], lock["inode"]) for lock in locks})
-            for lock in locks:
-                current = os.stat(lock["name"], dir_fd=lock["parentFd"], follow_symlinks=False)
-                if (current.st_dev, current.st_ino) != (lock["device"], lock["inode"]):
-                    raise BridgeError("terminal ref lock changed before removal")
-            for lock in locks:
-                os.unlink(lock["name"], dir_fd=lock["parentFd"])
-                os.fsync(lock["parentFd"])
+            _require_exclusive_ref_leases(locks)
+            _require_ref_lock_snapshots(locks)
+            removed = []
+            try:
+                for lock in locks:
+                    os.unlink(lock["name"], dir_fd=lock["parentFd"])
+                    removed.append(lock["path"])
+                    os.fsync(lock["parentFd"])
+            except OSError as exc:
+                if removed:
+                    remaining = [lock["path"] for lock in locks if lock["path"] not in removed]
+                    raise BridgeError(
+                        "PARTIAL_REF_LOCK_RECOVERY: removed=" + repr(removed)
+                        + " remaining=" + repr(remaining)
+                        + "; inspect and recover manually; do not retry blindly"
+                    ) from exc
+                raise BridgeError("terminal ref lock recovery failed before any removal") from exc
     return {"status": "EXACT_REF_LOCKS_RECOVERED", "recoveryDigest": digest, **evidence}
 
 

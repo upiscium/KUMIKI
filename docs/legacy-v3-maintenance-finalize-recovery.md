@@ -25,8 +25,11 @@ cleaner, or permission to edit a consumer's Task State directly.
 
    The source-side inspector requires canonical Task/PR evidence, a clean
    synchronized Main, stable Task evidence, matching owner/mode/link count and
-   contents on both ref locks, and no accessible process holding either inode.
-   It returns `INSPECT_ONLY` and a `recoveryDigest`. It does not delete locks.
+   contents on both ref locks, and Linux `F_SETLEASE(F_WRLCK)` **exclusive file
+   leases** on both pinned inodes. A write lease is granted only if no other
+   process has an open descriptor for that file. The helper holds these leases
+   through the final metadata/contents check and any approved deletion. It
+   returns `INSPECT_ONLY` and a `recoveryDigest`. It does not delete locks.
 
 4. **Separate explicit human approval is required** for removal of precisely
    those two locks. No general cleaning, force-unlock, or manual `rm` is
@@ -62,20 +65,30 @@ cleaner, or permission to edit a consumer's Task State directly.
 
 ## Fail-closed environment limitations
 
-Some Linux hosts deny even the same user access to other processes'
-`/proc/<pid>/fd` entries (for example, through ptrace restrictions). The lock
-inspector deliberately **blocks** if it cannot prove that no process still
-holds either ref lock. A PASS in a synthetic fixture with a mocked process
-inventory does not clear this host gate. Do not disable inspection, use
-elevated privileges without separate authorization, substitute an unverified
-tool, or manually remove the locks.
+The recovery checker uses Linux kernel file leases instead of reading
+`/proc/<pid>/fd`, which some hosts restrict even for same-UID processes.
+`F_SETLEASE(F_WRLCK)` fails closed if the file has another open descriptor,
+if the filesystem does not support leases, or if the caller lacks ownership
+or lease permissions. The helper temporarily ignores SIGIO lease-break
+notifications and restores the prior handler after closing the leases; it
+also requires `F_GETLEASE == F_WRLCK` before any deletion. A competing file
+open can break a lease, so this is not permission for concurrent Git work.
+Actual same-filesystem synthetic tests on Adam exercised both no-holder
+success and another-process-holder rejection without mocking process lists.
+Do not disable inspection, use elevated privileges without separate
+authorization, substitute an unverified tool, or manually remove the locks.
 
 The inspector also refuses symlinks, hard links, non-0600 files, changed
 content, changed inode metadata, a live/reused creator PID, changed Main/Task
-refs, and non-matching PR or verification evidence. Unix unlink cannot
-atomically compare path inode identity at deletion time; the operation
-therefore requires a quiescent repository maintenance window in addition to
-the final immediate rechecks.
+refs, and non-matching PR or verification evidence. The `recoveryDigest`
+includes both files' content hashes and ownership/mode/size/link-count data.
+Immediately before deletion the helper rechecks both pinned FDs and directory
+entries for their complete byte contents and original metadata. If a first
+unlink has already occurred but a later `unlink` or `fsync` fails, it returns
+`PARTIAL_REF_LOCK_RECOVERY` with the precise removed and remaining paths;
+**do not retry blindly**. Unix unlink cannot atomically compare path inode
+identity at deletion time, so an independently established quiescent repository
+maintenance window remains necessary.
 
 ## Test coverage
 

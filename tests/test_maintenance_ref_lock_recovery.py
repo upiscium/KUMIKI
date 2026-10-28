@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import os
 import subprocess
@@ -113,26 +114,198 @@ class LegacyRefLockRecoveryTest(unittest.TestCase):
             unrelated.parent.mkdir(exist_ok=True)
             unrelated.write_text("unrelated", encoding="utf-8")
             before = [lock.read_bytes() for lock in locks]
-            # The test environment restricts inspection of several same-UID
-            # /proc/*/fd entries. Verify the exact recovery CAS in isolation;
-            # production must still fail closed on inaccessible processes.
-            with mock.patch.object(bridge, "_no_other_lock_holders"):
-                result = self.run_recovery(root, record, main_head, task_head)
+            # Real Linux exclusive write leases, with no mocked process scan.
+            result = self.run_recovery(root, record, main_head, task_head)
             self.assertEqual(result["status"], "INSPECT_ONLY")
             self.assertEqual([lock.read_bytes() for lock in locks], before)
-            with mock.patch.object(bridge, "_no_other_lock_holders"):
-                with self.assertRaisesRegex(bridge.BridgeError, "inspection is stale"):
-                    self.run_recovery(root, record, main_head, task_head, digest="0" * 64)
+            with self.assertRaisesRegex(bridge.BridgeError, "inspection is stale"):
+                self.run_recovery(root, record, main_head, task_head, digest="0" * 64)
             self.assertEqual([lock.read_bytes() for lock in locks], before)
-            with mock.patch.object(bridge, "_no_other_lock_holders"):
-                applied = self.run_recovery(
-                    root, record, main_head, task_head, digest=result["recoveryDigest"]
-                )
+            applied = self.run_recovery(
+                root, record, main_head, task_head, digest=result["recoveryDigest"]
+            )
             self.assertEqual(applied["status"], "EXACT_REF_LOCKS_RECOVERED")
             self.assertTrue(all(not lock.exists() for lock in locks))
             self.assertEqual(unrelated.read_text(encoding="utf-8"), "unrelated")
             self.assertEqual(self.git(root, "rev-parse", "HEAD"), main_head)
             self.assertEqual(self.git(record.path, "rev-parse", "HEAD"), task_head)
+            self.assertEqual(
+                maintenance.lifecycle.state_status(record.path / ".task-state/task.md"),
+                "initialized",
+            )
+
+    def test_other_process_holding_open_fd_denies_lease(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, record, locks, main_head, task_head = self.fixture(Path(directory) / "repo")
+            holder = subprocess.Popen(
+                [
+                    sys.executable, "-B", "-c",
+                    "import os,sys,time; "
+                    "f=os.open(sys.argv[1],os.O_RDONLY); "
+                    "print('OPEN',flush=True); time.sleep(20)",
+                    str(locks[0]),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert holder.stdout is not None
+                self.assertEqual(holder.stdout.readline().strip(), "OPEN")
+                with self.assertRaisesRegex(
+                    bridge.BridgeError, "open holder or leases are unsupported"
+                ):
+                    self.run_recovery(root, record, main_head, task_head)
+                self.assertTrue(all(lock.exists() for lock in locks))
+            finally:
+                holder.terminate()
+                holder.wait(timeout=5)
+                if holder.stdout:
+                    holder.stdout.close()
+                if holder.stderr:
+                    holder.stderr.close()
+            result = self.run_recovery(root, record, main_head, task_head)
+            self.assertEqual(result["status"], "INSPECT_ONLY")
+
+    def test_broken_exclusive_lease_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, record, locks, main_head, task_head = self.fixture(Path(directory) / "repo")
+            refs = (
+                ("main", main_head),
+                ("task/15-maintenance", task_head),
+            )
+            with bridge._inspected_terminal_ref_locks(
+                record, refs, maintenance.lifecycle
+            ) as checked:
+                self.assertTrue(all(
+                    fcntl.fcntl(lock["fileFd"], fcntl.F_GETLEASE) == fcntl.F_WRLCK
+                    for lock in checked
+                ))
+                fcntl.fcntl(
+                    checked[0]["fileFd"], fcntl.F_SETLEASE, fcntl.F_UNLCK
+                )
+                with self.assertRaisesRegex(
+                    bridge.BridgeError, "exclusive lease was broken"
+                ):
+                    bridge._require_exclusive_ref_leases(checked)
+            self.assertTrue(all(lock.exists() for lock in locks))
+
+    def test_late_metadata_and_path_drift_rejected_before_deletion(self):
+        for variant in ("mode", "hardlink", "rename"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                root, record, locks, main_head, task_head = self.fixture(
+                    Path(directory) / "repo"
+                )
+                inspection = self.run_recovery(root, record, main_head, task_head)
+                approved = inspection["recoveryDigest"]
+                # Precreate the new inode before taking a kernel lease.
+                replacement = root / ".git" / "replacement-staged"
+                replacement.write_bytes(locks[0].read_bytes())
+                replacement.chmod(0o600)
+                observed = []
+                genuine = bridge._require_ref_lock_snapshots
+
+                def inject_once(items):
+                    genuine(items)
+                    observed.append(True)
+                    if len(observed) == 1:
+                        if variant == "mode":
+                            locks[0].chmod(0o644)
+                        elif variant == "hardlink":
+                            os.link(locks[0], locks[0].with_suffix(".backup"))
+                        else:
+                            locks[0].rename(root / ".git" / "original-orphan")
+                            replacement.rename(locks[0])
+
+                with mock.patch.object(
+                    bridge, "_require_ref_lock_snapshots", side_effect=inject_once
+                ):
+                    with self.assertRaisesRegex(
+                        bridge.BridgeError, "approved contents or metadata changed"
+                    ):
+                        self.run_recovery(
+                            root, record, main_head, task_head, digest=approved
+                        )
+                # The first snapshot succeeds; the second must raise before
+                # reporting a second successful comparison.
+                self.assertEqual(len(observed), 1)
+                self.assertTrue(all(lock.exists() for lock in locks))
+                self.assertEqual(
+                    maintenance.lifecycle.state_status(
+                        record.path / ".task-state" / "task.md"
+                    ),
+                    "initialized",
+                )
+
+    def test_late_content_change_after_lease_break_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, record, locks, main_head, task_head = self.fixture(
+                Path(directory) / "repo"
+            )
+            digest = self.run_recovery(root, record, main_head, task_head)["recoveryDigest"]
+            real_recheck = bridge._require_ref_lock_snapshots
+            called = []
+
+            def tamper(items):
+                real_recheck(items)
+                called.append(True)
+                if len(called) == 1:
+                    # Synthetic failure injection: explicitly release the test
+                    # lease and overwrite the same inode via the fixture only.
+                    bridge._release_ref_lease(items[0]["fileFd"])
+                    locks[0].write_text("0" * 40 + "\n", encoding="ascii")
+
+            with mock.patch.object(
+                bridge, "_require_ref_lock_snapshots", side_effect=tamper
+            ):
+                with self.assertRaises(bridge.BridgeError):
+                    self.run_recovery(root, record, main_head, task_head, digest=digest)
+            self.assertTrue(all(lock.exists() for lock in locks))
+
+    def test_partial_removal_reports_fsync_failure_and_preserves_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, record, locks, main_head, task_head = self.fixture(
+                Path(directory) / "repo"
+            )
+            digest = self.run_recovery(root, record, main_head, task_head)["recoveryDigest"]
+            with mock.patch.object(
+                bridge.os, "fsync", side_effect=OSError(5, "injected fsync failure")
+            ):
+                with self.assertRaisesRegex(
+                    bridge.BridgeError, "PARTIAL_REF_LOCK_RECOVERY"
+                ) as failure:
+                    self.run_recovery(root, record, main_head, task_head, digest=digest)
+            self.assertIn("refs/heads/main.lock", str(failure.exception))
+            self.assertIn(
+                "refs/heads/task/15-maintenance.lock", str(failure.exception)
+            )
+            self.assertFalse(locks[0].exists())
+            self.assertTrue(locks[1].exists())
+            self.assertEqual(
+                maintenance.lifecycle.state_status(record.path / ".task-state/task.md"),
+                "initialized",
+            )
+
+    def test_partial_removal_reports_second_unlink_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, record, locks, main_head, task_head = self.fixture(
+                Path(directory) / "repo"
+            )
+            digest = self.run_recovery(root, record, main_head, task_head)["recoveryDigest"]
+            original_unlink = bridge.os.unlink
+
+            def fail_second(path, *, dir_fd=None):
+                if path == "15-maintenance.lock":
+                    raise OSError(5, "injected second unlink failure")
+                return original_unlink(path, dir_fd=dir_fd)
+
+            with mock.patch.object(bridge.os, "unlink", side_effect=fail_second):
+                with self.assertRaisesRegex(
+                    bridge.BridgeError, "PARTIAL_REF_LOCK_RECOVERY"
+                ):
+                    self.run_recovery(root, record, main_head, task_head, digest=digest)
+            self.assertFalse(locks[0].exists())
+            self.assertTrue(locks[1].exists())
             self.assertEqual(
                 maintenance.lifecycle.state_status(record.path / ".task-state/task.md"),
                 "initialized",
