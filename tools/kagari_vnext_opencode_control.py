@@ -117,7 +117,10 @@ class OpenCode:
                     raise ControlError("UPSTREAM_INVALID", "OpenCode response too large")
                 return json.loads(raw) if raw else None
         except HTTPError as exc:
-            raise ControlError("UPSTREAM_HTTP", "OpenCode API returned HTTP " + str(exc.code)) from None
+            try:
+                raise ControlError("UPSTREAM_HTTP", "OpenCode API returned HTTP " + str(exc.code))
+            finally:
+                exc.close()
         except (URLError, OSError, TimeoutError):
             raise ControlError("UPSTREAM_UNAVAILABLE", "OpenCode server unavailable") from None
         except (ValueError, UnicodeError):
@@ -168,7 +171,10 @@ def status(binding: TaskBinding, client: OpenCode) -> dict[str, Any]:
         state = "UNKNOWN"
     asks = client.pending()
     return {"status": "ok", "operation": "status", "task": binding.subject(),
-            "session_state": state, "pending_asks": len(asks)}
+            "session_state": state, "pending_asks": len(asks),
+            "task_attention": "NEEDS_APPROVAL" if asks else
+                              "UNKNOWN" if state in ("busy", "retry", "UNKNOWN")
+                              else "NO_PENDING_ASK_OBSERVED"}
 
 
 def reply(binding: TaskBinding, client: OpenCode, args: argparse.Namespace) -> dict[str, Any]:

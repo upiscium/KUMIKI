@@ -58,7 +58,10 @@ class Handler(BaseHTTPRequestHandler):
             self.emit(200, {} if getattr(self.server, "sparse_status", False) else
                       {SESSION: {"type": self.server.session_status}})
         elif path == "/permission":
-            self.emit(200, list(self.server.permissions))
+            if getattr(self.server, "permission_http_error", False):
+                self.emit(400, {"error": 'Expected JSON value, got undefined at [0]["metadata"]["timeout"]'})
+            else:
+                self.emit(200, list(self.server.permissions))
         elif path == "/question":
             self.emit(200, list(self.server.questions))
         else:
@@ -170,6 +173,39 @@ class KAGARIControlCLITests(unittest.TestCase):
             return 0, result
         except ControlError as exc:
             return 2, {"status": "error", "error_code": exc.code}
+
+    def test_reconnect_after_pending_ask_uses_current_upstream_not_events(self):
+        # A newly constructed observer sees an Ask emitted before attachment.
+        binding = TaskBinding.from_mapping(self.record)
+        observer = OpenCode(binding)
+        asks = observer.pending()
+        self.assertEqual({a["request_id"] for a in asks},
+                         {PERMISSION, QUESTION})
+        result = status(binding, observer)
+        self.assertEqual(result["pending_asks"], 2)
+        self.assertEqual(result["session_state"], "busy")
+        self.assertEqual(result["task_attention"], "NEEDS_APPROVAL")
+
+    def test_api_permission_http_400_is_not_silent_empty_ask(self):
+        self.server.permission_http_error = True
+        binding = TaskBinding.from_mapping(self.record)
+        observer = OpenCode(binding)
+        with self.assertRaises(ControlError) as caught:
+            observer.pending()
+        self.assertEqual(caught.exception.code, "UPSTREAM_HTTP")
+        with self.assertRaises(ControlError):
+            status(binding, observer)
+        self.assertEqual(self.server.replies, [])
+
+    def test_real_empty_pending_ask_is_distinct_from_api_error(self):
+        self.server.permissions.clear()
+        self.server.questions.clear()
+        binding = TaskBinding.from_mapping(self.record)
+        observer = OpenCode(binding)
+        self.assertEqual(observer.pending(), [])
+        observed = status(binding, observer)
+        self.assertEqual(observed["pending_asks"], 0)
+        self.assertEqual(observed["task_attention"], "UNKNOWN")
 
     def test_status_reads_upstream_not_guessed_completion(self):
         code, result = self.run_cli("status")
