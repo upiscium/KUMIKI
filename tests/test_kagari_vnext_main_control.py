@@ -4,6 +4,7 @@ No network, real Task/model/OpenCode, user Project, service or host preparation.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +32,14 @@ class MainControlTests(unittest.TestCase):
         self.project.mkdir(mode=0o700)
         self.home = self.base / "state"
         self.home.mkdir(mode=0o700)
+        # Patch only in this disposable suite; neither a CLI flag nor an
+        # inherited environment variable may choose the production Main lock.
+        self.host_lease_home = self.base / "host-lease"
+        self.host_lease_home.mkdir(mode=0o700)
+        patcher = patch.object(main, "_host_state_home",
+                               return_value=self.host_lease_home)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.repository = "example/project"
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "fixture")
@@ -70,7 +79,20 @@ class MainControlTests(unittest.TestCase):
 
     def args(self, action, *, issues=(291, 304), home=None, project=None,
              repository=None, extra=()):
-        return [sys.executable, "-I", str(TOOLS / "kagari_vnext_main_control.py"),
+        # An isolated subprocess explicitly installs the test-only mock
+        # before calling main(). Production has no mutable host-lock switch.
+        wrapper = (
+            "import importlib.util,pathlib,sys;"
+            "spec=importlib.util.spec_from_file_location('kagari_vnext_main_control',"
+            "sys.argv[1]);"
+            "ctl=importlib.util.module_from_spec(spec);"
+            "spec.loader.exec_module(ctl);"
+            "ctl._host_state_home=lambda:pathlib.Path(sys.argv[2]);"
+            "raise SystemExit(ctl.main(sys.argv[3:]))"
+        )
+        return [sys.executable, "-I", "-c", wrapper,
+                str(TOOLS / "kagari_vnext_main_control.py"),
+                str(self.host_lease_home),
                 action, "--profile", main.PROFILE,
                 "--project-root", str(project or self.project),
                 "--state-home", str(home or self.home),
@@ -282,6 +304,85 @@ class MainControlTests(unittest.TestCase):
         record.write_bytes(main.canonical(changed))
         self.blocked("CONTEXT_OR_ISSUE_SCOPE_DRIFT")
         self.assertEqual(record.read_bytes(), main.canonical(changed))
+
+    def test_foreign_main_supervisor_lease_blocks_without_state_effects(self):
+        # This is the exact repo-keyed host flock already used by PR #309.
+        path = main._shared_host_lock_path(self.repository, create=True)
+        self.assertEqual(path.parent.name, "repository-main-locks")
+        with path.open("a+b") as owner:
+            os.fchmod(owner.fileno(), 0o600)
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code, response = self.cli(
+                "hold", extra=("--hold-seconds", "0.05"))
+            self.assertEqual((code, response[0]["code"]),
+                             (2, "MAIN_ALREADY_LIVE"))
+            self.assertEqual(list(self.home.iterdir()), [])
+            code, response = self.cli("doctor")
+            self.assertEqual((code, response[0]["status"]),
+                             (2, "MAIN_ALREADY_LIVE_RECORD_NOT_READ"))
+            fcntl.flock(owner, fcntl.LOCK_UN)
+        code, response = self.cli("hold", extra=("--hold-seconds", "0.05"))
+        self.assertEqual(code, 0, response)
+        self.assertEqual([r["status"] for r in response],
+                         ["HOLDING", "CLEAN_RELEASE"])
+        self.assertEqual(self.project_bytes(), self.before)
+
+    def test_different_checkouts_same_origin_share_canonical_host_lease(self):
+        alternate = self.base / "alternate-clone"
+        alternate.mkdir(mode=0o700)
+        self.git("init", "-q", "-b", "main", project=alternate)
+        self.git("remote", "add", "origin",
+                 "https://github.com/example/project.git", project=alternate)
+        home2 = self.base / "alternate-state"
+        home2.mkdir(mode=0o700)
+        process, first = self.hold()
+        code, response = self.cli(
+            "hold", project=alternate, home=home2,
+            issues=(999,), extra=("--hold-seconds", "0.05"))
+        self.assertEqual((code, response[0]["code"]),
+                         (2, "MAIN_ALREADY_LIVE"))
+        self.assertEqual(list(home2.iterdir()), [])
+        self.clean_stop(process)
+        code, response = self.cli(
+            "hold", project=alternate, home=home2,
+            issues=(999,), extra=("--hold-seconds", "0.05"))
+        self.assertEqual(code, 0, response)
+        self.assertEqual([r["status"] for r in response],
+                         ["HOLDING", "CLEAN_RELEASE"])
+        self.assertEqual(self.project_bytes(), self.before)
+
+    def test_unknown_or_modified_canonical_host_lock_blocks(self):
+        path = main._shared_host_lock_path(self.repository, create=True)
+        path.write_bytes(b"foreign owner state")
+        path.chmod(0o600)
+        self.blocked("MAIN_HOST_LOCK_UNSAFE")
+        self.assertEqual(path.read_bytes(), b"foreign owner state")
+        path.unlink()
+        path.write_bytes(b"")
+        path.chmod(0o640)
+        self.blocked("MAIN_HOST_LOCK_UNSAFE")
+        path.chmod(0o600)
+        alias = self.base / "hardlink"
+        os.link(path, alias)
+        self.blocked("MAIN_HOST_LOCK_UNSAFE")
+        alias.unlink()
+        path.unlink()
+        outside = self.base / "sentinel"
+        outside.write_bytes(b"do not touch")
+        path.symlink_to(outside)
+        self.blocked("MAIN_HOST_LOCK_UNSAFE")
+        self.assertEqual(outside.read_bytes(), b"do not touch")
+        path.unlink()
+        self.assertEqual(self.project_bytes(), self.before)
+
+    def test_shared_lock_path_is_unaffected_by_cli_state_home_or_home_env(self):
+        with patch.dict(os.environ, {"HOME": str(self.base / "fake-home"),
+                                     "XDG_STATE_HOME": str(self.base / "fake-xdg")}):
+            path = main._shared_host_lock_path(self.repository, create=False)
+        self.assertIsNone(path)
+        self.assertEqual(list(self.host_lease_home.iterdir()), [])
+        self.assertEqual(list(self.home.iterdir()), [])
+        self.assertEqual(self.project_bytes(), self.before)
 
     def test_different_repos_have_independent_owners(self):
         other = self.base / "other-project"

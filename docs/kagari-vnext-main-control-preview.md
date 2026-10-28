@@ -34,12 +34,24 @@ environment variables, hooks and fsmonitor disabled. No network,
 project writes, ref updates, Branch/Worktree allocation or OpenCode
 subprocess is performed.
 
-One live controller locks the actual Project-root directory and
-the corresponding host-private lock file. The root lock prevents
-accidental split brain when different state directories are passed
-for the same local repository. The host must use **one stable state
-home across restarts**. A saved PID is *only an observation* and never
-an authority or a reason to kill another process.
+One live controller locks **three independent ownership boundaries**:
+the Project-root inode, its private Task-observation state and the
+canonical host repository lease also used by the separate #291
+`MainSupervisor` in Draft PR #309. That last lease is keyed by the
+lowercased GitHub `owner/repo` under the real passwd user's
+`~/.local/state/kagari/repository-main-locks/` (not the caller's
+`--state-home`, HOME or XDG settings). It prevents two independent
+clones of the same upstream repository from silently owning concurrent
+Mains. Plan/Doctor only probe an existing lease; explicit Hold/Reconcile
+may establish the private lock namespace.
+
+The selected private `--state-home` must still be **stable across
+restarts** for exact ACTIVE/CLEAN state reconciliation. Unknown owner
+records must not be adopted on another state-home path as Task authority.
+A saved PID is *only an observation*, never an authority or a reason
+to terminate another process. Shared host locks are cooperative
+single-host/UID coordination, not protection against hostile same-UID
+bypass or multi-host leader election.
 
 ## CLI shape
 
@@ -95,8 +107,10 @@ Responses are machine-readable JSON, explicitly indicating
 ## Acceptance / limitations
 
 Local disposable fixtures validate barrier-synchronized concurrent
-two-process launch attempts (not guaranteed simultaneous kernel lock acquisition),
-cross-state-home singleton enforcement, bounded Issue sets, unchanged
+two-process launch attempts (not guaranteed simultaneous kernel lock
+acquisition), cross-state-home **and cross-checkout** repository singleton
+enforcement, the canonical host lease's symlink/hardlink/mode rejection,
+bounded Issue sets, unchanged
 dirty/staged Project state, conflict/drift denial, interrupted Main
 reconciliation and strict host record ownership. No consumer
 repository is changed by these tests.
