@@ -256,14 +256,32 @@ def _host_state_home() -> Path:
     This host identity is cooperative one-host/UID isolation, not multi-host
     election or exclusion of a malicious process running as this same UID.
     """
-    return Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".local" / "state"
+    owner_home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    # Revalidate the passwd trust anchor and *every* namespace ancestor on
+    # each call, not just during first-run bootstrap. Never derive this lease
+    # from HOME, XDG_STATE_HOME, a checkout or Task configuration.
+    _owned_directory(owner_home, private=False)
+    home = owner_home / ".local" / "state"
+    for ancestor in (home.parent, home):
+        try:
+            ancestor.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError:
+            raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE") from None
+        # Validate before creating the next component: an unsafe existing
+        # parent must never receive a newly bootstrapped child.
+        _owned_directory(ancestor, private=False)
+    return home
 
 
 def _owned_directory(path: Path, *, private: bool) -> None:
     """Fail closed on foreign, symlinked or permission-unsafe lock namespace."""
     try:
+        if not path.is_absolute() or path.resolve(strict=True) != path:
+            raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
         st = path.lstat()
-    except OSError:
+    except (OSError, RuntimeError):
         raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE") from None
     if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
             or st.st_mode & 0o022
@@ -282,34 +300,6 @@ def _host_repo_lock(repository: str) -> Path:
             or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repository)):
         raise MainError("MAIN_REPOSITORY_INVALID")
     home = _host_state_home()
-    if not home.is_absolute() or home.is_symlink():
-        raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
-    if not home.is_dir():
-        # A fresh Linux user (including an ephemeral GitHub CI runner) may
-        # have no ~/.local/state yet. Bootstrap ONLY the OS passwd-derived
-        # user namespace; never allow HOME, XDG, Project config or a patched
-        # arbitrary path to select a host repository lock namespace.
-        owner_home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
-        if (home != owner_home / ".local" / "state"
-                or not owner_home.is_absolute()
-                or owner_home.is_symlink()
-                or not owner_home.is_dir()
-                or owner_home.resolve(strict=True) != owner_home):
-            raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
-        _owned_directory(owner_home, private=False)
-        for ancestor in (home.parent, home):
-            try:
-                ancestor.mkdir(mode=0o700)
-            except FileExistsError:
-                pass
-            except OSError:
-                raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE") from None
-            if (ancestor.is_symlink()
-                    or ancestor.resolve(strict=True) != ancestor):
-                raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
-            _owned_directory(ancestor, private=False)
-    if (not home.is_dir() or home.resolve(strict=True) != home):
-        raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
     _owned_directory(home, private=False)
     for ancestor in (home / "kagari", home / "kagari" / "repository-main-locks"):
         try:
@@ -322,6 +312,18 @@ def _host_repo_lock(repository: str) -> Path:
     key = hashlib.sha256(
         ("github.com/" + repository.lower()).encode("ascii")).hexdigest()
     return home / "kagari" / "repository-main-locks" / (key + ".lock")
+
+
+def _verify_lock_file(path: Path, fd: int, error: str) -> None:
+    """The visible empty lease must still be the exact open, safe inode."""
+    current = path.lstat()
+    original = os.fstat(fd)
+    if ((current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)
+            or any(not stat.S_ISREG(st.st_mode)
+                   or st.st_uid != os.geteuid() or st.st_nlink != 1
+                   or st.st_mode & 0o177 or st.st_size != 0
+                   for st in (current, original))):
+        raise MainError(error)
 
 
 class MainSupervisor:
@@ -367,17 +369,11 @@ class MainSupervisor:
             expected = _host_repo_lock(main.store.repository)
             if self._lock_path != expected:
                 raise MainError("MAIN_OWNER_UNVERIFIED")
-            current = self._lock_path.lstat()
-            original = os.fstat(self._file.fileno())
-            if (not stat.S_ISREG(current.st_mode)
-                    or not stat.S_ISREG(original.st_mode)
-                    or current.st_ino != original.st_ino
-                    or current.st_dev != original.st_dev
-                    or current.st_uid != os.geteuid()
-                    or current.st_nlink != 1
-                    or current.st_mode & 0o177):
-                raise MainError("MAIN_OWNER_UNVERIFIED")
+            _verify_lock_file(expected, self._file.fileno(), "MAIN_OWNER_UNVERIFIED")
             fcntl.flock(self._file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if _host_repo_lock(main.store.repository) != expected:
+                raise MainError("MAIN_OWNER_UNVERIFIED")
+            _verify_lock_file(expected, self._file.fileno(), "MAIN_OWNER_UNVERIFIED")
         except (OSError, RuntimeError):
             raise MainError("MAIN_OWNER_UNVERIFIED") from None
 
@@ -400,11 +396,13 @@ class MainSupervisor:
             raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE") from None
         self._file = os.fdopen(fd, "rb+")
         try:
-            st = os.fstat(fd)
-            if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid()
-                    or st.st_nlink != 1 or st.st_mode & 0o177):
-                raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
+            _verify_lock_file(path, fd, "MAIN_LOCK_NAMESPACE_UNSAFE")
             fcntl.flock(self._file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Do not publish ownership if the path, content or namespace
+            # changed between validation/open and flock acquisition.
+            if _host_repo_lock(self.main.store.repository) != path:
+                raise MainError("MAIN_LOCK_NAMESPACE_UNSAFE")
+            _verify_lock_file(path, fd, "MAIN_LOCK_NAMESPACE_UNSAFE")
             if type(self.main) is RepositoryMain:
                 with self.main._main_owner_guard:
                     if self.main._main_owner is not None:

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import fcntl
+import hashlib
 from io import StringIO
 import json
 import os
@@ -10,6 +12,7 @@ import select
 import shlex
 import subprocess
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -26,10 +29,13 @@ class MainServiceTest(unittest.TestCase):
         self.source.setUp()
         self.addCleanup(self.source.doCleanups)
         self.main = self.source.main
-        # Test-only patch to keep real host-owned lock files out of the
-        # developer account. Production root is never config-controlled.
+        # Inject the OS passwd anchor, not the validated state-home result:
+        # exercise production ancestry checks without touching the real home.
+        self.login_home = self.source.fixture.temp_root / "passwd-home"
+        self.login_home.mkdir(mode=0o700)
         self.host_lock_patch = patch.object(
-            service, "_host_state_home", return_value=self.source.fixture.temp_root)
+            service.pwd, "getpwuid",
+            return_value=SimpleNamespace(pw_dir=str(self.login_home)))
         self.host_lock_patch.start()
         self.addCleanup(self.host_lock_patch.stop)
         self.config = self.source.fixture.temp_root / "approved-issues.json"
@@ -73,7 +79,7 @@ class MainServiceTest(unittest.TestCase):
             self.assertEqual(inspected["tasks"][0]["observation"]["kickoff"], "SENT")
             self.assertEqual(len(self.source.prompts()), 1)
 
-    def test_singleton_is_enforced_across_independent_processes(self):
+    def run_lease_child(self):
         child = """
 import sys
 from pathlib import Path
@@ -82,23 +88,41 @@ from tools.kagari_vnext_main_service import MainSupervisor, MainError
 source=SimpleNamespace(store=SimpleNamespace(
     root=Path(sys.argv[1]), repository="acme/widgets"),approved={})
 import tools.kagari_vnext_main_service as service
-service._host_state_home=lambda:Path(sys.argv[2])
+service.pwd.getpwuid=lambda uid:SimpleNamespace(pw_dir=sys.argv[2])
 try:
     with MainSupervisor(source):
         print("ACQUIRED")
 except MainError as e:
     print(e.code)
 """
-        def run_child():
-            result=subprocess.run(
-                [sys.executable, "-B", "-c", child,
-                 str(self.source.project), str(self.source.fixture.temp_root)], text=True,
-                capture_output=True, timeout=12,
-                cwd=Path(__file__).resolve().parents[1], check=True)
-            return result.stdout.strip()
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", child,
+             str(self.source.project), str(self.login_home)], text=True,
+            capture_output=True, timeout=12,
+            cwd=Path(__file__).resolve().parents[1], check=True)
+        return result.stdout.strip()
+
+    def test_singleton_is_enforced_across_independent_processes(self):
         with service.MainSupervisor(self.main):
-            self.assertEqual(run_child(), "MAIN_ALREADY_ACTIVE")
-        self.assertEqual(run_child(), "ACQUIRED")
+            self.assertEqual(self.run_lease_child(), "MAIN_ALREADY_ACTIVE")
+        self.assertEqual(self.run_lease_child(), "ACQUIRED")
+
+    def test_three_unsafe_fixtures_are_denied_in_an_independent_process(self):
+        path = service._host_repo_lock("acme/widgets")
+        self.assertEqual(self.run_lease_child(), "ACQUIRED")
+        path.write_bytes(b"nonempty shared lock\n")
+        self.assertEqual(self.run_lease_child(), "MAIN_LOCK_NAMESPACE_UNSAFE")
+        self.assertEqual(path.read_bytes(), b"nonempty shared lock\n")
+        path.rename(path.with_suffix(".nonempty"))
+        path.touch(mode=0o600)
+        for ancestor in (self.login_home / ".local", self.login_home):
+            with self.subTest(ancestor=ancestor):
+                ancestor.chmod(0o777)
+                self.assertEqual(self.run_lease_child(), "MAIN_LOCK_NAMESPACE_UNSAFE")
+                self.assertEqual(path.read_bytes(), b"")
+                ancestor.chmod(0o700)
+        self.assertEqual(self.run_lease_child(), "ACQUIRED")
+        self.assertEqual(len(self.source.prompts()), 0)
 
     def test_one_repository_lock_excludes_distinct_clones_not_other_repositories(self):
         from types import SimpleNamespace
@@ -119,6 +143,204 @@ except MainError as e:
         with service.MainSupervisor(fake(second,"acme/widgets")):
             pass
 
+    def assert_lease_denied(self, *, owner=None):
+        runner = service.MainSupervisor(self.main)
+        with self.assertRaises(MainError) as error:
+            with runner:
+                self.fail("Unsafe shared lease must not acquire Main ownership")
+        self.assertEqual(error.exception.code, "MAIN_LOCK_NAMESPACE_UNSAFE")
+        self.assertIs(self.main._main_owner, owner)
+        self.assertIsNone(runner._file)
+        self.assertEqual(len(self.source.prompts()), 0)
+        self.assertFalse(self.source.runtime.exists())
+
+    def test_safe_passwd_namespace_ignores_environment_and_preserves_empty_lock(self):
+        path = service._host_repo_lock("acme/widgets")
+        key = hashlib.sha256(b"github.com/acme/widgets").hexdigest()
+        self.assertEqual(path, self.login_home / ".local/state/kagari" /
+                         "repository-main-locks" / (key + ".lock"))
+        self.assertEqual(path, service._host_repo_lock("ACME/Widgets"))
+        path.touch(mode=0o600)
+        inode = path.stat().st_ino
+        with patch.dict(os.environ, {"HOME": "/not-the-passwd-home",
+                                     "XDG_STATE_HOME": "/not-the-host-state"}):
+            with service.MainSupervisor(self.main) as runner:
+                runner._assert_owned(self.main)
+                self.assertEqual(runner._lock_path, path)
+        self.assertEqual(path.stat().st_ino, inode)
+        self.assertEqual(path.read_bytes(), b"")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(len(self.source.prompts()), 0)
+
+    def test_nonempty_existing_canonical_lock_is_denied_without_truncation(self):
+        path = service._host_repo_lock("acme/widgets")
+        path.write_bytes(b"foreign lock content\n")
+        path.chmod(0o600)
+        before = path.stat()
+        self.assert_lease_denied()
+        self.assertEqual(path.read_bytes(), b"foreign lock content\n")
+        self.assertEqual(path.stat().st_ino, before.st_ino)
+        self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
+
+    def test_existing_world_writable_local_is_denied(self):
+        path = service._host_repo_lock("acme/widgets")
+        path.touch(mode=0o600)
+        (self.login_home / ".local").chmod(0o777)
+        self.assert_lease_denied()
+        self.assertEqual(path.read_bytes(), b"")
+
+    def test_existing_world_writable_passwd_home_is_denied(self):
+        path = service._host_repo_lock("acme/widgets")
+        path.touch(mode=0o600)
+        self.login_home.chmod(0o777)
+        self.assert_lease_denied()
+        self.assertEqual(path.read_bytes(), b"")
+
+    def test_existing_ancestors_are_revalidated_during_ownership(self):
+        for relative in (".", ".local", ".local/state",
+                         ".local/state/kagari",
+                         ".local/state/kagari/repository-main-locks"):
+            with self.subTest(ancestor=relative):
+                ancestor = self.login_home / relative
+                with service.MainSupervisor(self.main) as runner:
+                    mode = ancestor.stat().st_mode & 0o777
+                    ancestor.chmod(0o777)
+                    try:
+                        with self.assertRaises(MainError) as error:
+                            runner._assert_owned(self.main)
+                        self.assertEqual(error.exception.code,
+                                         "MAIN_LOCK_NAMESPACE_UNSAFE")
+                        self.assertEqual(len(self.source.prompts()), 0)
+                    finally:
+                        ancestor.chmod(mode)
+                    runner._assert_owned(self.main)
+
+    def test_symlinked_ancestors_are_denied_on_acquisition_and_revalidation(self):
+        for relative in (".", ".local", ".local/state",
+                         ".local/state/kagari",
+                         ".local/state/kagari/repository-main-locks"):
+            with self.subTest(ancestor=relative):
+                ancestor = self.login_home / relative
+                with service.MainSupervisor(self.main) as runner:
+                    moved = ancestor.with_name(ancestor.name + "-real")
+                    parked = ancestor.with_name(ancestor.name + "-symlink")
+                    ancestor.rename(moved)
+                    ancestor.symlink_to(moved, target_is_directory=True)
+                    try:
+                        with self.assertRaises(MainError) as error:
+                            runner._assert_owned(self.main)
+                        self.assertEqual(error.exception.code,
+                                         "MAIN_LOCK_NAMESPACE_UNSAFE")
+                        self.assert_lease_denied(owner=runner)
+                    finally:
+                        ancestor.rename(parked)
+                        moved.rename(ancestor)
+                    runner._assert_owned(self.main)
+
+    def test_first_run_rejects_unsafe_home_or_local_before_creating_children(self):
+        self.login_home.chmod(0o777)
+        self.assert_lease_denied()
+        self.assertFalse((self.login_home / ".local").exists())
+        self.login_home.chmod(0o700)
+        local = self.login_home / ".local"
+        local.mkdir(mode=0o700)
+        local.chmod(0o777)
+        self.assert_lease_denied()
+        self.assertFalse((local / "state").exists())
+
+    def test_relative_noncanonical_and_foreign_passwd_home_are_denied(self):
+        for home in ("relative-home", str(self.login_home / ".." / self.login_home.name)):
+            with self.subTest(home=home):
+                with patch.object(service.pwd, "getpwuid",
+                                  return_value=SimpleNamespace(pw_dir=home)):
+                    self.assert_lease_denied()
+        # Model a passwd anchor owned by a different effective UID without
+        # changing filesystem ownership or requiring privileged fixture setup.
+        with patch.object(service.os, "geteuid", return_value=os.geteuid() + 1):
+            self.assert_lease_denied()
+        self.assertFalse((self.login_home / ".local").exists())
+
+    def test_safe_existing_nonprivate_ancestors_are_preserved(self):
+        service._host_repo_lock("acme/widgets")
+        ancestors = (self.login_home, self.login_home / ".local",
+                     self.login_home / ".local/state")
+        for ancestor in ancestors:
+            ancestor.chmod(0o755)
+        with service.MainSupervisor(self.main) as runner:
+            runner._assert_owned(self.main)
+        for ancestor in ancestors:
+            self.assertEqual(ancestor.stat().st_mode & 0o777, 0o755)
+
+    def test_lock_content_is_revalidated_during_ownership(self):
+        with service.MainSupervisor(self.main) as runner:
+            path = runner._lock_path
+            path.write_bytes(b"changed while held\n")
+            with self.assertRaises(MainError) as error:
+                self.main.dispatch(291)
+            self.assertEqual(error.exception.code, "MAIN_OWNER_UNVERIFIED")
+            self.assertEqual(path.read_bytes(), b"changed while held\n")
+            self.assertEqual(len(self.source.prompts()), 0)
+
+    def test_replaced_empty_inode_is_denied_during_ownership(self):
+        with service.MainSupervisor(self.main) as runner:
+            path = runner._lock_path
+            path.rename(path.with_suffix(".original"))
+            path.touch(mode=0o600)
+            with self.assertRaises(MainError) as error:
+                runner._assert_owned(self.main)
+            self.assertEqual(error.exception.code, "MAIN_OWNER_UNVERIFIED")
+
+    def test_lock_mode_symlink_and_hardlink_remain_denied(self):
+        path = service._host_repo_lock("acme/widgets")
+        for mode in (0o644, 0o660, 0o700):
+            with self.subTest(mode=oct(mode)):
+                path.touch()
+                path.chmod(mode)
+                self.assert_lease_denied()
+        path.chmod(0o600)
+        original = path.with_suffix(".original")
+        path.rename(original)
+        path.symlink_to(original)
+        self.assert_lease_denied()
+        path.rename(path.with_suffix(".symlink"))
+        os.link(original, path)
+        self.assert_lease_denied()
+        self.assertEqual(original.read_bytes(), b"")
+
+    def test_acquisition_rechecks_content_inode_and_ancestry_after_flock(self):
+        path = service._host_repo_lock("acme/widgets")
+        flock = fcntl.flock
+        for change in ("content", "inode", "ancestor"):
+            with self.subTest(change=change):
+                def race(file, operation):
+                    flock(file, operation)
+                    if operation != fcntl.LOCK_EX | fcntl.LOCK_NB:
+                        return
+                    if change == "content":
+                        path.write_bytes(b"raced foreign content\n")
+                    elif change == "inode":
+                        path.rename(path.with_suffix(".raced-inode"))
+                        path.touch(mode=0o600)
+                    else:
+                        (self.login_home / ".local").chmod(0o777)
+                with patch.object(service.fcntl, "flock", side_effect=race):
+                    self.assert_lease_denied()
+                if change == "content":
+                    self.assertEqual(path.read_bytes(), b"raced foreign content\n")
+                    path.rename(path.with_suffix(".raced-content"))
+                (self.login_home / ".local").chmod(0o700)
+
+    def test_ownership_rechecks_content_after_flock(self):
+        with service.MainSupervisor(self.main) as runner:
+            flock = fcntl.flock
+            def race(file, operation):
+                flock(file, operation)
+                runner._lock_path.write_bytes(b"raced during verification\n")
+            with patch.object(service.fcntl, "flock", side_effect=race):
+                with self.assertRaises(MainError) as error:
+                    runner._assert_owned(self.main)
+            self.assertEqual(error.exception.code, "MAIN_OWNER_UNVERIFIED")
+
     def test_first_run_missing_passwd_state_is_created_with_owner_only_lock_dir(self):
         from types import SimpleNamespace
         login_home = self.source.fixture.temp_root / "fresh-login-home"
@@ -127,22 +349,21 @@ except MainError as e:
         self.assertFalse(state.exists())
         with patch.object(service.pwd, "getpwuid",
                           return_value=SimpleNamespace(pw_dir=str(login_home))):
-            with patch.object(service, "_host_state_home", return_value=state):
-                with service.MainSupervisor(self.main):
-                    self.assertTrue(state.is_dir())
-                    self.assertTrue((state / "kagari" /
-                                     "repository-main-locks").is_dir())
-                    for directory in (
-                        state.parent, state, state / "kagari",
-                        state / "kagari" / "repository-main-locks",
-                    ):
-                        self.assertFalse(directory.is_symlink())
-                        self.assertEqual(directory.stat().st_uid, os.geteuid())
-                        self.assertEqual(directory.stat().st_mode & 0o077, 0)
-                # After the first run, reopening uses the same canonical path
-                # and must not reset or replace lock ownership.
-                with service.MainSupervisor(self.main):
-                    pass
+            with service.MainSupervisor(self.main):
+                self.assertTrue(state.is_dir())
+                self.assertTrue((state / "kagari" /
+                                 "repository-main-locks").is_dir())
+                for directory in (
+                    state.parent, state, state / "kagari",
+                    state / "kagari" / "repository-main-locks",
+                ):
+                    self.assertFalse(directory.is_symlink())
+                    self.assertEqual(directory.stat().st_uid, os.geteuid())
+                    self.assertEqual(directory.stat().st_mode & 0o077, 0)
+            # After the first run, reopening uses the same canonical path
+            # and must not reset or replace lock ownership.
+            with service.MainSupervisor(self.main):
+                pass
         self.assertEqual(len(self.source.prompts()), 0)
 
     def test_first_run_rejects_foreign_or_symlinked_passwd_parent(self):
@@ -155,9 +376,8 @@ except MainError as e:
         state = login_home / ".local" / "state"
         with patch.object(service.pwd, "getpwuid",
                           return_value=SimpleNamespace(pw_dir=str(login_home))):
-            with patch.object(service, "_host_state_home", return_value=state):
-                with self.assertRaises(MainError) as error:
-                    service._host_repo_lock("acme/widgets")
+            with self.assertRaises(MainError) as error:
+                service._host_repo_lock("acme/widgets")
         self.assertEqual(error.exception.code, "MAIN_LOCK_NAMESPACE_UNSAFE")
         self.assertFalse((target / "state").exists())
         self.assertEqual(len(self.source.prompts()), 0)
