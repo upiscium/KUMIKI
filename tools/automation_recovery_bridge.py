@@ -786,6 +786,9 @@ def _maintenance_ref_lock_recovery(
     lifecycle = modules["task_lifecycle"]
     lifecycle.require_main_worktree(root_path)
     record, contract = maintenance._stored_contract(root_path, task)
+    maintenance._require_live_maintenance_contract(
+        record, task, contract, runner=trusted_gh_run
+    )
     if lifecycle.state_status(lifecycle.state_path(record.path)) != "initialized":
         raise BridgeError("ref lock recovery requires unfinalized maintenance Task")
     frozen = maintenance._terminal_evidence_snapshot(record)
@@ -2456,7 +2459,7 @@ def main() -> int:
                 with _verified_modules(ROOT, revision) as modules:
                     _clean_root(ROOT, revision)
                     value = modules["maintenance_lifecycle"].maintenance_finalize(
-                        target, args.task, int(args.pr)
+                        target, args.task, int(args.pr), issue_runner=trusted_gh_run
                     )
                     result = {**value, "implementationRevision": revision}
             elif args.command == "maintenance-ref-locks":

@@ -222,6 +222,8 @@ class FirstAdoptionFinalizeBridgeTest(unittest.TestCase):
             ), mock.patch.object(
                 maintenance, "_validate_consumed_receipt", return_value={"commit_sha": task_head}
             ) as receipts, mock.patch.object(
+                maintenance, "_require_live_maintenance_contract"
+            ) as live_issue, mock.patch.object(
                 maintenance, "_publication_evidence", side_effect=reconstruct_with_real_lock
             ) as publications, mock.patch.object(
                 maintenance.agent_core, "pr_details", return_value=merged
@@ -235,6 +237,11 @@ class FirstAdoptionFinalizeBridgeTest(unittest.TestCase):
                 first = run_bridge()
                 first_state = state.read_bytes()
                 second = run_bridge()
+                self.assertEqual(live_issue.call_count, 4)
+                self.assertTrue(all(
+                    call.kwargs.get("runner") is bridge.trusted_gh_run
+                    for call in live_issue.call_args_list
+                ))
 
             self.assertEqual(self.git(main, "rev-parse", "HEAD"), merge_oid)
             self.assertEqual(first["transition"], "finalized")

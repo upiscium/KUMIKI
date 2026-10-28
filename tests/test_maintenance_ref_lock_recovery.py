@@ -85,6 +85,9 @@ class LegacyRefLockRecoveryTest(unittest.TestCase):
                 return_value=(record, {"repository": "example/repo"}),
             ),
             mock.patch.object(
+                maintenance, "_require_live_maintenance_contract"
+            ) as live_issue,
+            mock.patch.object(
                 maintenance, "_validate_consumed_receipt",
                 return_value={"commit_sha": task_head},
             ),

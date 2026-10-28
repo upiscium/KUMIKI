@@ -403,6 +403,33 @@ def _maintenance_stage(
     }
 
 
+def _require_live_maintenance_contract(
+    record: lifecycle.WorktreeRecord,
+    task: str,
+    contract: dict,
+    *,
+    closed_only: bool = False,
+    runner=None,
+) -> None:
+    """Bind live Issue fields to the frozen contract (allow only closure drift)."""
+    try:
+        identity, live_issue = task_contract.fetch_issue(
+            record.path, task, runner=runner, allow_closed=True
+        )
+        if identity != contract["repository"]:
+            raise MaintenanceError("maintenance Issue repository changed")
+        state = live_issue["state"]
+        if closed_only and state != "closed":
+            raise MaintenanceError("closed maintenance Issue state changed")
+        normalized = task_contract.authoritative_payload(live_issue, int(task), identity)
+        if state == "closed":
+            normalized["state"] = "open"
+        if task_contract._digest(normalized) != contract["sha256"]:
+            raise MaintenanceError("maintenance Issue content differs from the frozen Task Contract")
+    except task_contract.ContractError as exc:
+        raise MaintenanceError(str(exc)) from exc
+
+
 def maintenance_check(root_path: Path, task: str) -> dict:
     try:
         record, contract = _validated_contract(root_path, task)
@@ -418,18 +445,7 @@ def maintenance_check(root_path: Path, task: str) -> dict:
     record, contract = _stored_contract(root_path, task)
     if lifecycle.state_status(lifecycle.state_path(record.path)) != "merged":
         raise MaintenanceError("closed Issue cannot resume an unmerged maintenance Task")
-    try:
-        identity, live_issue = task_contract.fetch_issue(
-            record.path, task, allow_closed=True
-        )
-        if identity != contract["repository"] or live_issue["state"] != "closed":
-            raise MaintenanceError("closed Issue repository or state changed")
-        normalized = task_contract.authoritative_payload(live_issue, int(task), identity)
-        normalized["state"] = "open"
-        if task_contract._digest(normalized) != contract["sha256"]:
-            raise MaintenanceError("closed Issue content differs from the frozen Task Contract")
-    except task_contract.ContractError as exc:
-        raise MaintenanceError(str(exc)) from exc
+    _require_live_maintenance_contract(record, task, contract, closed_only=True)
     receipt = _validate_consumed_receipt(record, task)
     commit = receipt["commit_sha"]
     _, title, body = _publication_evidence(record, task, receipt)
@@ -1272,9 +1288,12 @@ def _add_finalized_publication(text: str, publication_line: str) -> str:
     return text.rstrip("\n") + "\n\n## Evidence\n\n" + replacement + "\n"
 
 
-def maintenance_finalize(root_path: Path, task: str, pr_number: int) -> dict:
+def maintenance_finalize(
+    root_path: Path, task: str, pr_number: int, *, issue_runner=None
+) -> dict:
     lifecycle.require_main_worktree(root_path)
     record, contract = _stored_contract(root_path, task)
+    _require_live_maintenance_contract(record, task, contract, runner=issue_runner)
     # Freeze the evidence *before* any validation. A concurrent failed
     # agent::verify may overwrite its receipt between validation and CAS.
     terminal_snapshot = _terminal_evidence_snapshot(record)
@@ -1318,6 +1337,9 @@ def maintenance_finalize(root_path: Path, task: str, pr_number: int) -> dict:
         "finalization finalized"
     )
 
+    # Before entering terminal locks, re-read live Issue authority; PR merges
+    # may close the Issue, but no other contracted field may drift.
+    _require_live_maintenance_contract(record, task, contract, runner=issue_runner)
     # Detect changes made while the independent GitHub/source verification ran.
     # Never adopt a freshly replaced (possibly failed) verification receipt.
     if _terminal_evidence_snapshot(record) != terminal_snapshot:
