@@ -72,6 +72,27 @@ class TaskContractTest(unittest.TestCase):
                 with self.subTest(message=message), base, self.assertRaisesRegex(contract.ContractError, message):
                     contract.fetch_issue(root, "19", lambda *_args, **_kwargs: response(self.payload(**changes)))
 
+    def test_explicit_closed_issue_read_does_not_relax_normal_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                contract.lifecycle, "git", return_value="https://github.com/acme/widgets"
+            ):
+                reader = lambda *_args, **_kwargs: response(self.payload(state="closed"))
+                with self.assertRaisesRegex(contract.ContractError, "Issue must be open"):
+                    contract.fetch_issue(root, "19", reader)
+                identity, issue = contract.fetch_issue(root, "19", reader, allow_closed=True)
+                self.assertEqual(identity, "acme/widgets")
+                self.assertEqual(issue["state"], "closed")
+                for invalid_state in ("unknown", "merged"):
+                    with self.subTest(invalid_state=invalid_state):
+                        with self.assertRaisesRegex(contract.ContractError, "Issue must be open"):
+                            contract.fetch_issue(
+                                root, "19",
+                                lambda *_a, **_kw: response(self.payload(state=invalid_state)),
+                                allow_closed=True,
+                            )
+
     def test_numeric_validation_and_payload_filtering(self) -> None:
         with self.assertRaises(contract.ContractError):
             contract.validate_issue_number("019")

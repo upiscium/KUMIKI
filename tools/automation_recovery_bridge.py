@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -12,6 +13,7 @@ import os
 import pwd
 import re
 import secrets
+import signal
 import shlex
 import shutil
 import stat
@@ -19,7 +21,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping
-from contextlib import contextmanager, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -620,6 +622,288 @@ def maintenance_environment():
             os.environ.update(previous)
 
 
+# Legacy v3 consumer-only crash recovery. Not installed in KAGARI templates.
+def _require_terminated_lock_creator(pid: int) -> None:
+    if type(pid) is not int or pid <= 1:
+        raise BridgeError("terminal lock recovery requires the exact dead creator PID")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    except PermissionError as exc:
+        raise BridgeError("terminal lock creator process status is inaccessible") from exc
+    raise BridgeError("terminal ref lock creator PID is still alive or reused")
+
+
+def _ref_lock_parent(record, branch: str, lifecycle) -> tuple[Path, str]:
+    lifecycle.validate_branch_name(branch)
+    common = lifecycle.common_git_dir(record.path)
+    current = common
+    for component in ("refs", "heads", *branch.split("/")[:-1]):
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise BridgeError("terminal ref lock directory is unavailable") from exc
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise BridgeError("terminal ref lock directory is unsafe")
+        current = current / component
+    try:
+        metadata = current.lstat()
+    except OSError as exc:
+        raise BridgeError("terminal ref lock directory is unavailable") from exc
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise BridgeError("terminal ref lock directory is unsafe")
+    return current, branch.split("/")[-1] + ".lock"
+
+
+def _release_ref_lease(fd: int) -> None:
+    """Release a held lease if still present; close always follows separately."""
+    try:
+        if fcntl.fcntl(fd, fcntl.F_GETLEASE) != fcntl.F_UNLCK:
+            fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_UNLCK)
+    except OSError as exc:
+        raise BridgeError("terminal ref lock lease could not be released") from exc
+
+
+def _require_ref_lock_snapshots(locks: list[dict]) -> None:
+    """Recheck pinned FD contents and *all* original inode/path attributes."""
+    keys = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+            "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+    for lock in locks:
+        try:
+            handle = os.fstat(lock["fileFd"])
+            current = os.stat(
+                lock["name"], dir_fd=lock["parentFd"], follow_symlinks=False
+            )
+            os.lseek(lock["fileFd"], 0, os.SEEK_SET)
+            content = os.read(lock["fileFd"], len(lock["contents"]) + 1)
+        except OSError as exc:
+            raise BridgeError("terminal ref lock changed or became inaccessible") from exc
+        if (
+            content != lock["contents"]
+            or any(
+                getattr(metadata, name) != lock["metadata"][name]
+                for name in keys
+                for metadata in (handle, current)
+            )
+        ):
+            raise BridgeError("terminal ref lock approved contents or metadata changed")
+
+
+def _require_exclusive_ref_leases(locks: list[dict]) -> None:
+    """The kernel must confirm neither target has a conflicting open FD."""
+    if not hasattr(fcntl, "F_GETLEASE"):
+        raise BridgeError("kernel file lease verification is unavailable")
+    for lock in locks:
+        try:
+            lease = fcntl.fcntl(lock["fileFd"], fcntl.F_GETLEASE)
+        except OSError as exc:
+            raise BridgeError("terminal ref lock lease became unverifiable") from exc
+        if lease != fcntl.F_WRLCK:
+            raise BridgeError("terminal ref lock exclusive lease was broken")
+
+
+@contextmanager
+def _inspected_terminal_ref_locks(
+    record,
+    refs: tuple[tuple[str, str], ...],
+    lifecycle,
+):
+    """Pin both exact ref locks with kernel-enforced exclusive file leases.
+
+    Unlike /proc/<pid>/fd scanning, F_WRLCK succeeds only when no other
+    process holds an open file description for the inode. This is a legacy
+    source-side recovery process, so SIGIO is ignored only while the leases
+    exist, and the previous handler is restored on exit.
+    """
+    if not all(hasattr(fcntl, name) for name in ("F_SETLEASE", "F_GETLEASE", "F_WRLCK", "F_UNLCK")):
+        raise BridgeError("Linux exclusive file leases are unavailable")
+    with ExitStack() as stack:
+        try:
+            previous_sigio = signal.getsignal(signal.SIGIO)
+            signal.signal(signal.SIGIO, signal.SIG_IGN)
+        except (ValueError, OSError) as exc:
+            raise BridgeError("cannot safely handle lease-break signals") from exc
+        stack.callback(signal.signal, signal.SIGIO, previous_sigio)
+        checked = []
+        for branch, head in refs:
+            if not isinstance(head, str) or lifecycle.OID_RE.fullmatch(head) is None:
+                raise BridgeError("terminal ref recovery HEAD identity is invalid")
+            parent, name = _ref_lock_parent(record, branch, lifecycle)
+            flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                parent_fd = os.open(parent, flags)
+                stack.callback(os.close, parent_fd)
+                lock_fd = os.open(
+                    name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                    dir_fd=parent_fd,
+                )
+                stack.callback(os.close, lock_fd)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                before = os.fstat(lock_fd)
+                expected = (head + "\n").encode("ascii")
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or stat.S_IMODE(before.st_mode) != 0o600
+                    or before.st_uid != os.getuid()
+                    or before.st_gid != os.getgid()
+                    or before.st_nlink != 1
+                    or before.st_size != len(expected)
+                ):
+                    raise BridgeError("terminal ref lock content or ownership mismatch")
+                try:
+                    fcntl.fcntl(lock_fd, fcntl.F_SETLEASE, fcntl.F_WRLCK)
+                except OSError as exc:
+                    raise BridgeError("terminal ref lock has an open holder or leases are unsupported") from exc
+                stack.callback(_release_ref_lease, lock_fd)
+                if os.read(lock_fd, len(expected) + 1) != expected:
+                    raise BridgeError("terminal ref lock content or ownership mismatch")
+                after = os.fstat(lock_fd)
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                attributes = ("st_dev", "st_ino", "st_mode", "st_nlink",
+                              "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+                if any(getattr(before, key) != getattr(after, key)
+                       or getattr(before, key) != getattr(current, key)
+                       for key in attributes):
+                    raise BridgeError("terminal ref lock changed during inspection")
+                checked.append({
+                    "branch": branch,
+                    "head": head,
+                    "path": f"refs/heads/{branch}.lock",
+                    "device": before.st_dev,
+                    "inode": before.st_ino,
+                    "mtimeNs": before.st_mtime_ns,
+                    "ctimeNs": before.st_ctime_ns,
+                    "mode": stat.S_IMODE(before.st_mode),
+                    "uid": before.st_uid,
+                    "gid": before.st_gid,
+                    "nlink": before.st_nlink,
+                    "size": before.st_size,
+                    "contentSha256": hashlib.sha256(expected).hexdigest(),
+                    "metadata": {key: getattr(before, key) for key in attributes},
+                    "contents": expected,
+                    "parentFd": parent_fd,
+                    "fileFd": lock_fd,
+                    "name": name,
+                })
+            except (OSError, BlockingIOError) as exc:
+                raise BridgeError("terminal ref lock is unavailable or actively held") from exc
+        _require_exclusive_ref_leases(checked)
+        yield checked
+
+
+def _require_exact_synced_refs(root_path: Path, branch: str, head: str, lifecycle) -> None:
+    try:
+        lifecycle.require_synchronized_default_branch_revision(root_path, branch, head)
+    except lifecycle.LifecycleError as exc:
+        raise BridgeError("maintenance ref lock recovery default branch is not synchronized") from exc
+
+
+def _require_expected_task_head(maintenance, record, expected_task: str) -> None:
+    try:
+        maintenance._require_committed_task_head(record, expected_task)
+    except maintenance.MaintenanceError as exc:
+        raise BridgeError("maintenance Task HEAD no longer matches published commit") from exc
+
+
+def _maintenance_ref_lock_recovery(
+    modules,
+    root_path: Path,
+    task: str,
+    pr_number: int,
+    expected_main: str,
+    expected_task: str,
+    creator_pid: int,
+    *,
+    apply_digest: str | None = None,
+) -> dict:
+    """Inspect, then separately authorize exact stale ref lock removal.
+
+    This source-side operation never finalizes Task State, edits product files,
+    or scans/removes arbitrary Git lock paths. No implicit --apply.
+    """
+    maintenance = modules["maintenance_lifecycle"]
+    lifecycle = modules["task_lifecycle"]
+    lifecycle.require_main_worktree(root_path)
+    record, contract = maintenance._stored_contract(root_path, task)
+    maintenance._require_live_maintenance_contract(
+        record, task, contract, runner=trusted_gh_run
+    )
+    if lifecycle.state_status(lifecycle.state_path(record.path)) != "initialized":
+        raise BridgeError("ref lock recovery requires unfinalized maintenance Task")
+    frozen = maintenance._terminal_evidence_snapshot(record)
+    receipt = maintenance._validate_consumed_receipt(record, task)
+    if receipt["commit_sha"] != expected_task:
+        raise BridgeError("expected maintenance commit changed")
+    _, title, body = maintenance._publication_evidence(record, task, receipt)
+    merged = maintenance._merged_pr(
+        root_path, record, contract["repository"], pr_number, expected_task, title, body
+    )
+    if merged["mergeCommitOid"] != expected_main:
+        raise BridgeError("expected merged PR commit changed")
+    branch = lifecycle.default_branch(root_path)
+    _require_exact_synced_refs(root_path, branch, expected_main, lifecycle)
+    _require_expected_task_head(maintenance, record, expected_task)
+    if maintenance._terminal_evidence_snapshot(record) != frozen:
+        raise BridgeError("maintenance terminal evidence changed during lock inspection")
+    _require_terminated_lock_creator(creator_pid)
+    refs = ((branch, expected_main), (record.branch, expected_task))
+    with lifecycle.work_units_lock(record) as directory_fd:
+        lifecycle.assert_task_identity(record, task)
+        _require_exact_synced_refs(root_path, branch, expected_main, lifecycle)
+        locked_receipt = maintenance._validate_consumed_receipt(record, task)
+        if locked_receipt != receipt:
+            raise BridgeError("maintenance consumed receipt changed during recovery")
+        maintenance._require_terminal_snapshot_unchanged(record, frozen, directory_fd)
+        with _inspected_terminal_ref_locks(record, refs, lifecycle) as locks:
+            _require_expected_task_head(maintenance, record, expected_task)
+            _require_exclusive_ref_leases(locks)
+            _require_ref_lock_snapshots(locks)
+            evidence = {
+                "task": task, "pr": pr_number,
+                "mainHead": expected_main, "taskHead": expected_task,
+                "deadCreatorPid": creator_pid,
+                "locks": [{key: value for key, value in lock.items()
+                           if key in {"branch", "head", "path", "device", "inode", "mtimeNs", "ctimeNs", "mode", "uid", "gid", "nlink", "size", "contentSha256"}}
+                          for lock in locks],
+            }
+            digest = hashlib.sha256(
+                json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if apply_digest is None:
+                return {"status": "INSPECT_ONLY", "recoveryDigest": digest, **evidence}
+            if not isinstance(apply_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", apply_digest):
+                raise BridgeError("recovery requires approved exact inspection digest")
+            if digest != apply_digest:
+                raise BridgeError("terminal ref lock recovery inspection is stale")
+            _require_terminated_lock_creator(creator_pid)
+            _require_exact_synced_refs(root_path, branch, expected_main, lifecycle)
+            _require_expected_task_head(maintenance, record, expected_task)
+            final_receipt = maintenance._validate_consumed_receipt(record, task)
+            if final_receipt != receipt:
+                raise BridgeError("maintenance consumed receipt changed before removal")
+            _require_exclusive_ref_leases(locks)
+            _require_ref_lock_snapshots(locks)
+            removed = []
+            try:
+                for lock in locks:
+                    os.unlink(lock["name"], dir_fd=lock["parentFd"])
+                    removed.append(lock["path"])
+                    os.fsync(lock["parentFd"])
+            except OSError as exc:
+                if removed:
+                    remaining = [lock["path"] for lock in locks if lock["path"] not in removed]
+                    raise BridgeError(
+                        "PARTIAL_REF_LOCK_RECOVERY: removed=" + repr(removed)
+                        + " remaining=" + repr(remaining)
+                        + "; inspect and recover manually; do not retry blindly"
+                    ) from exc
+                raise BridgeError("terminal ref lock recovery failed before any removal") from exc
+    return {"status": "EXACT_REF_LOCKS_RECOVERED", "recoveryDigest": digest, **evidence}
+
+
+
+
 def parser() -> argparse.ArgumentParser:
     result = BoundedArgumentParser(description="Templates source-side maintenance recovery bridge")
     sub = result.add_subparsers(dest="command", required=True, parser_class=BoundedArgumentParser)
@@ -655,6 +939,15 @@ def parser() -> argparse.ArgumentParser:
     finalize.add_argument("task", type=_issue_argument)
     finalize.add_argument("pr", type=_issue_argument)
     finalize.add_argument("expected_implementation_revision", type=_revision_argument)
+    ref_locks = sub.add_parser("maintenance-ref-locks")
+    ref_locks.add_argument("target", type=Path)
+    ref_locks.add_argument("task", type=_issue_argument)
+    ref_locks.add_argument("pr", type=_issue_argument)
+    ref_locks.add_argument("expected_main", type=_revision_argument)
+    ref_locks.add_argument("expected_task", type=_revision_argument)
+    ref_locks.add_argument("creator_pid", type=int)
+    ref_locks.add_argument("expected_implementation_revision", type=_revision_argument)
+    ref_locks.add_argument("--apply-digest", type=_digest_argument, default=None)
     publication = sub.add_parser("publication-recover")
     publication.add_argument("target", type=Path)
     publication.add_argument("task", type=_issue_argument)
@@ -2180,6 +2473,7 @@ def main() -> int:
             args.expected_implementation_revision
             if args.command in {
                 "maintenance-finalize",
+                "maintenance-ref-locks",
                 "post-merge-publication-recover",
                 "publication-ready-recover",
                 "publication-recover",
@@ -2192,9 +2486,9 @@ def main() -> int:
         _verify_bootstrap(ROOT, revision)
         _clean_root(ROOT, revision)
         target = args.target.resolve()
-        if args.command in {"maintenance-finalize", "post-merge-publication-recover", "publication-ready-recover", "publication-recover", "bootstrap-upgrade", "maintenance-contract-refresh-inspect", "maintenance-contract-refresh", "recover-missing-task-state"} and target == ROOT:
+        if args.command in {"maintenance-finalize", "maintenance-ref-locks", "post-merge-publication-recover", "publication-ready-recover", "publication-recover", "bootstrap-upgrade", "maintenance-contract-refresh-inspect", "maintenance-contract-refresh", "recover-missing-task-state"} and target == ROOT:
             raise BridgeError(f"{args.command} target must not be the source root")
-        if args.command in {"maintenance-finalize", "post-merge-publication-recover", "publication-ready-recover", "publication-recover", "bootstrap-upgrade", "maintenance-contract-refresh-inspect", "maintenance-contract-refresh", "recover-missing-task-state"}:
+        if args.command in {"maintenance-finalize", "maintenance-ref-locks", "post-merge-publication-recover", "publication-ready-recover", "publication-recover", "bootstrap-upgrade", "maintenance-contract-refresh-inspect", "maintenance-contract-refresh", "recover-missing-task-state"}:
             _validate_target_git_configuration(target)
         with maintenance_environment():
             if args.command in {"recover-task-contract-from-issue", "resume-contract-check"}:
@@ -2222,7 +2516,16 @@ def main() -> int:
                 with _verified_modules(ROOT, revision) as modules:
                     _clean_root(ROOT, revision)
                     value = modules["maintenance_lifecycle"].maintenance_finalize(
-                        target, args.task, int(args.pr)
+                        target, args.task, int(args.pr), issue_runner=trusted_gh_run
+                    )
+                    result = {**value, "implementationRevision": revision}
+            elif args.command == "maintenance-ref-locks":
+                with _verified_modules(ROOT, revision) as modules:
+                    _clean_root(ROOT, revision)
+                    value = _maintenance_ref_lock_recovery(
+                        modules,
+                        target, args.task, int(args.pr), args.expected_main,
+                        args.expected_task, args.creator_pid, apply_digest=args.apply_digest,
                     )
                     result = {**value, "implementationRevision": revision}
             elif args.command in {"maintenance-contract-refresh-inspect", "maintenance-contract-refresh"}:
