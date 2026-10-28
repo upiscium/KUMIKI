@@ -13,7 +13,8 @@ import kagari_v010_ci_packages as p
 
 class CIPackageSetupTests(unittest.TestCase):
     def test_source_package_profiles_are_exact(self):
-        self.assertEqual(set(p.PACKAGES), {"native","existing","composed","rc","ga","ga-stable"})
+        self.assertEqual(set(p.PACKAGES), {
+            "native","existing","composed","rc","ga","ga-stable","vnext-main"})
         self.assertEqual(set(p.CORE_PACKAGE_TEST_MODULES), {
           "test_kagari_v010_native_package",
           "test_kagari_v010_existing_smoke_package",
@@ -21,7 +22,9 @@ class CIPackageSetupTests(unittest.TestCase):
           "test_kagari_v010_durable_admin_preview",
           "test_kagari_v010_rc_lifecycle",
           "test_kagari_v010_ga_lifecycle",
-          "test_kagari_v010_ga_stable_lifecycle"})
+          "test_kagari_v010_ga_stable_lifecycle",
+          "test_kagari_vnext_main_service",
+          "test_kagari_vnext_cleanup_isolation"})
         observed=p.package_module_requirements(ROOT)
         self.assertEqual(observed["test_kagari_v010_durable_admin_preview"],
                          {"composed"})
@@ -35,13 +38,18 @@ class CIPackageSetupTests(unittest.TestCase):
         self.assertEqual(observed["test_kagari_v010_ci_packages"], {"composed","rc","ga"})
         self.assertEqual(observed["test_kagari_v010_durable_task_bridge"],
                          {"composed"})
+        self.assertEqual(observed["test_kagari_vnext_main_service"],
+                         {"vnext-main"})
+        self.assertEqual(observed["test_kagari_vnext_cleanup_isolation"],
+                         {"vnext-main"})
         self.assertEqual(set(x[1] for x in p.PACKAGES.values()),{
           "KAGARI_V010_NATIVE_GENERIC_PACKAGE",
           "KAGARI_V010_COMPOSED_PACKAGE",
           "KAGARI_V010_EXISTING_SMOKE_PACKAGE",
           "KAGARI_V010_RC_PACKAGE",
           "KAGARI_V010_GA_PACKAGE",
-          "KAGARI_V010_GA_STABLE_PACKAGE"})
+          "KAGARI_V010_GA_STABLE_PACKAGE",
+          "KAGARI_VNEXT_MAIN_PACKAGE"})
 
     def test_new_test_module_package_env_is_discovered_and_unknown_is_blocked(self):
         self.assertEqual(p.source_package_reads(
@@ -57,9 +65,41 @@ class CIPackageSetupTests(unittest.TestCase):
             'import os\nx=os.environ.get("KAGARI_V010_GA_PACKAGE")\n'),{"ga"})
         self.assertEqual(p.source_package_reads(
             'import os\nx=os.getenv("KAGARI_V010_GA_STABLE_PACKAGE")\n'), {"ga-stable"})
+        self.assertEqual(p.source_package_reads(
+            'import os\nx=os.getenv("KAGARI_VNEXT_MAIN_PACKAGE")\n'),
+            {"vnext-main"})
+        self.assertEqual(p.source_package_reads(
+            'import os\nx=os.environ.get("KAGARI_VNEXT_MAIN_PACKAGE")\n'),
+            {"vnext-main"})
+        self.assertEqual(p.source_package_reads(
+            'import os\nx=os.getenv(key="KAGARI_VNEXT_MAIN_PACKAGE")\n'),
+            {"vnext-main"})
+        self.assertEqual(p.source_package_reads(
+            'import os\nx=os.environ.get(key="KAGARI_V010_RC_PACKAGE")\n'),
+            {"rc"})
+        self.assertEqual(p.source_package_reads(
+            'import os\nx=os.getenv(key="PATH", default="")\n'),set())
         with self.assertRaisesRegex(p.CIBlocked,"unrecognized KAGARI"):
             p.source_package_reads(
                 'import os\nx=os.environ.get("KAGARI_V010_UNKNOWN_PACKAGE")\n')
+        with self.assertRaisesRegex(p.CIBlocked,"unrecognized KAGARI"):
+            p.source_package_reads(
+                'import os\nx=os.getenv("KAGARI_VNEXT_UNKNOWN_PACKAGE")\n')
+        for dynamic in (
+            'import os\nname="KAGARI_VNEXT_MAIN_PACKAGE"\nos.getenv(name)\n',
+            'import os\nname="PATH"\nos.environ.get(name)\n',
+            'import os\nos.environ.get("PATH" if True else "KAGARI_VNEXT_MAIN_PACKAGE")\n',
+            'import os\nos.getenv(key=NAME)\n',
+            'import os\nos.environ.get(key=NAME)\n',
+            'import os\nos.getenv(**{"key": "KAGARI_VNEXT_MAIN_PACKAGE"})\n',
+            'import os\nos.getenv()\n',
+        ):
+            with self.subTest(dynamic=dynamic):
+                with self.assertRaisesRegex(p.CIBlocked,
+                                            "dynamic environment variable name"):
+                    p.source_package_reads(dynamic)
+        self.assertEqual(p.source_package_reads(
+            'import os\nx=os.environ.get("PATH")\n'),set())
         # Strings mentioning env names in tests/fixtures are not dependencies.
         self.assertEqual(p.source_package_reads(
             'expected="KAGARI_V010_COMPOSED_PACKAGE"\n'),set())
@@ -68,6 +108,11 @@ class CIPackageSetupTests(unittest.TestCase):
         for profile in sorted(p.PACKAGES):
             expr=p.package_expression(ROOT,profile)
             self.assertIn("builtins.getFlake",expr)
+            if profile=="vnext-main":
+                self.assertIn("flake.packages.x86_64-linux.kagari-control",expr)
+                self.assertNotIn("in import (builtins.toPath",expr)
+                self.assertNotIn("github:",expr)
+                continue
             self.assertIn("nixpkgs.legacyPackages.x86_64-linux",expr)
             self.assertIn(p.PACKAGES[profile][0],expr)
             self.assertIn("inherit pkgs;",expr)
@@ -89,6 +134,18 @@ class CIPackageSetupTests(unittest.TestCase):
         # after new test modules move. No duplicate output per individual shard.
         self.assertTrue(all(len(names)==len(set(names))
                             for names in imports.values()))
+        import ci_contract_runner as ci
+        by_id=ci.assignments([t.id() for t in ci.discover()])
+        main_ids=[test_id for test_id in by_id if test_id.startswith((
+            "test_kagari_vnext_main_service.",
+            "test_kagari_vnext_cleanup_isolation."))]
+        self.assertTrue(main_ids)
+        expected_shards={by_id[test_id] for test_id in main_ids}
+        for shard in p.SHARD_RANGE:
+            self.assertEqual("vnext-main" in imports[shard],
+                             shard in expected_shards)
+        self.assertEqual(sum("vnext-main" in names for names in imports.values()),
+                         len(expected_shards))
         for idx, names in imports.items():
             expected=p.run(ROOT,idx,requirements_only=True)
             self.assertEqual(expected,
@@ -100,16 +157,50 @@ class CIPackageSetupTests(unittest.TestCase):
         def different():
             return {shard:(
                 ["native","composed"] if shard==0 else
-                ["existing"] if shard==2 else [])
+                ["existing"] if shard==2 else
+                ["vnext-main"] if shard==7 else [])
                 for shard in range(8)}
         with patch.object(p,"package_assignment",side_effect=lambda root:different()):
             self.assertEqual(p.run(ROOT,0,requirements_only=True),["needs_nix=true"])
             self.assertEqual(p.run(ROOT,2,requirements_only=True),["needs_nix=true"])
-            self.assertEqual(p.run(ROOT,7,requirements_only=True),["needs_nix=false"])
+            self.assertEqual(p.run(ROOT,7,requirements_only=True),["needs_nix=true"])
+            self.assertEqual(p.run(ROOT,6,requirements_only=True),["needs_nix=false"])
             with patch.object(p,"build",side_effect=lambda _root,profile:
                               (p.PACKAGES[profile][1],"/nix/store/fixture-"+profile)):
                 self.assertEqual(len(p.run(ROOT,0,requirements_only=False)),2)
                 self.assertEqual(len(p.run(ROOT,2,requirements_only=False)),1)
+                self.assertEqual(p.run(ROOT,7,requirements_only=False),
+                                 ["KAGARI_VNEXT_MAIN_PACKAGE=/nix/store/fixture-vnext-main"])
+
+    def test_vnext_profile_name_and_source_bound_Nix_expression(self):
+        self.assertEqual(p.PACKAGES["vnext-main"][1],
+                         "KAGARI_VNEXT_MAIN_PACKAGE")
+        self.assertEqual(p.PACKAGES["vnext-main"][2],
+                         "kagari-vnext-control")
+        expression=p.package_expression(ROOT,"vnext-main")
+        self.assertIn("builtins.getFlake",expression)
+        self.assertIn("path:"+str(ROOT),expression)
+        self.assertIn("flake.packages.x86_64-linux.kagari-control",expression)
+        self.assertNotIn("kagari-0.1.0",expression)
+
+    def test_vnext_package_verification_refuses_missing_binary(self):
+        with tempfile.TemporaryDirectory(prefix="ci-vnext-guard-") as tmp:
+            with self.assertRaisesRegex(p.CIBlocked,"missing executable"):
+                p.verify_package(ROOT,"vnext-main",Path(tmp))
+
+    def test_vnext_package_profile_strict_store_path(self):
+        prefix="/nix/store/"+"a"*32
+        expected=prefix+"-kagari-vnext-control"
+        with patch.object(Path,"is_dir",return_value=True), \
+             patch.object(Path,"is_symlink",return_value=False):
+            self.assertEqual(str(p.parse_store_path(expected+"\n",
+                                                    "vnext-main")),expected)
+            for bad in ("",expected+"\n"+expected,
+                        expected.replace("vnext-control","0.1.0"),
+                        "/tmp/kagari-vnext-control",expected+"-extra"):
+                with self.subTest(bad=bad):
+                    with self.assertRaises(p.CIBlocked):
+                        p.parse_store_path(bad,"vnext-main")
 
     def test_store_path_validator_rejects_wrong_type_and_multiline(self):
         prefix="/nix/store/"+"a"*32

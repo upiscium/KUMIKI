@@ -30,6 +30,10 @@ CORE_PACKAGE_TEST_MODULES = {
     "test_kagari_v010_rc_lifecycle": "rc",
     "test_kagari_v010_ga_lifecycle": "ga",
     "test_kagari_v010_ga_stable_lifecycle": "ga-stable",
+    # These source-pinned vNext Main tests must run in CI, regardless of the
+    # canonical shard number assigned to their modules.
+    "test_kagari_vnext_main_service": "vnext-main",
+    "test_kagari_vnext_cleanup_isolation": "vnext-main",
 }
 PACKAGES = {
     "native": ("kagari-v010-native-generic-package.nix",
@@ -50,6 +54,10 @@ PACKAGES = {
     "ga-stable": ("kagari-v010-ga-stable.nix",
            "KAGARI_V010_GA_STABLE_PACKAGE",
            "kagari-0.1.0"),
+    # Optional vNext control plane, distinct from shipped 0.1.0 GA.
+    "vnext-main": ("kagari-vnext-control.nix",
+                   "KAGARI_VNEXT_MAIN_PACKAGE",
+                   "kagari-vnext-control"),
 }
 SHARD_RANGE = range(8)
 
@@ -85,7 +93,7 @@ def source_package_reads(source_text: str) -> set[str]:
     env_to_package={entry[1]:name for name,entry in PACKAGES.items()}
     found=set()
     for node in ast.walk(tree):
-        if not isinstance(node,ast.Call) or not node.args:
+        if not isinstance(node,ast.Call):
             continue
         fn=node.func
         recognized=False
@@ -100,11 +108,31 @@ def source_package_reads(source_text: str) -> set[str]:
                 recognized=True
         if not recognized:
             continue
-        arg=node.args[0]
-        if not isinstance(arg,ast.Constant) or type(arg.value) is not str:
-            continue
+        # Both os.getenv(key=...) and os.environ.get(key=...) are valid
+        # Python and must not hide required Nix package dependencies.
+        require(all(k.arg is not None for k in node.keywords),
+                "dynamic environment variable name cannot establish "
+                "the complete KAGARI package requirements")
+        if node.args:
+            require(not any(k.arg=="key" for k in node.keywords),
+                    "duplicate environment variable key is ambiguous")
+            arg=node.args[0]
+        else:
+            keys=[k.value for k in node.keywords if k.arg=="key"]
+            require(len(keys)==1,
+                    "dynamic environment variable name cannot establish "
+                    "the complete KAGARI package requirements")
+            arg=keys[0]
+        # The loader cannot prove whether a computed key is a KAGARI package
+        # variable. Silent omission would turn future required package tests
+        # into an unreviewed SKIP. Reject all dynamic getenv/environ.get keys
+        # until their exact value has a separately reviewed static binding.
+        require(isinstance(arg,ast.Constant) and type(arg.value) is str,
+                "dynamic environment variable name cannot establish "
+                "the complete KAGARI package requirements")
         key=arg.value
-        if key.startswith("KAGARI_V010_") and key.endswith("_PACKAGE"):
+        if (key.startswith(("KAGARI_V010_", "KAGARI_VNEXT_"))
+                and key.endswith("_PACKAGE")):
             require(key in env_to_package,
                     "unrecognized KAGARI package dependency in test source: " + key)
             found.add(env_to_package[key])
@@ -156,6 +184,11 @@ def package_expression(root: Path, package: str) -> str:
     require(package in PACKAGES, "unrecognized KAGARI package profile")
     file = root/"nix"/PACKAGES[package][0]
     require(file.is_file() and not file.is_symlink(), "missing selected Nix expression")
+    if package == "vnext-main":
+        # Build exactly this checkout's opt-in control-plane output, not GA
+        # v0.1.0, another checkout, or a mutable remote reference.
+        return (f'let flake = builtins.getFlake {json.dumps("path:" + str(root))}; '
+                'in flake.packages.x86_64-linux.kagari-control')
     attrs = "inherit pkgs;"
     if package == "existing":
         attrs += (f' sourceRevision = "{BASE_REV}"; '
@@ -349,6 +382,59 @@ def verify_package(root: Path, package: str, path: Path) -> None:
                 "GA external immutable component chain not receipt-bound")
         verify_package(root,"composed",composed_root)
         verify_package(root,"native",native_root)
+    elif package == "vnext-main":
+        # This symlinkJoin has no GA qualification receipt. Verify all five
+        # entrypoints and their single shared immutable source copy instead.
+        expected = {
+            "kagari-vnext-task": "tools/kagari_vnext_task_binding.py",
+            "kagari-vnext-session": "tools/kagari_vnext_session.py",
+            "kagari-vnext-worktree-install": "tools/kagari_vnext_worktree_ignore.py",
+            "kagari-vnext-host-prepare": "tools/kagari_vnext_host_prepare.py",
+            "kagari-vnext-main": "tools/kagari_vnext_main_service.py",
+        }
+        roots = set()
+        store_root = re.compile(
+            r"/nix/store/[0-9a-df-np-sv-z]{32}-kagari-vnext-control-sources")
+        for binary, relative in expected.items():
+            executable = path/"bin"/binary
+            require(executable.is_file() and executable.stat().st_mode & 0o111,
+                    "missing executable in vNext package: " + binary)
+            script = executable.read_text(encoding="utf-8")
+            located = set(store_root.findall(script))
+            require(len(located) == 1,
+                    "vNext wrapper source identity ambiguous: " + binary)
+            source = next(iter(located))
+            require(f'-B {source}/{relative} "$@"' in script
+                    and script.count("exec ") == 1,
+                    "vNext wrapper entrypoint differs: " + binary)
+            roots.add(source)
+        require(len(roots) == 1,
+                "vNext wrappers do not share one immutable source")
+        installed = Path(next(iter(roots)))
+        require(installed.parent == Path("/nix/store")
+                and installed.is_dir() and not installed.is_symlink(),
+                "vNext source output is not immutable Nix store content")
+        definition = (root/"nix/kagari-vnext-control.nix").read_text("utf-8")
+        copies = []
+        for line in definition.splitlines():
+            if not line.strip().startswith("cp $" + "{../"):
+                continue
+            match = re.fullmatch(
+                r'cp \$\{\.\./([a-zA-Z0-9_./-]+)\} "\$out/([a-zA-Z0-9_./-]+)"',
+                line.strip())
+            require(match is not None,
+                    "ambiguous vNext source-copy declaration")
+            copies.append(match.groups())
+        require(len(copies) >= 20
+                and len({src for src, _ in copies}) == len(copies),
+                "vNext source copy inventory incomplete or ambiguous")
+        for relative, target in copies:
+            require(relative == target
+                    and relative.startswith(("tools/", "components/agent-core-v4/"))
+                    and ".." not in Path(relative).parts,
+                    "vNext Nix copy target differs from source")
+            require(sha(root/relative) == sha(installed/relative),
+                    "vNext installed source differs from checkout: " + relative)
     elif package == "ga-stable":
         data=receipt(path/"share/kagari-v010-ga/receipt.json")
         basis=receipt(path/"share/kagari-v010-ga/bounded-qualification.json")
