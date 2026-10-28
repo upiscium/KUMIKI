@@ -157,6 +157,24 @@ class LegacyRefLockRecoveryTest(unittest.TestCase):
                 self.assertTrue(target.exists())
                 self.assertTrue(locks[1].exists())
 
+    def test_task_ref_drift_blocks_recovery_without_deleting_locks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, record, locks, main_head, task_head = self.fixture(
+                Path(directory) / "repo"
+            )
+            # Git update-ref respects the intentionally present .lock file.
+            # Simulate an external ref drift by editing only this disposable
+            # synthetic fixture, not any real repository ref.
+            task_ref = root / ".git/refs/heads/task/15-maintenance"
+            task_ref.write_text(main_head + "\n", encoding="ascii")
+            with self.assertRaisesRegex(bridge.BridgeError, "Task HEAD no longer matches"):
+                self.run_recovery(root, record, main_head, task_head)
+            self.assertTrue(all(lock.exists() for lock in locks))
+            self.assertEqual(
+                maintenance.lifecycle.state_status(record.path / ".task-state/task.md"),
+                "initialized",
+            )
+
     def test_live_creator_and_wrong_immutable_identity_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root, record, locks, main_head, task_head = self.fixture(Path(directory) / "repo")

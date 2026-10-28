@@ -41,14 +41,22 @@ cleaner, or permission to edit a consumer's Task State directly.
      <approved-recoveryDigest>
    ```
 
-   The tool revalidates its inspection evidence and the immutable refs before
-   removing only those two files. It never transitions Task State. A partially
+   The Digest is a state-comparison token, **not** proof of human approval;
+   operator authority must be established independently before invoking the
+   mutation. The tool revalidates inspection evidence and the immutable
+   Main/Task refs before removing only those two files. It never transitions
+   Task State. A partially
    completed two-file deletion must be reported and re-evaluated, not retried
    blindly.
 
 5. **Run source-side `maintenance-finalize`** with the same pinned KUMIKI
-   implementation revision only after exact lock recovery. Require a completed
-   terminal `merged` state and canonical publication evidence. After that,
+   implementation revision only after exact lock recovery. It freezes Task
+   evidence *before* verifying it and compares those bytes again under the
+   terminal lock; it also checks that the live Task ref/HEAD equals the
+   published commit while holding ref locks. A merged Issue may be closed,
+   but its other contracted fields must exactly match the frozen Issue.
+   Require a completed terminal `merged` state and canonical publication
+   evidence. After that,
    maintenance cleanup is a distinct destructive operation requiring another
    human approval.
 

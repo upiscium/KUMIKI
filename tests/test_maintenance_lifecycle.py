@@ -767,6 +767,98 @@ class MaintenanceLifecycleTest(unittest.TestCase):
             self.assertEqual(result["status"], "FINALIZED")
             self.assertEqual(result["stage"], "merged")
 
+
+    def test_finalize_rejects_failed_verification_receipt_replaced_after_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_root = root / "task"
+            task_root.mkdir()
+            self._state(task_root)
+            state_dir = task_root / ".task-state"
+            for name in maintenance._TERMINAL_EVIDENCE_FILES:
+                if name != "task.md":
+                    (state_dir / name).write_bytes(b"{}\\n")
+
+            record = self._record(task_root)
+            publication_evidence = ([".automation/bin/a.py"], "21: maintenance", "body")
+            counter = 0
+
+            def verified_then_failed(*_args):
+                nonlocal counter
+                counter += 1
+                if counter == 2:
+                    (state_dir / "verification.json").write_text(
+                        '{"project_check":{"returncode":1}}\\n', encoding="utf-8"
+                    )
+                return publication_evidence
+
+            with (
+                mock.patch.object(maintenance.lifecycle, "require_main_worktree"),
+                mock.patch.object(
+                    maintenance, "_stored_contract",
+                    return_value=(record, self._contract(task_root)),
+                ),
+                mock.patch.object(
+                    maintenance, "_validate_consumed_receipt",
+                    return_value={"commit_sha": self.HEAD},
+                ),
+                mock.patch.object(
+                    maintenance, "_publication_evidence",
+                    side_effect=verified_then_failed,
+                ),
+                mock.patch.object(
+                    maintenance, "_merged_pr",
+                    return_value={"mergeCommitOid": self.MERGE},
+                ),
+                mock.patch.object(
+                    maintenance.lifecycle, "synchronize_default_branch",
+                    return_value={"branch": "main", "revision": self.MERGE},
+                ),
+                mock.patch.object(
+                    maintenance.lifecycle, "run", return_value=mock.Mock(returncode=0)
+                ),
+                mock.patch.object(
+                    maintenance.lifecycle, "require_synchronized_default_branch_revision"
+                ),
+                mock.patch.object(maintenance, "_mark_maintenance_merged") as mark,
+                self.assertRaisesRegex(
+                    maintenance.MaintenanceError,
+                    "terminal evidence changed during finalization",
+                ),
+            ):
+                maintenance.maintenance_finalize(root, "21", 22)
+
+            mark.assert_not_called()
+            self.assertEqual(counter, 2)
+            self.assertEqual(
+                maintenance.lifecycle.state_status(state_dir / "task.md"),
+                "initialized",
+            )
+
+    def test_task_ref_head_must_equal_published_commit_even_under_ref_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._init_repo(root)
+            self._write(root, "tracked.txt", "base\\n")
+            base = self._commit(root, "baseline")
+            self._git(root, "checkout", "-b", "task/21-maintenance")
+            self._write(root, "tracked.txt", "maintenance\\n")
+            commit = self._commit(root, "maintenance")
+            record = maintenance.lifecycle.WorktreeRecord(
+                root, "task/21-maintenance", commit
+            )
+            with maintenance._terminal_ref_locks(
+                record, default_branch="main", default_revision=base
+            ):
+                maintenance._require_committed_task_head(record, commit)
+            self._git(
+                root, "update-ref", "refs/heads/task/21-maintenance", base, commit
+            )
+            with self.assertRaisesRegex(
+                maintenance.MaintenanceError, "HEAD no longer matches published"
+            ):
+                maintenance._require_committed_task_head(record, commit)
+
     def test_publication_evidence_rejects_stale_verification_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -802,23 +894,37 @@ class MaintenanceLifecycleTest(unittest.TestCase):
                 encoding="utf-8",
             )
             pr = {"number": 22, "state": "MERGED"}
+            live_payload = {
+                "number": 21, "html_url": "https://github.com/example/repo/issues/21",
+                "title": "frozen title", "body": "frozen body", "state": "closed",
+                "labels": [], "assignees": [], "milestone": None,
+            }
+            expected = maintenance.task_contract.authoritative_payload(
+                live_payload, 21, "example/repo"
+            )
+            expected["state"] = "open"
+            stored = self._contract(root)
+            stored["sha256"] = maintenance.task_contract._digest(expected)
             with (
                 mock.patch.object(maintenance, "_validated_contract", side_effect=maintenance.MaintenanceError("Issue must be open")),
-                mock.patch.object(maintenance, "_stored_contract", return_value=(record, self._contract(root))),
+                mock.patch.object(maintenance, "_stored_contract", return_value=(record, stored)),
+                mock.patch.object(maintenance.task_contract, "fetch_issue", return_value=("example/repo", live_payload)),
                 mock.patch.object(maintenance, "_validate_consumed_receipt", return_value={"commit_sha": self.HEAD}),
                 mock.patch.object(maintenance, "_publication_evidence", return_value=([], "title", "body")),
                 mock.patch.object(maintenance, "_pr_evidence", return_value=pr),
                 mock.patch.object(maintenance, "_merged_pr", return_value={"mergeCommitOid": self.MERGE}) as merged_check,
-                mock.patch.object(maintenance.task_contract, "_validate_authoritative_issue") as live_issue,
             ):
                 result = maintenance.maintenance_check(root, "21")
                 self.assertEqual(result["status"], "COMPLETED")
                 self.assertEqual(result["stage"], "merged")
-                live_issue.assert_not_called()
                 merged_check.assert_called_once()
 
                 pr["state"] = "OPEN"
                 with self.assertRaisesRegex(maintenance.MaintenanceError, "no exact merged PR"):
+                    maintenance.maintenance_check(root, "21")
+                pr["state"] = "MERGED"
+                live_payload["title"] = "changed after closure"
+                with self.assertRaisesRegex(maintenance.MaintenanceError, "closed Issue content differs"):
                     maintenance.maintenance_check(root, "21")
 
     def test_merged_pr_requires_canonical_title_and_body(self) -> None:

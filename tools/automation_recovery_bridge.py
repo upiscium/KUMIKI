@@ -759,6 +759,13 @@ def _require_exact_synced_refs(root_path: Path, branch: str, head: str, lifecycl
         raise BridgeError("maintenance ref lock recovery default branch is not synchronized") from exc
 
 
+def _require_expected_task_head(maintenance, record, expected_task: str) -> None:
+    try:
+        maintenance._require_committed_task_head(record, expected_task)
+    except maintenance.MaintenanceError as exc:
+        raise BridgeError("maintenance Task HEAD no longer matches published commit") from exc
+
+
 def _maintenance_ref_lock_recovery(
     modules,
     root_path: Path,
@@ -781,6 +788,7 @@ def _maintenance_ref_lock_recovery(
     record, contract = maintenance._stored_contract(root_path, task)
     if lifecycle.state_status(lifecycle.state_path(record.path)) != "initialized":
         raise BridgeError("ref lock recovery requires unfinalized maintenance Task")
+    frozen = maintenance._terminal_evidence_snapshot(record)
     receipt = maintenance._validate_consumed_receipt(record, task)
     if receipt["commit_sha"] != expected_task:
         raise BridgeError("expected maintenance commit changed")
@@ -792,14 +800,17 @@ def _maintenance_ref_lock_recovery(
         raise BridgeError("expected merged PR commit changed")
     branch = lifecycle.default_branch(root_path)
     _require_exact_synced_refs(root_path, branch, expected_main, lifecycle)
+    _require_expected_task_head(maintenance, record, expected_task)
+    if maintenance._terminal_evidence_snapshot(record) != frozen:
+        raise BridgeError("maintenance terminal evidence changed during lock inspection")
     _require_terminated_lock_creator(creator_pid)
-    frozen = maintenance._terminal_evidence_snapshot(record)
     refs = ((branch, expected_main), (record.branch, expected_task))
     with lifecycle.work_units_lock(record) as directory_fd:
         lifecycle.assert_task_identity(record, task)
         _require_exact_synced_refs(root_path, branch, expected_main, lifecycle)
         maintenance._require_terminal_snapshot_unchanged(record, frozen, directory_fd)
         with _inspected_terminal_ref_locks(record, refs, lifecycle) as locks:
+            _require_expected_task_head(maintenance, record, expected_task)
             _no_other_lock_holders({(lock["device"], lock["inode"]) for lock in locks})
             evidence = {
                 "task": task, "pr": pr_number,
@@ -819,6 +830,7 @@ def _maintenance_ref_lock_recovery(
             if digest != apply_digest:
                 raise BridgeError("terminal ref lock recovery inspection is stale")
             _require_terminated_lock_creator(creator_pid)
+            _require_expected_task_head(maintenance, record, expected_task)
             _no_other_lock_holders({(lock["device"], lock["inode"]) for lock in locks})
             for lock in locks:
                 current = os.stat(lock["name"], dir_fd=lock["parentFd"], follow_symlinks=False)

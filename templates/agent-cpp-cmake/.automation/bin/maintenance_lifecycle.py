@@ -418,6 +418,18 @@ def maintenance_check(root_path: Path, task: str) -> dict:
     record, contract = _stored_contract(root_path, task)
     if lifecycle.state_status(lifecycle.state_path(record.path)) != "merged":
         raise MaintenanceError("closed Issue cannot resume an unmerged maintenance Task")
+    try:
+        identity, live_issue = task_contract.fetch_issue(
+            record.path, task, allow_closed=True
+        )
+        if identity != contract["repository"] or live_issue["state"] != "closed":
+            raise MaintenanceError("closed Issue repository or state changed")
+        normalized = task_contract.authoritative_payload(live_issue, int(task), identity)
+        normalized["state"] = "open"
+        if task_contract._digest(normalized) != contract["sha256"]:
+            raise MaintenanceError("closed Issue content differs from the frozen Task Contract")
+    except task_contract.ContractError as exc:
+        raise MaintenanceError(str(exc)) from exc
     receipt = _validate_consumed_receipt(record, task)
     commit = receipt["commit_sha"]
     _, title, body = _publication_evidence(record, task, receipt)
@@ -1114,6 +1126,30 @@ def _require_terminal_snapshot_unchanged(
 
 
 
+def _require_committed_task_head(record: lifecycle.WorktreeRecord, expected_commit: str) -> None:
+    """Require the published Task revision even with terminal ref locks held.
+
+    A .lock file blocks cooperating Git writers but does not prove the actual
+    referenced OID. Read the exact Task ref and the worktree HEAD under fence.
+    """
+    if (
+        not isinstance(expected_commit, str)
+        or lifecycle.OID_RE.fullmatch(expected_commit) is None
+        or record.head != expected_commit
+        or not isinstance(record.branch, str)
+    ):
+        raise MaintenanceError("maintenance Task HEAD no longer matches published commit")
+    try:
+        branch_head = lifecycle.git(
+            "rev-parse", "--verify", f"refs/heads/{record.branch}", cwd=record.path
+        )
+        worktree_head = lifecycle.git("rev-parse", "--verify", "HEAD", cwd=record.path)
+    except lifecycle.LifecycleError as exc:
+        raise MaintenanceError("maintenance Task HEAD could not be verified") from exc
+    if branch_head != expected_commit or worktree_head != expected_commit:
+        raise MaintenanceError("maintenance Task HEAD no longer matches published commit")
+
+
 def _mark_maintenance_merged(
     record: lifecycle.WorktreeRecord,
     task: str,
@@ -1239,6 +1275,9 @@ def _add_finalized_publication(text: str, publication_line: str) -> str:
 def maintenance_finalize(root_path: Path, task: str, pr_number: int) -> dict:
     lifecycle.require_main_worktree(root_path)
     record, contract = _stored_contract(root_path, task)
+    # Freeze the evidence *before* any validation. A concurrent failed
+    # agent::verify may overwrite its receipt between validation and CAS.
+    terminal_snapshot = _terminal_evidence_snapshot(record)
     receipt = _validate_consumed_receipt(record, task)
     commit = receipt["commit_sha"]
     publication_evidence = _publication_evidence(record, task, receipt)
@@ -1279,16 +1318,17 @@ def maintenance_finalize(root_path: Path, task: str, pr_number: int) -> dict:
         "finalization finalized"
     )
 
-    # All GitHub, reconstruction and full project evidence checks above were
-    # performed before locking. Freeze their backing Task State bytes so the
-    # final CAS can reject drift without reentering the non-reentrant lock.
-    terminal_snapshot = _terminal_evidence_snapshot(record)
+    # Detect changes made while the independent GitHub/source verification ran.
+    # Never adopt a freshly replaced (possibly failed) verification receipt.
+    if _terminal_evidence_snapshot(record) != terminal_snapshot:
+        raise MaintenanceError("maintenance terminal evidence changed during finalization")
 
     def validate_terminal_evidence(directory_fd: int) -> None:
         lifecycle.require_synchronized_default_branch_revision(
             root_path, sync["branch"], sync["revision"]
         )
         lifecycle.assert_task_identity(record, task)
+        _require_committed_task_head(record, commit)
         _require_terminal_snapshot_unchanged(record, terminal_snapshot, directory_fd)
 
     result = _mark_maintenance_merged(
