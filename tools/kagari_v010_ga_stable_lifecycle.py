@@ -593,11 +593,58 @@ def task_details(jobdir:Path,record:dict,request:dict,
     runtime=Path(record["native_runtime"])
     identity=admin.verify_package(native,receipt["native_receipt_sha256"])
     status=admin.summary(clone,runtime,native,identity)
+    approval_path=jobdir/"task-approval.json"
+    task_approved=False
+    if approval_path.exists() or approval_path.is_symlink():
+        approved(jobdir,request)
+        task_approved=True
+    dispatched=(jobdir/"run-dispatch.json").exists() or (jobdir/"run-dispatch.json").is_symlink()
+    terminal=jobdir/"result.json"
+    observed="GA_JOB_READY" if status.get("ready_for_model_task") else "GA_JOB_AWAITING_NATIVE_ASKS"
+    product_commit=None
+    outcome=None
+    if dispatched:
+        observed="GA_JOB_RESULT_UNAVAILABLE"
+        need(task_approved, "GA dispatched Job missing exact Task approval")
+        dispatch=load(jobdir/"run-dispatch.json",exact_mode=0o600)
+        need(dispatch.get("Task_approval_sha256")==sha(bytes_regular(approval_path,exact_mode=0o600)),
+             "GA dispatch receipt does not bind current Task approval")
+        need(dispatch.get("schema_version")==1
+             and dispatch.get("kind")=="KAGARI_GA_ONE_SHOT_DISPATCH"
+             and dispatch.get("Task_request_id")==request["request_id"]
+             and dispatch.get("TaskSpec_sha256")==record["task_spec_sha256"]
+             and dispatch.get("Project_head")==record["Project_head"]
+             and dispatch.get("native_receipt_sha256")==receipt["native_receipt_sha256"],
+             "GA dispatch receipt identity mismatch")
+        if terminal.exists() or terminal.is_symlink():
+            outcome=load(terminal,exact_mode=0o600)
+            need(outcome.get("schema_version")==1
+                 and outcome.get("kind")=="KAGARI_GA_MANAGED_WORKUNIT_TASK_RESULT"
+                 and outcome.get("job_id")==jobdir.name
+                 and outcome.get("original_Project_root")==record["Project_root"]
+                 and outcome.get("native_runtime_receipt_sha256")==receipt["native_receipt_sha256"]
+                 and outcome.get("status") in ("GA_MANAGED_WORKUNIT_TASK_PASS","BLOCKED"),
+                 "GA terminal result identity or state mismatch")
+            if outcome["status"]=="GA_MANAGED_WORKUNIT_TASK_PASS":
+                import kagari_v010_ga_product_archive as archive
+                try:
+                    verified=archive.verify(jobdir,result_override=outcome)
+                except (ValueError, OSError, KeyError, TypeError) as exc:
+                    raise RCBlocked("GA terminal Product archive verification failed") from exc
+                need(verified.get("status")=="DURABLE_PRODUCT_ARTIFACT_VERIFIED"
+                     and verified.get("product_commit")==outcome.get("Product_commit"),
+                     "GA terminal Product archive verification mismatch")
+                product_commit=verified["product_commit"]
+                observed="GA_JOB_COMPLETED"
+            else:
+                observed="GA_JOB_BLOCKED"
+    elif terminal.exists() or terminal.is_symlink():
+        raise RCBlocked("GA terminal result exists without dispatch")
     return {
-       "status":"GA_JOB_READY" if status.get("ready_for_model_task") else "GA_JOB_AWAITING_NATIVE_ASKS",
+       "status":observed,
        "job_id":jobdir.name,
        "Task_request_id":request["request_id"],
-       "Task_approved":(jobdir/"task-approval.json").is_file(),
+       "Task_approved":task_approved,
        "native_attached":status["status"],
        "native_required_asks":status.get("required_asks",[]),
        "native_ask_status":status.get("ask_status",{}),
@@ -605,8 +652,12 @@ def task_details(jobdir:Path,record:dict,request:dict,
        "workunit":str(clone),
        "source_project":record["Project_root"],
        "original_head":record["Project_head"],
-       "run_dispatched":(jobdir/"run-dispatch.json").exists(),
-       "Product_commit":None,
+       "run_dispatched":dispatched,
+       "Product_commit":product_commit,
+       "result_sha256":sha(bytes_regular(terminal,exact_mode=0o600)) if outcome is not None else None,
+       "result_status":outcome["status"] if outcome is not None else None,
+       "result_reason":outcome.get("reason") if outcome is not None else None,
+       "native_v4_Evidence_readback":outcome.get("native_v4_Evidence_readback") if outcome is not None else None,
     }
 
 
