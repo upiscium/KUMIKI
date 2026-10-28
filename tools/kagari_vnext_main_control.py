@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import secrets
 import shutil
@@ -178,6 +179,98 @@ def project_key(identity: dict[str, Any]) -> str:
         "project_device", "project_inode", "common_git_device", "common_git_inode")]))
 
 
+def _host_state_home() -> Path:
+    """The same host-managed rendezvous as #291 MainSupervisor / PR #309.
+
+    Never derive this identity from HOME, XDG_STATE_HOME or the CLI's
+    caller-selected --state-home: those are bypassable across clones.
+    """
+    return Path(pwd.getpwuid(os.geteuid()).pw_dir) / ".local" / "state"
+
+
+def _safe_host_directory(path: Path, *, private: bool) -> None:
+    need(path.is_absolute() and not path.is_symlink()
+         and path.resolve(strict=True) == path, "MAIN_LOCK_NAMESPACE_UNSAFE")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise Blocked("MAIN_LOCK_NAMESPACE_UNSAFE") from None
+    try:
+        info, observed = os.fstat(fd), path.lstat()
+        need(stat.S_ISDIR(info.st_mode) and stat.S_ISDIR(observed.st_mode)
+             and info.st_uid == os.geteuid()
+             and (info.st_dev, info.st_ino) == (observed.st_dev, observed.st_ino)
+             and not info.st_mode & 0o022, "MAIN_LOCK_NAMESPACE_UNSAFE")
+        if private:
+            need(stat.S_IMODE(info.st_mode) == 0o700, "MAIN_LOCK_NAMESPACE_UNSAFE")
+        local_fs(fd)
+    finally:
+        os.close(fd)
+
+
+def _shared_host_lock_path(repository: str, *, create: bool) -> Path | None:
+    """One exact lock inode shared with PR #309 MainSupervisor.
+
+    Observing is read-only when the namespace has never been created.
+    Lock creation occurs only under a user-invoked hold/reconcile.
+    """
+    home = _host_state_home()
+    # The euid's passwd home is the trust anchor. Validate it BEFORE
+    # returning on a missing .local, including any symlinked ancestor:
+    # otherwise a symlinked passwd home could be mistaken for absence.
+    need(home.name == "state" and home.parent.name == ".local",
+         "MAIN_LOCK_NAMESPACE_UNSAFE")
+    _safe_host_directory(home.parent.parent, private=False)
+    # Fresh hosts may have neither ~/.local nor ~/.local/state yet. A
+    # read-only observation must report "no existing lease" without
+    # creating those directories. Existing ancestors must still be
+    # validated; a symlinked or foreign .local is not an absent lock.
+    for component in (home.parent, home):
+        try:
+            component.lstat()
+        except FileNotFoundError:
+            if not create:
+                return None
+            raise Blocked("MAIN_LOCK_NAMESPACE_UNSAFE") from None
+        except OSError:
+            raise Blocked("MAIN_LOCK_NAMESPACE_UNSAFE") from None
+        _safe_host_directory(component, private=False)
+    for path in (home / "kagari", home / "kagari" / "repository-main-locks"):
+        if create:
+            try:
+                os.mkdir(path, 0o700)
+            except FileExistsError:
+                pass
+        elif not path.exists() and not path.is_symlink():
+            return None
+        _safe_host_directory(path, private=True)
+    key = hashlib.sha256(("github.com/" + repository.lower()).encode("ascii")).hexdigest()
+    return home / "kagari" / "repository-main-locks" / (key + ".lock")
+
+
+def _open_host_lock(path: Path, *, create: bool) -> int | None:
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        fd = os.open(path, flags | (os.O_CREAT if create else 0), 0o600)
+    except FileNotFoundError:
+        if create:
+            raise Blocked("MAIN_HOST_LOCK_UNSAFE") from None
+        return None
+    except OSError:
+        raise Blocked("MAIN_HOST_LOCK_UNSAFE") from None
+    try:
+        info, current = os.fstat(fd), path.lstat()
+        need(stat.S_ISREG(info.st_mode)
+             and (info.st_dev, info.st_ino) == (current.st_dev, current.st_ino)
+             and info.st_uid == os.geteuid() and info.st_nlink == 1
+             and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == 0,
+             "MAIN_HOST_LOCK_UNSAFE")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 class Controller:
     """One synchronous owner. All descriptors/locks are process-local, CLOEXEC.
 
@@ -200,6 +293,9 @@ class Controller:
         self.raw: bytes | None = None
         self.started = False
         self.busy = False
+        self.shared_lock_fd: int | None = None
+        self.shared_lock_path: Path | None = None
+        self.shared_owner_pid: int | None = None
 
     def __enter__(self) -> Controller:
         try:
@@ -230,6 +326,64 @@ class Controller:
     def __exit__(self, *_: Any) -> None:
         # An exception does NOT mark ACTIVE clean. Only release() can do that.
         self.stack.close()
+
+    def _shared_lease(self, *, create: bool) -> bool:
+        """Probe existing canonical repo lease or retain it across a Main run.
+
+        Returns True only when a different live owner holds the lease.
+        CLI plan/doctor do not create host state; hold/reconcile may create
+        the same host lock inode already used by the vNext MainSupervisor.
+        """
+        path = _shared_host_lock_path(self.repository, create=create)
+        if path is None:
+            return False
+        fd = _open_host_lock(path, create=create)
+        if fd is None:
+            need(not create, "MAIN_HOST_LOCK_UNSAFE")
+            return False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if create:
+                    raise Blocked("MAIN_ALREADY_LIVE") from None
+                return True
+            if create:
+                self.shared_lock_fd = fd
+                self.shared_lock_path = path
+                self.shared_owner_pid = os.getpid()
+                self.stack.callback(os.close, fd)
+                fd = -1
+            return False
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    def _verify_shared_lease(self) -> None:
+        need(self.shared_lock_fd is not None
+             and self.shared_lock_path is not None
+             and self.shared_owner_pid == os.getpid(), "MAIN_HOST_LOCK_NOT_OWNED")
+        expected = _shared_host_lock_path(self.repository, create=False)
+        need(expected == self.shared_lock_path, "MAIN_HOST_LOCK_CHANGED")
+        # Check the original open descriptor against a separately opened
+        # current pathname and its metadata. Never leak a probe descriptor.
+        probe = _open_host_lock(expected, create=False)
+        need(probe is not None, "MAIN_HOST_LOCK_CHANGED")
+        try:
+            info, opened, live = (
+                os.fstat(self.shared_lock_fd), os.fstat(probe), expected.lstat())
+            need((info.st_dev, info.st_ino) ==
+                 (opened.st_dev, opened.st_ino) ==
+                 (live.st_dev, live.st_ino)
+                 and info.st_uid == os.geteuid() and info.st_nlink == 1
+                 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == 0,
+                 "MAIN_HOST_LOCK_CHANGED")
+        finally:
+            os.close(probe)
+        try:
+            fcntl.flock(self.shared_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Blocked("MAIN_HOST_LOCK_CHANGED") from None
 
     def _namespace(self, create: bool) -> bool:
         need(not self.busy, "MAIN_ALREADY_LIVE")
@@ -322,6 +476,7 @@ class Controller:
 
     def _write(self, record: dict[str, Any]) -> None:
         self._paths()
+        self._verify_shared_lease()
         data = canonical(record)
         need(len(data) <= MAX_RECORD, "OWNER_RECORD_TOO_LARGE")
         stage = self.key + ".stage-" + secrets.token_hex(16)
@@ -360,7 +515,7 @@ class Controller:
     def inspect(self, issue: int | None = None) -> dict[str, Any]:
         # Validate selection before touching host state, even for a busy owner.
         self.result("PLAN", issue)
-        if self.busy:
+        if self.busy or self._shared_lease(create=False):
             return self.result("MAIN_ALREADY_LIVE_RECORD_NOT_READ", issue)
         exists = self._namespace(False)
         state = self.record["state"] if exists and self.record else "ABSENT"
@@ -370,6 +525,8 @@ class Controller:
     def start(self, issue: int | None = None) -> dict[str, Any]:
         need(not self.started, "OWNER_ALREADY_STARTED")
         self.result("PLAN", issue)
+        need(not self.busy, "MAIN_ALREADY_LIVE")
+        self._shared_lease(create=True)
         self._namespace(True)
         need(self.record is None or self.record["state"] != "ACTIVE",
              "RECONCILIATION_REQUIRED")
@@ -382,6 +539,7 @@ class Controller:
 
     def release(self) -> dict[str, Any]:
         need(self.started and self.record is not None, "NO_ACTIVE_OWNER")
+        self._verify_shared_lease()
         record = {**self.record, "state": "CLEAN",
                   "previous_record_sha256": digest(self.raw)}
         self._write(record)
@@ -392,6 +550,8 @@ class Controller:
     def reconcile(self, expected_digest: str) -> dict[str, Any]:
         need(re.fullmatch(r"[0-9a-f]{64}", expected_digest) is not None,
              "EXACT_RECORD_DIGEST_REQUIRED")
+        need(not self.busy, "MAIN_ALREADY_LIVE")
+        self._shared_lease(create=True)
         need(self._namespace(False) and self.record is not None,
              "NO_OWNER_TO_RECONCILE")
         need(self.record["state"] == "ACTIVE", "OWNER_NOT_UNCLEAN")
