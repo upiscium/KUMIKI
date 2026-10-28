@@ -10,9 +10,12 @@ authority is created here.
 
 The Nix `.#kagari-control` package exposes `kagari-vnext-session`,
 `kagari-vnext-task`, and the opt-in host-side `kagari-vnext-worktree-install`.
-The latter must be used during linked-Worktree MVI install/repair to safely
-prepare the original Project root `.gitignore` (Issue #301); it does not
-change the existing GA package or authorize a Task. Main can call the
+The latter is used by the separate `kagari-vnext-host-prepare` opt-in
+host preparation entrypoint during explicit linked-Worktree MVI
+Install/Repair preparation (Issues #301/#304). This only prepares
+the original Project root `.gitignore` and an external host receipt;
+it does not change the existing GA package, qualify the complete
+installer, or authorize a Task. Main can call the
 **host** session launcher as follows; these arguments are Main-side
 location inputs, not routine commands for end users.
 

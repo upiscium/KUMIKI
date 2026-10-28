@@ -381,11 +381,22 @@ def rollback_exchange(root_fd: int, git_fd: int, temp_name: str,
     rename_exchange(git_fd, temp_name, root_fd, PATH)
 
 
-def operate(project: Path, operation: str) -> dict[str, Any]:
+def operate(project: Path, operation: str, *,
+            expected_project_identity: tuple[int, int] | None = None) -> dict[str, Any]:
     demand(operation in ("plan", "doctor", "install", "repair"), "UNSUPPORTED_OPERATION")
+    if expected_project_identity is not None:
+        demand(type(expected_project_identity) is tuple
+               and len(expected_project_identity) == 2
+               and all(type(item) is int and item >= 0
+                       for item in expected_project_identity),
+               "EXPECTED_PROJECT_IDENTITY_INVALID")
     project, git_dir = primary_project(project)
     root_fd = os.open(project, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
+        opened = os.fstat(root_fd)
+        demand(expected_project_identity is None
+               or (opened.st_dev, opened.st_ino) == expected_project_identity,
+               "PROJECT_IDENTITY_CHANGED_BEFORE_PREFLIGHT")
         same_root(project, root_fd)
         admin_fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
