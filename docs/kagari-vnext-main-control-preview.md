@@ -42,7 +42,13 @@ lowercased GitHub `owner/repo` under the real passwd user's
 `~/.local/state/kagari/repository-main-locks/` (not the caller's
 `--state-home`, HOME or XDG settings). It prevents two independent
 clones of the same upstream repository from silently owning concurrent
-Mains. Plan/Doctor only probe an existing lease; explicit Hold/Reconcile
+Mains. Plan/Doctor only probe an existing lease, including on a fresh host
+with no passwd-owned `~/.local` or `~/.local/state` directories: they
+report absence without creating either path. The passwd user-home
+anchor is validated first, so a symlinked or unsafe home directory
+cannot masquerade as a missing .local. Existing unsafe ancestors
+or symlinks block rather than being treated as absence. Explicit
+Hold/Reconcile require an existing safe passwd-owned state home and
 may establish the private lock namespace.
 
 The selected private `--state-home` must still be **stable across

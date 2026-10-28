@@ -34,7 +34,11 @@ class MainControlTests(unittest.TestCase):
         self.home.mkdir(mode=0o700)
         # Patch only in this disposable suite; neither a CLI flag nor an
         # inherited environment variable may choose the production Main lock.
-        self.host_lease_home = self.base / "host-lease"
+        self.synthetic_passwd_home = self.base / "passwd-home"
+        self.synthetic_passwd_home.mkdir(mode=0o700)
+        local = self.synthetic_passwd_home / ".local"
+        local.mkdir(mode=0o700)
+        self.host_lease_home = local / "state"
         self.host_lease_home.mkdir(mode=0o700)
         patcher = patch.object(main, "_host_state_home",
                                return_value=self.host_lease_home)
@@ -78,7 +82,7 @@ class MainControlTests(unittest.TestCase):
                                kwargs.get("profile", main.PROFILE))
 
     def args(self, action, *, issues=(291, 304), home=None, project=None,
-             repository=None, extra=()):
+             repository=None, lease_home=None, extra=()):
         # An isolated subprocess explicitly installs the test-only mock
         # before calling main(). Production has no mutable host-lock switch.
         wrapper = (
@@ -92,7 +96,7 @@ class MainControlTests(unittest.TestCase):
         )
         return [sys.executable, "-I", "-c", wrapper,
                 str(TOOLS / "kagari_vnext_main_control.py"),
-                str(self.host_lease_home),
+                str(lease_home or self.host_lease_home),
                 action, "--profile", main.PROFILE,
                 "--project-root", str(project or self.project),
                 "--state-home", str(home or self.home),
@@ -374,6 +378,66 @@ class MainControlTests(unittest.TestCase):
         self.assertEqual(outside.read_bytes(), b"do not touch")
         path.unlink()
         self.assertEqual(self.project_bytes(), self.before)
+
+    def test_plan_doctor_handle_missing_passwd_state_without_creating_dirs(self):
+        passwd = self.base / "synthetic-passwd-home"
+        passwd.mkdir(mode=0o700)
+        local = passwd / ".local"
+        missing = local / "state"
+        before = self.project_bytes()
+
+        for action in ("plan", "doctor"):
+            code, results = self.cli(action, lease_home=missing)
+            self.assertEqual((code, results[0]["status"]), (0, "ABSENT"))
+            self.assert_no_execution(results[0])
+        self.assertFalse(local.exists())
+        self.assertFalse(missing.exists())
+
+        local.mkdir(mode=0o700)
+        for action in ("plan", "doctor"):
+            code, results = self.cli(action, lease_home=missing)
+            self.assertEqual((code, results[0]["status"]), (0, "ABSENT"))
+            self.assert_no_execution(results[0])
+        self.assertFalse(missing.exists())
+
+        code, result = self.cli("hold", lease_home=missing,
+                                extra=("--hold-seconds", "0.05"))
+        self.assertEqual((code, result[0]["code"]),
+                         (2, "MAIN_LOCK_NAMESPACE_UNSAFE"))
+        self.assertFalse(missing.exists())
+
+        local.rmdir()
+        foreign = self.base / "foreign"
+        foreign.mkdir(mode=0o700)
+        local.symlink_to(foreign, target_is_directory=True)
+        for action in ("plan", "doctor"):
+            code, result = self.cli(action, lease_home=missing)
+            self.assertEqual((code, result[0]["status"]), (2, "BLOCKED"))
+            self.assertEqual(result[0]["code"], "MAIN_LOCK_NAMESPACE_UNSAFE")
+        self.assertEqual(list(foreign.iterdir()), [])
+
+        # A symlink in the passwd-home itself must also block, even
+        # if .local is absent below its resolved target. Without checking
+        # the anchor first, the first missing .local masks this symlink.
+        anchored_home = self.base / "actual-home"
+        anchored_home.mkdir(mode=0o700)
+        alias = self.base / "passwd-home-alias"
+        alias.symlink_to(anchored_home, target_is_directory=True)
+        through_alias = alias / ".local" / "state"
+        for action in ("plan", "doctor"):
+            code, result = self.cli(action, lease_home=through_alias)
+            self.assertEqual((code, result[0]["status"]), (2, "BLOCKED"))
+            self.assertEqual(result[0]["code"], "MAIN_LOCK_NAMESPACE_UNSAFE")
+        self.assertFalse((anchored_home / ".local").exists())
+
+        # Valid lexical home with unsafe ownership/mode is not absence.
+        anchored_home.chmod(0o777)
+        for action in ("plan", "doctor"):
+            code, result = self.cli(
+                action, lease_home=anchored_home / ".local" / "state")
+            self.assertEqual((code, result[0]["status"]), (2, "BLOCKED"))
+            self.assertEqual(result[0]["code"], "MAIN_LOCK_NAMESPACE_UNSAFE")
+        self.assertEqual(self.project_bytes(), before)
 
     def test_shared_lock_path_is_unaffected_by_cli_state_home_or_home_env(self):
         with patch.dict(os.environ, {"HOME": str(self.base / "fake-home"),

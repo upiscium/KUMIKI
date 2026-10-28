@@ -215,7 +215,26 @@ def _shared_host_lock_path(repository: str, *, create: bool) -> Path | None:
     Lock creation occurs only under a user-invoked hold/reconcile.
     """
     home = _host_state_home()
-    _safe_host_directory(home, private=False)
+    # The euid's passwd home is the trust anchor. Validate it BEFORE
+    # returning on a missing .local, including any symlinked ancestor:
+    # otherwise a symlinked passwd home could be mistaken for absence.
+    need(home.name == "state" and home.parent.name == ".local",
+         "MAIN_LOCK_NAMESPACE_UNSAFE")
+    _safe_host_directory(home.parent.parent, private=False)
+    # Fresh hosts may have neither ~/.local nor ~/.local/state yet. A
+    # read-only observation must report "no existing lease" without
+    # creating those directories. Existing ancestors must still be
+    # validated; a symlinked or foreign .local is not an absent lock.
+    for component in (home.parent, home):
+        try:
+            component.lstat()
+        except FileNotFoundError:
+            if not create:
+                return None
+            raise Blocked("MAIN_LOCK_NAMESPACE_UNSAFE") from None
+        except OSError:
+            raise Blocked("MAIN_LOCK_NAMESPACE_UNSAFE") from None
+        _safe_host_directory(component, private=False)
     for path in (home / "kagari", home / "kagari" / "repository-main-locks"):
         if create:
             try:
