@@ -192,7 +192,8 @@ def guard_existing(repo: Path, evidence_dir: Path) -> None:
 
 def verify_plan(spec: dict, plan: dict, *,
                 host_observed_auto: bool = False) -> None:
-    planning.validate_plan(spec, plan)
+    planning.validate_plan(spec, plan,
+                           allow_optional_v2=spec.get("schema_version") == 2)
     need(spec["subagent_count"] == 2 and (
          spec["planning"] == "specified"
          or (spec["planning"] == "auto" and host_observed_auto)),
@@ -272,9 +273,18 @@ Never edit directly, run bash, commit, push, or publish. Report real evidence.
                   "final reply EXACTLY with status: COMPLETED even though host",
                   "tests are still pending. Explicitly report",
                   "tests: NOT_RUN_BY_LEAF (HOST_OWNED); do not claim they PASS.",
-                  "If any WITHIN-LEAF authorized edit, required readback,",
-                  "or other permitted Work Unit action was denied or failed,",
-                  "start exactly with status: BLOCKED and report that cause.",
+                  "If any required edit or final Product readback failed,",
+                  "start exactly with status: BLOCKED and report the cause.",
+                  "Only failed inspections of explicitly HOST-approved",
+                  "optional_exploration_paths can be diagnostic when all",
+                  "assigned edits and final Product readbacks succeeded.",
+                  "HOST-approved optional exploratory paths: " +
+                  json.dumps(spec.get("optional_exploration_paths", []),
+                             ensure_ascii=False) + ".",
+                  "Any failed inspection NOT on that immutable whitelist is",
+                  "BLOCKED, including missing necessary inputs or readbacks.",
+                  "Report a whitelisted failed optional inspection explicitly.",
+                  "Out-of-Project reads and denied tools remain blockers.",
                   "Inability to run HOST-owned tests is NOT a leaf blocker.",
                   "Never conceal real leaf failures or claim unrun checks PASS.",
                   "Assigned work: " + leaf["instruction"]]
@@ -288,6 +298,7 @@ def prompt_primary(project: Path, spec: dict, plan: dict) -> str:
     payload = {
         "goal": spec["goal"], "acceptance": spec["acceptance"],
         "plan_base_revision": plan["base_revision"],
+        "host_optional_exploration_paths": spec.get("optional_exploration_paths", []),
         "instructions": [
             {"native_role": role, "step": ident,
              "authorized_paths": by_id[ident]["allowed_paths"],
@@ -320,7 +331,12 @@ def prompt_primary(project: Path, spec: dict, plan: dict) -> str:
         "runs tests, revalidates scope, commits, and writes v4 Evidence. "
         "Explicitly instruct both leaves to report status: COMPLETED with "
         "tests: NOT_RUN_BY_LEAF (HOST_OWNED) when their assigned edits and reads "
-        "are complete, or status: BLOCKED if any actual leaf operation fails. "
+        "are complete, or status: BLOCKED if a required edit/readback, "
+        "prohibited operation, out-of-Project attempt, or necessary input fails. "
+        "Only an explicitly TaskSpec-whitelisted optional in-Project "
+        "inspection error is diagnostic after final Product readbacks. "
+        "Unclassified read failures are BLOCKED; the model must not "
+        "invent optional paths or excuse a missing necessary input. "
         "Do NOT ask leaves to run tests and do NOT invent test PASS. "
         "Every child must report its actual status and file operations. "
         "Do not stage, commit, run tests, use bash, push, or publish. "
@@ -554,12 +570,14 @@ def readback(record: dict) -> dict:
              == planning_binding["task_spec_contract_sha256"]
              == sha(json.dumps(requested["spec"], sort_keys=True).encode()),
              "model Planning receipt/Contract digests diverged")
-        planning.validate_plan(requested["spec"], plan)
+        planning.validate_plan(requested["spec"], plan,
+                               allow_optional_v2=requested["spec"].get("schema_version") == 2)
         try:
             observed_planner, planner_text = model_planner.read_events(
                 (planning_dir / "stdout.jsonl").read_bytes())
             extracted_plan = planning.validate_plan(
-                requested["spec"], planning.parse_single_json(planner_text))
+                requested["spec"], planning.parse_single_json(planner_text),
+                allow_optional_v2=requested["spec"].get("schema_version") == 2)
         except (model_planner.ModelPlanningBlocked, planning.PlanError) as exc:
             raise NativeBlocked("native Planning stdout is not a validated model Plan") from exc
         need(extracted_plan == plan
@@ -642,8 +660,57 @@ def _leaf_status_lines(text: str) -> list[str]:
         text)
 
 
+def _inspection_path(tool: str, entry: dict, project: Path) -> Path:
+    """Validate a native read-only tool's filesystem scope before accepting it.
+
+    A successful or failed inspection must not launder an out-of-Project
+    access into optional diagnostic evidence. Unspecified search paths use
+    the already verified project-rooted child session.
+    """
+    root = project.resolve(strict=True)
+    if tool == "read":
+        raw = entry.get("filePath")
+        need(type(raw) is str and Path(raw).is_absolute(),
+             "native child read path not absolute")
+        target = Path(raw)
+    else:
+        raw = entry.get("path")
+        need(raw is None or type(raw) is str,
+             "native child search path malformed")
+        need(raw is None or bool(raw.strip()),
+             "native child search path empty")
+        if raw is None:
+            target = root
+        else:
+            candidate = Path(raw)
+            need("~" not in candidate.parts,
+                 "native child search home expansion forbidden")
+            target = candidate if candidate.is_absolute() else root / candidate
+        if tool == "glob":
+            pattern = entry.get("pattern")
+            need(type(pattern) is str and bool(pattern),
+                 "native glob pattern malformed")
+            need(not pattern.startswith("/") and
+                 ".." not in pattern.split("/") and
+                 "~" not in pattern.split("/"),
+                 "native glob pattern escaped Project")
+        elif tool == "grep":
+            include = entry.get("include")
+            if include is not None:
+                need(type(include) is str and bool(include)
+                     and not include.startswith("/")
+                     and ".." not in include.split("/")
+                     and "~" not in include.split("/"),
+                     "native grep include escaped Project")
+    resolved = target.resolve(strict=False)
+    need(resolved.is_relative_to(root),
+         "native child inspection escaped Project")
+    return resolved
+
+
 def _child_tools(export: dict, role: str, parent_session: str,
-                 model: dict, project: Path, paths: set[str]) -> None:
+                 model: dict, project: Path, paths: set[str],
+                 *, optional_inspections: set[str] | None = None) -> None:
     info = export["info"]
     need(info.get("parentID") == parent_session and info.get("agent") == role
          and info.get("directory") == str(project),
@@ -683,12 +750,24 @@ def _child_tools(export: dict, role: str, parent_session: str,
                 need(state.get("status") == "error"
                      and tool in ("read", "glob", "grep", "list"),
                      "incomplete native child write or prohibited tool")
-                if tool == "read":
-                    attempted = entry.get("filePath")
-                    need(type(attempted) is str
-                         and Path(attempted).is_absolute()
-                         and Path(attempted).is_relative_to(project),
-                         "failed child read escaped Project")
+                observed = _inspection_path(tool, entry, project)
+                relative = observed.relative_to(project.resolve(strict=True)).as_posix()
+                need(relative in (optional_inspections or set())
+                     and not any(relative == product
+                                 or relative.startswith(product + "/")
+                                 or product.startswith(relative + "/")
+                                 for product in paths),
+                     "failed native inspection is not host-approved optional")
+                # OpenCode 1.18.35 reports a missing-file read as a native
+                # tool error: "File not found: /exact/requested/path".
+                # Status "error" by itself also covers permission denial,
+                # transport failures and unrelated problems. Never treat
+                # those as optional simply because the path was approved.
+                requested = (entry.get("filePath") if tool == "read"
+                             else entry.get("path"))
+                need(type(requested) is str
+                     and state.get("error") == "File not found: " + requested,
+                     "native inspection error was not verified file-not-found")
                 continue
             if tool == "apply_patch":
                 patch = entry.get("patchText")
@@ -715,12 +794,12 @@ def _child_tools(export: dict, role: str, parent_session: str,
                 actual_edits.add(relative)
                 last_write[relative] = step_index
             elif tool == "read":
-                target = entry.get("filePath")
-                if type(target) is str and Path(target).is_absolute() and Path(target).is_relative_to(project):
-                    relative = Path(target).relative_to(project).as_posix()
-                    actual_reads.add(relative)
-                    last_read[relative] = step_index
+                target = _inspection_path(tool, entry, project)
+                relative = target.relative_to(project.resolve(strict=True)).as_posix()
+                actual_reads.add(relative)
+                last_read[relative] = step_index
             elif tool in ("glob", "grep", "list"):
+                _inspection_path(tool, entry, project)
                 continue
             else:
                 raise NativeBlocked("unapproved native leaf tool: " + str(tool))
@@ -733,7 +812,8 @@ def _child_tools(export: dict, role: str, parent_session: str,
 
 
 def verify_delegation(executable: Path, project: Path, output: Path,
-                      env: dict, plan: dict) -> dict:
+                      env: dict, plan: dict, *,
+                      optional_inspections: set[str] | None = None) -> dict:
     transcript_sha, events = _model_events(output / "model.jsonl")
     calls = []
     for event in events:
@@ -788,7 +868,8 @@ def verify_delegation(executable: Path, project: Path, output: Path,
         exported = _export_session(executable, project, env, call["child_session"], dest)
         need(exported["info"].get("id") == call["child_session"], "native child export session mismatched")
         _child_tools(exported, role, parent, call["model"], project,
-                     set(by_id[ident]["allowed_paths"]))
+                     set(by_id[ident]["allowed_paths"]),
+                     optional_inspections=optional_inspections)
         result_sha[ident] = sha(dest.read_bytes())
     dest = exports_dir / "parent.json"
     pdoc = _export_session(executable, project, env, parent, dest)
@@ -957,12 +1038,16 @@ def execute(project: Path, spec_path: Path, plan_path: Path | None, executable: 
          "explicit canonical metadata repository identity required")
     need(type(task) is str and re.fullmatch(r"[1-9][0-9]*", task),
          "positive numeric Task identity required")
-    spec = task_spec.load_task_spec(spec_path, project)
+    # TaskSpec v2 is test-only native-leaf opt-in, never GA/RC admission.
+    spec = task_spec.load_task_spec(
+        spec_path, project, allow_optional_v2=True)
     plan: dict | None = None
     if spec["planning"] == "specified":
         need(plan_path is not None, "specified Planning requires an explicit Plan")
         try:
-            plan = planning.validate_plan(spec, planning.parse_single_json(plan_path.read_bytes()))
+            plan = planning.validate_plan(
+                spec, planning.parse_single_json(plan_path.read_bytes()),
+                allow_optional_v2=spec.get("schema_version") == 2)
         except (OSError, ValueError) as exc:
             raise NativeBlocked("invalid bounded two-leaf Task plan") from exc
         verify_plan(spec, plan)
@@ -1118,10 +1203,13 @@ def execute(project: Path, spec_path: Path, plan_path: Path | None, executable: 
                      "auto Planning changed Project source, Git state or staged work")
                 recheck_human_grants()
 
+            native_v2_kwargs = ({"allow_optional_v2": True}
+                                if spec.get("schema_version") == 2 else {})
             plan, planning_binding = model_planner.generate(
                 project, spec, executable, output / "planning",
                 timeout=min(timeout, 120),
-                verify_unmodified=verify_planning_read_only)
+                verify_unmodified=verify_planning_read_only,
+                **native_v2_kwargs)
             verify_plan(spec, plan, host_observed_auto=True)
             verify_planning_read_only()
             current["planning"] = planning_binding
@@ -1155,7 +1243,9 @@ def execute(project: Path, spec_path: Path, plan_path: Path | None, executable: 
             "configured_model_override": False, "subagents": 2
         }), flush=True)
         spawn_model(executable, project, output, env, prompt, timeout)
-        model = verify_delegation(executable, project, output, env, plan)
+        model = verify_delegation(
+            executable, project, output, env, plan,
+            optional_inspections=set(spec.get("optional_exploration_paths", [])))
         recheck_human_grants()
         need(git(project, "rev-parse", "HEAD").decode() == head
              and git(project, "symbolic-ref", "-q", "HEAD").decode() == ref
