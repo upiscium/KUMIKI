@@ -161,14 +161,15 @@ def run_planning_child(argv: list[str], working_directory: Path, env: dict,
 
 
 def generate(project: Path, spec: dict, executable: Path, root: Path, *,
-             timeout: int, verify_unmodified: Callable[[], None]) -> tuple[dict, dict]:
+             timeout: int, verify_unmodified: Callable[[], None],
+             allow_optional_v2: bool = False) -> tuple[dict, dict]:
     """Return a host-observed Plan and a digest-bound private planning binding.
 
     Project and Human Ask preflight, exact executable identity and independent
     Project inventory checks belong to the calling native Task host.
     """
     require(spec.get("planning") == "auto", "auto planning requires auto TaskSpec")
-    basic.validate_task_spec(spec)
+    basic.validate_task_spec(spec, allow_optional_v2=allow_optional_v2)
     require(type(timeout) is int and 10 <= timeout <= 180,
             "planner model timeout outside allowed range")
     require(root.is_absolute() and root.resolve(strict=False) == root
@@ -251,7 +252,8 @@ def generate(project: Path, spec: dict, executable: Path, root: Path, *,
             "planner output exceeds bounded evidence budget")
     observed, text = read_events(raw)
     try:
-        candidate = basic.validate_plan(spec, basic.parse_single_json(text))
+        candidate = basic.validate_plan(spec, basic.parse_single_json(text),
+                                        allow_optional_v2=allow_optional_v2)
     except basic.PlanError as exc:
         raise ModelPlanningBlocked("model Plan failed strict TaskSpec validation") from exc
     leaves = [s for s in candidate["steps"] if s["role"] == "subagent"]

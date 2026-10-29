@@ -19,6 +19,7 @@ class TaskSpecError(ValueError):
 
 FIELDS = {"schema_version", "goal", "base_revision", "allowed_paths", "tests",
           "acceptance", "subagent_count", "planning"}
+OPTIONAL_READS = "optional_exploration_paths"
 PROTECTED = {".git", ".opencode", "AGENTS.md", "opencode.json", "opencode.jsonc",
              "flake.nix", "flake.lock", "Justfile", "justfile", "just"}
 SHELLS = {"sh", "bash", "dash", "zsh", "fish", "csh", "tcsh", "cmd", "cmd.exe",
@@ -38,9 +39,19 @@ def _object(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-def _path(value: object, root: Path) -> str:
+def _path(value: object, root: Path, *, strict_v2: bool = False) -> str:
+    # Preserve accepted legacy v1 lexical paths; v2 alone adds a bounded,
+    # explicit optional-read contract and strict byte/DEL constraints.
     _require(isinstance(value, str) and bool(value) and "\\" not in value
-             and not any(ord(char) < 32 for char in value), "invalid allowed path")
+             and not any(ord(char) < 32 for char in value),
+             "invalid allowed path")
+    if strict_v2:
+        try:
+            encoded = value.encode("utf-8", "strict")
+        except UnicodeError:
+            raise TaskSpecError("invalid UTF-8 v2 allowed path") from None
+        _require(0 < len(encoded) <= 240 and chr(127) not in value,
+                 "invalid v2 allowed path")
     parts = value.split("/")
     _require(all(part not in ("", ".", "..") for part in parts)
              and not value.startswith("/") and ":" not in parts[0]
@@ -66,8 +77,9 @@ def _root(project_root: Path) -> Path:
     return root
 
 
-def load_task_spec(path: Path, project_root: Path) -> dict:
-    """Parse JSON v1 with exact fields; return normalized JSON-compatible values.
+def load_task_spec(path: Path, project_root: Path, *,
+                   allow_optional_v2: bool = False) -> dict:
+    """Parse exact TaskSpec v1, or explicit native-only v2, without side effects.
 
     Raises TaskSpecError on invalid input; does not invoke Git or execute tests.
     """
@@ -79,9 +91,12 @@ def load_task_spec(path: Path, project_root: Path) -> dict:
                           parse_constant=lambda _: (_require(False, "nonfinite JSON number")))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise TaskSpecError("invalid UTF-8 JSON TaskSpec") from exc
-    _require(type(spec) is dict and set(spec) == FIELDS, "TaskSpec fields must match v1 exactly")
-    _require(type(spec["schema_version"]) is int and spec["schema_version"] == 1,
-             "schema_version must be 1")
+    _require(type(allow_optional_v2) is bool, "optional v2 enablement must be explicit")
+    _require(type(spec) is dict and type(spec.get("schema_version")) is int
+             and ((spec["schema_version"] == 1 and set(spec) == FIELDS)
+                  or (allow_optional_v2 and spec["schema_version"] == 2
+                      and set(spec) == FIELDS | {OPTIONAL_READS})),
+             "TaskSpec must use exact v1 or approved native-only v2 optional-read schema")
     for key in ("goal", "acceptance"):
         _require(type(spec[key]) is str and bool(spec[key].strip()), key + " must be nonempty text")
     _require(type(spec["base_revision"]) is str
@@ -89,8 +104,18 @@ def load_task_spec(path: Path, project_root: Path) -> dict:
              "base_revision must be a full lowercase Git object ID")
     paths = spec["allowed_paths"]
     _require(type(paths) is list and bool(paths), "allowed_paths must be nonempty")
-    normalized = [_path(value, root) for value in paths]
+    v2 = spec["schema_version"] == 2
+    normalized = [_path(value, root, strict_v2=v2) for value in paths]
     _require(len(set(normalized)) == len(normalized), "duplicate allowed path")
+    declared = spec.get(OPTIONAL_READS, [])
+    _require(type(declared) is list and len(declared) <= 32,
+             "optional exploratory paths must be a bounded list")
+    optional = [_path(path, root, strict_v2=True) for path in declared]
+    _require(len(set(optional)) == len(optional),
+             "duplicate optional exploratory path")
+    _require(not any(a == b or a.startswith(b + "/") or b.startswith(a + "/")
+                     for a in optional for b in normalized),
+             "optional inspection may not overlap required Product scope")
     tests = spec["tests"]
     _require(type(tests) is list, "tests must be an array")
     for test in tests:
@@ -109,6 +134,7 @@ def load_task_spec(path: Path, project_root: Path) -> dict:
     _require(spec["planning"] in ("auto", "specified") and type(spec["planning"]) is str,
              "planning must be auto or specified")
     return {**spec, "allowed_paths": normalized,
+            **({OPTIONAL_READS: optional} if OPTIONAL_READS in spec else {}),
             "tests": [{"argv": list(test["argv"]), "cwd": "."} for test in tests]}
 
 

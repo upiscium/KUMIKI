@@ -70,11 +70,47 @@ M1 Task must run under a fresh immutable package/Clone with its own exact
 Human Ask grants; neither the original R1 nor R2 can be retroactively promoted
 to PASS.
 
+## TaskSpec optional-inspection contract (#315, opt-in source candidate)
+
+The existing **TaskSpec schema_version=1 remains a closed exact-field contract**.
+It cannot include optional-read metadata. Native Plan schema_version=1 and
+the bounded two-leaf protocol remain unchanged.
+
+For new, explicitly host-approved test-only tasks only, **TaskSpec
+schema_version=2** requires the additional
+`optional_exploration_paths` array. The shared TaskSpec loader defaults to
+rejecting v2: only the native generic executor explicitly calls it with
+`allow_optional_v2=True`. Existing GA/RC lifecycle entrypoints use the
+default and continue to admit v1 only. Each entry is a canonical
+Project-relative path independently validated by the host; at most 32
+nonduplicate paths, excluding Git/Project configuration and any path
+overlapping an assigned Product. The TaskSpec's immutable bytes and consent
+are the source of that classification; a model's instruction, tool error
+message or status report never adds paths to the approved list.
+
+A failed `read`, `glob`, `grep` or `list` is diagnostic only if its
+verified canonical target exactly matches a host-declared optional path,
+does not escape the Project, **and** the native tool error is exactly a
+file-not-found result for the requested path. In OpenCode 1.18.35, this is
+`state.status="error"` with `state.error="File not found: /exact/path"`.
+Plain error status, permission denial, missing/malformed error details,
+or other tool failure remains `BLOCKED` even on a whitelisted path.
+Unknown necessary inputs and failed Product final-readbacks remain
+`BLOCKED` as well. A tool version with different error semantics must
+be requalified rather than silently treating unknown errors as optional. Successful Product editing,
+post-edit reads, host tests, commit and Evidence are independently required.
+
+This source change **does not modify an already released package**, old
+consumed one-shot Jobs or past BLOCKED records. Schema v2 needs its own
+reviewed source publication, package tests and release qualification.
+
 ## End-to-end flow
 
 1. Host reads `kagari_v010_general_task_spec.py` and
    `kagari_v010_basic_plan.py` (copied, hash-identical from reviewed C/D
-   development candidates). Require closed TaskSpec/Plan v1, one exact Git HEAD,
+   development candidates). Require exact TaskSpec v1 (or explicit opt-in
+   TaskSpec v2 for host-classified optional inspections), closed Plan v1,
+   one exact Git HEAD,
    two nonoverlapping subagent steps owning all allowed Product paths, a joining
    primary step, and at least one declared test. This integration currently
    permits planning=specified or host-observed planning=auto in the local
@@ -102,8 +138,9 @@ to PASS.
    Export actual parent/child sessions and verify each child's bounded
    `apply_patch` or `edit` tools only touched its own Product files; the
    child must subsequently read its own changes and return unambiguous
-   `COMPLETED` status. A failed read-only inspection does not qualify a
-   failed write; only a strictly constrained read-only error is tolerated.
+   `COMPLETED` status. A failed read-only inspection never excuses a
+   failed write or required input: only exact TaskSpec-v2 whitelisted,
+   in-Project, optional inspection errors are tolerated.
 5. Verify the complete Project physical change set including ignored entries
    and modes; only the allowed Products and necessary new parent directories
    may differ. Preserve preexisting index/staged/dirty data, Git config,

@@ -17,6 +17,7 @@ HEX = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 SPEC_KEYS = {"schema_version", "goal", "base_revision", "allowed_paths",
              "tests", "acceptance", "subagent_count", "planning"}
+OPTIONAL_READS = "optional_exploration_paths"
 PLAN_KEYS = {"schema_version", "base_revision", "steps"}
 STEP_KEYS = {"id", "role", "agent", "depends_on", "allowed_paths", "instruction"}
 
@@ -77,6 +78,7 @@ def _paths(value: Any, label: str, *, empty: bool = False) -> list[str]:
         require(type(path) is str and 0 < len(path.encode("utf-8", "strict")) <= 240
                 and not path.startswith("/") and "\\" not in path
                 and all(part not in ("", ".", "..") for part in path.split("/"))
+                and ":" not in path.split("/")[0]
                 and not any(ord(c) < 32 or ord(c) == 127 for c in path),
                 f"invalid {label} path")
         require(path != ".git" and not path.startswith(".git/"),
@@ -85,15 +87,30 @@ def _paths(value: Any, label: str, *, empty: bool = False) -> list[str]:
     return value
 
 
-def validate_task_spec(value: Any) -> dict[str, Any]:
-    spec = _object(value, SPEC_KEYS, "TaskSpec")
-    require(type(spec["schema_version"]) is int and spec["schema_version"] == 1,
-            "unknown TaskSpec schema")
+def validate_task_spec(value: Any, *, allow_optional_v2: bool = False) -> dict[str, Any]:
+    require(type(allow_optional_v2) is bool, "v2 opt-in must be explicit")
+    require(type(value) is dict and type(value.get("schema_version")) is int
+            and ((value["schema_version"] == 1 and set(value) == SPEC_KEYS)
+                 or (allow_optional_v2 and value["schema_version"] == 2
+                     and set(value) == SPEC_KEYS | {OPTIONAL_READS})),
+            "TaskSpec requires exact v1 keys or opt-in v2 optional reads")
+    spec = value
     _text(spec["goal"], "goal")
     _text(spec["acceptance"], "acceptance")
     require(type(spec["base_revision"]) is str and HEX.fullmatch(spec["base_revision"]) is not None,
             "invalid base_revision")
     _paths(spec["allowed_paths"], "TaskSpec allowed_paths")
+    if OPTIONAL_READS in spec:
+        optional = _paths(spec[OPTIONAL_READS], "optional exploratory paths", empty=True)
+        require(len(optional) <= 32, "too many optional exploratory paths")
+        protected = {".git", ".opencode", "AGENTS.md", "opencode.json",
+                     "opencode.jsonc", "flake.nix", "flake.lock",
+                     "Justfile", "justfile", "just"}
+        require(all(not any(part in protected for part in rel.split("/"))
+                    for rel in optional), "optional inspection targets protected metadata")
+        require(not any(a == b or a.startswith(b + "/") or b.startswith(a + "/")
+                        for a in optional for b in spec["allowed_paths"]),
+                "optional inspection overlaps required Product scope")
     require(type(spec["subagent_count"]) is int and spec["subagent_count"] == 2,
             "this bounded protocol requires exactly two subagents")
     require(type(spec["planning"]) is str and spec["planning"] in ("auto", "specified"),
@@ -115,8 +132,9 @@ def _overlap(left: str, right: str) -> bool:
     return left == right or left.startswith(right + "/") or right.startswith(left + "/")
 
 
-def validate_plan(spec: dict[str, Any], value: Any) -> dict[str, Any]:
-    validate_task_spec(spec)
+def validate_plan(spec: dict[str, Any], value: Any, *,
+                  allow_optional_v2: bool = False) -> dict[str, Any]:
+    validate_task_spec(spec, allow_optional_v2=allow_optional_v2)
     plan = _object(value, PLAN_KEYS, "plan")
     require(type(plan["schema_version"]) is int and plan["schema_version"] == 1,
             "unknown plan schema")
@@ -187,10 +205,13 @@ def _attested_response(plan_text: str | bytes, attestation: Any) -> bool:
 
 
 def plan_receipt(spec_text: str | bytes, plan_text: str | bytes, *,
-                 transcript_attestation: Any = None) -> dict[str, Any]:
+                 transcript_attestation: Any = None,
+                 allow_optional_v2: bool = False) -> dict[str, Any]:
     """Validate before emitting *planning* evidence; never report execution success."""
-    spec = validate_task_spec(parse_single_json(spec_text))
-    plan = validate_plan(spec, parse_single_json(plan_text))
+    spec = validate_task_spec(parse_single_json(spec_text),
+                              allow_optional_v2=allow_optional_v2)
+    plan = validate_plan(spec, parse_single_json(plan_text),
+                         allow_optional_v2=allow_optional_v2)
     require(transcript_attestation is None or spec["planning"] == "auto",
             "transcript attestation requires auto planning")
     model_generated = _attested_response(plan_text, transcript_attestation)

@@ -113,6 +113,54 @@ class AutoPlanningTests(unittest.TestCase):
         self.assertIn("Genuine failed leaf edits/readback remain BLOCKED", prompt)
         self.assertIn('"planning": "auto"', prompt)
 
+    def test_explicit_native_v2_auto_planning_opt_in_is_host_observed(self):
+        self.spec["schema_version"] = 2
+        self.spec["optional_exploration_paths"] = ["tools/optional-missing.py"]
+        with self.assertRaises(protocol.PlanError):
+            auto.generate(self.project, self.spec, self.executable, self.output,
+                          timeout=30, verify_unmodified=lambda: None)
+        self.assertFalse(self.output.exists())
+
+        verified = []
+        def fake(argv, cwd, env, stdout, stderr, timeout):
+            self.assertEqual(cwd, self.output)
+            self.assertFalse(cwd.is_relative_to(self.project))
+            self.assertEqual(timeout, 30)
+            stdout.write(self.events())
+            return 0
+        with patch.object(auto, "run_planning_child", side_effect=fake):
+            plan, binding = auto.generate(
+                self.project, self.spec, self.executable, self.output,
+                timeout=30, verify_unmodified=lambda: verified.append("verified"),
+                allow_optional_v2=True)
+        self.assertEqual(plan, self.plan)
+        self.assertEqual(verified, ["verified"])
+        self.assertEqual(binding["mode"], "auto")
+        self.assertTrue((self.output / "receipt.json").is_file())
+        receipt = protocol.parse_single_json((self.output / "receipt.json").read_bytes())
+        self.assertEqual(receipt["status"], "HOST_OBSERVED_VALIDATED_PLAN_TEST_ONLY")
+        self.assertEqual(receipt["task_spec_contract_sha256"],
+                         auto.digest(json.dumps(self.spec, sort_keys=True).encode()))
+        self.assertEqual(binding["provenance"], "HOST_OBSERVED_JSONL_TEST_ONLY")
+        self.assertFalse(binding["provider_identity_attested"])
+        self.assertTrue(receipt["host_observed_model_output"])
+        self.assertFalse(receipt["model_identity_independently_verified"])
+        self.assertFalse(receipt["tool_events_observed"])
+        self.assertFalse(receipt["task_dispatched"])
+        self.assertEqual(binding["task_spec_contract_sha256"],
+                         receipt["task_spec_contract_sha256"])
+        for key, filename in (
+            ("model_stdout_sha256", "stdout.jsonl"),
+            ("plan_file_sha256", "plan.json"),
+            ("planning_receipt_sha256", "receipt.json"),
+        ):
+            self.assertEqual(binding[key], hashlib.sha256(
+                (self.output / filename).read_bytes()).hexdigest())
+        self.assertEqual(receipt["stdout_sha256"], binding["model_stdout_sha256"])
+        self.assertEqual(receipt["plan_file_sha256"], binding["plan_file_sha256"])
+        self.assertEqual(receipt["plan_contract_sha256"],
+                         binding["plan_contract_sha256"])
+
     def test_host_observed_model_jsonl_plan_and_receipt(self):
         plan, binding = self.invoke(self.events())
         self.assertEqual(plan, self.plan)

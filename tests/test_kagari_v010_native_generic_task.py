@@ -236,6 +236,109 @@ class NativeGenericTests(unittest.TestCase):
         spawned.assert_not_called()
         self.assertEqual((self.project / ".git/index").read_bytes(), self.index)
 
+    def test_v2_plan_validation_needs_explicit_native_opt_in(self):
+        candidate = dict(self.spec)
+        candidate["schema_version"] = 2
+        candidate["optional_exploration_paths"] = ["docs/optional-not-found.md"]
+        with self.assertRaises(t.planning.PlanError):
+            t.planning.validate_task_spec(candidate)
+        self.assertEqual(
+            t.planning.validate_task_spec(candidate, allow_optional_v2=True),
+            candidate)
+        with self.assertRaises(t.planning.PlanError):
+            t.planning.validate_plan(candidate, self.plan)
+        self.assertEqual(
+            t.planning.validate_plan(candidate, self.plan,
+                                     allow_optional_v2=True), self.plan)
+        with self.assertRaises(t.planning.PlanError):
+            t.planning.plan_receipt(json.dumps(candidate), json.dumps(self.plan))
+        receipt = t.planning.plan_receipt(
+            json.dumps(candidate), json.dumps(self.plan),
+            allow_optional_v2=True)
+        self.assertEqual(receipt["status"], "PLAN_VALIDATED_NOT_DISPATCHED")
+        t.verify_plan(candidate, self.plan)
+
+    def test_v1_loader_preserves_legacy_allowed_path_contract(self):
+        # A v1 spec previously accepted these lexical paths; the newly
+        # versioned v2 optional-read contract must not silently narrow v1.
+        long_path = "docs/" + "/".join("x" * 39 for _ in range(7)) + "/f.md"
+        self.assertGreater(len(long_path.encode()), 240)
+        for path in (long_path, "docs/del-" + chr(127) + "-name.md"):
+            with self.subTest(path=repr(path)):
+                spec = dict(self.spec)
+                spec["allowed_paths"] = [path, "docs/b.md"]
+                self.spec_file.write_text(json.dumps(spec))
+                loaded = specs.load_task_spec(self.spec_file, self.project)
+                self.assertEqual(loaded["allowed_paths"], spec["allowed_paths"])
+                spec["schema_version"] = 2
+                spec["optional_exploration_paths"] = ["docs/optional-not-found.md"]
+                self.spec_file.write_text(json.dumps(spec))
+                with self.assertRaises(specs.TaskSpecError):
+                    specs.load_task_spec(self.spec_file, self.project,
+                                         allow_optional_v2=True)
+
+    def test_host_task_spec_classifies_only_explicit_optional_inspections(self):
+        legacy = specs.load_task_spec(self.spec_file, self.project)
+        self.assertEqual(legacy["schema_version"], 1)
+        self.assertNotIn("optional_exploration_paths", legacy)
+        self.spec["optional_exploration_paths"] = ["docs/optional-not-found.md"]
+        self.spec_file.write_text(json.dumps(self.spec))
+        with self.assertRaises(specs.TaskSpecError):
+            specs.load_task_spec(self.spec_file, self.project)
+        with self.assertRaises(t.planning.PlanError):
+            t.planning.validate_task_spec(self.spec)
+        # v2 is an explicit opt-in; v1's closed schema is immutable.
+        self.spec["schema_version"] = 2
+        self.spec_file.write_text(json.dumps(self.spec))
+        # Legacy GA/RC callers do not pass the native-only opt-in.
+        with self.assertRaises(specs.TaskSpecError):
+            specs.load_task_spec(self.spec_file, self.project)
+        declared = specs.load_task_spec(
+            self.spec_file, self.project, allow_optional_v2=True)
+        t.verify_plan(declared, self.plan)
+        self.assertEqual(declared["optional_exploration_paths"],
+                         ["docs/optional-not-found.md"])
+        self.output.mkdir(mode=0o700)
+        t.write_roles(self.project, declared, self.plan, self.output / "roles")
+        role = (self.output / "roles/agents/kagari-v010-leaf-a.md").read_text()
+        primary = t.prompt_primary(self.project, declared, self.plan)
+        self.assertIn("HOST-approved optional exploratory paths", role)
+        self.assertIn("docs/optional-not-found.md", role)
+        self.assertIn("host_optional_exploration_paths", primary)
+
+        # v2 must include its explicit classification field, even if empty.
+        v2_without_optional = {k:v for k,v in self.spec.items()
+                               if k != "optional_exploration_paths"}
+        with self.assertRaises(t.planning.PlanError):
+            t.planning.validate_task_spec(v2_without_optional)
+        self.spec_file.write_text(json.dumps(v2_without_optional))
+        with self.assertRaises(specs.TaskSpecError):
+            specs.load_task_spec(self.spec_file, self.project,
+                                 allow_optional_v2=True)
+        for invalid in (
+            ["docs/a.md"],               # assigned Product is never optional
+            ["docs"],                    # parent covers required Product
+            ["../foreign"],              # outside Project
+            ["AGENTS.md"],               # protected instructions
+            ["justfile"],                # cross-validator protected parity
+            ["configs/just"],            # protected segment within nested path
+            ["C:notes.txt"],             # drive/colon in first path segment
+            ["docs/inspect.md"] * 2,     # duplicate path
+            ["docs/" + "界" * 81 + ".md"],  # over 240 UTF-8 bytes
+            ["docs/invalid\x7f.md"],     # DEL control character
+            [f"docs/extra-{i}.md" for i in range(33)],  # bounded list
+            ["docs/../../secret"],      # traversal
+        ):
+            with self.subTest(invalid=invalid):
+                mutated = {**self.spec, "optional_exploration_paths": invalid}
+                self.spec_file.write_text(json.dumps(mutated))
+                with self.assertRaises(specs.TaskSpecError):
+                    specs.load_task_spec(
+                        self.spec_file, self.project, allow_optional_v2=True)
+                with self.assertRaises(t.planning.PlanError):
+                    t.planning.validate_task_spec(mutated)
+        self.assertEqual((self.project / ".git/index").read_bytes(), self.index)
+
     def test_generic_spec_plan_and_external_roles(self):
         t.guard_existing(self.project, self.output)
         spec = specs.load_task_spec(self.spec_file, self.project)
@@ -265,12 +368,15 @@ class NativeGenericTests(unittest.TestCase):
         primary = t.prompt_primary(self.project, self.spec, self.plan)
         self.assertIn("only the KAGARI HOST runs tests", primary)
         self.assertIn("tests: NOT_RUN_BY_LEAF (HOST_OWNED)", primary)
-        self.assertIn("status: BLOCKED if any actual leaf operation fails", primary)
+        self.assertIn("status: BLOCKED if a required edit/readback", primary)
         for name in ("kagari-v010-leaf-a", "kagari-v010-leaf-b"):
             role = (self.output / "roles/agents" / (name + ".md")).read_text()
             self.assertIn("KAGARI HOST, not this leaf, runs ALL declared TaskSpec tests", role)
             self.assertIn("tests: NOT_RUN_BY_LEAF (HOST_OWNED)", role)
             self.assertIn("Inability to run HOST-owned tests is NOT a leaf blocker", role)
+            self.assertIn("Only failed inspections of explicitly HOST-approved", role)
+            self.assertIn("Report a whitelisted failed optional inspection", role)
+            self.assertIn("Out-of-Project reads and denied tools remain blockers", role)
             self.assertIn("status: COMPLETED", role)
             self.assertIn("status: BLOCKED", role)
             for deny in ("  bash: deny", "  task: deny", "  question: deny",
@@ -304,6 +410,132 @@ class NativeGenericTests(unittest.TestCase):
             t._child_tools(child("status: BLOCKED\n"
                                  "reason: actual edit tool refused\n"),
                            role, parent, model, self.project, {"docs/a.md"})
+
+    def test_optional_read_failure_does_not_override_completed_product(self):
+        role = "kagari-v010-leaf-a"
+        parent = "ses_parent_315"
+        model = {"providerID": "openai", "modelID": "fixture"}
+        target = str(self.project / "docs/a.md")
+        optional = str(self.project / "docs/optional-not-found.md")
+        write = {"type": "tool", "tool": "apply_patch",
+                 "state": {"status": "completed", "input": {
+                     "patchText": "*** Begin Patch\n*** Add File: " + target
+                                  + "\n+worker=A\n*** End Patch"}}}
+        required_read = {"type": "tool", "tool": "read",
+                         "state": {"status": "completed", "input": {"filePath": target}}}
+        missing = {"type": "tool", "tool": "read",
+                   "state": {"status": "error", "input": {"filePath": optional},
+                             "error": "File not found: " + optional}}
+        def transcript(parts):
+            return {"info": {"parentID": parent, "agent": role,
+                             "directory": str(self.project),
+                             "model": {"id": "fixture", "providerID": "openai"}},
+                    "messages": [{"info": {"role": "assistant"}, "parts": parts}]}
+        completed = {"type": "text",
+                     "text": "status: COMPLETED\noptional read missing: docs/optional-not-found.md\n"}
+        # Without explicit host TaskSpec classification the same failed
+        # in-Project read must fail closed, regardless of the leaf's claim.
+        with self.assertRaises(t.NativeBlocked):
+            t._child_tools(transcript([write, missing, required_read, completed]),
+                           role, parent, model, self.project, {"docs/a.md"})
+        # An explicitly host-approved optional path can be diagnostic.
+        approved_optional = {"docs/optional-not-found.md"}
+        t._child_tools(transcript([write, missing, required_read, completed]),
+                       role, parent, model, self.project, {"docs/a.md"},
+                       optional_inspections=approved_optional)
+        # An approved path cannot excuse a native permission denial,
+        # ambiguous tool error or missing error details.
+        for detail in ("Permission denied: " + optional,
+                       "The user rejected permission to use this specific tool call.",
+                       "Unexpected read failure", None):
+            with self.subTest(error=detail):
+                bad = {"type": "tool", "tool": "read",
+                       "state": {"status": "error",
+                                 "input": {"filePath": optional}}}
+                if detail is not None:
+                    bad["state"]["error"] = detail
+                with self.assertRaises(t.NativeBlocked):
+                    t._child_tools(
+                        transcript([write, bad, required_read, completed]),
+                        role, parent, model, self.project, {"docs/a.md"},
+                        optional_inspections=approved_optional)
+        # It must never substitute for a missing required final Product read.
+        with self.assertRaises(t.NativeBlocked):
+            t._child_tools(transcript([write, missing, completed]),
+                           role, parent, model, self.project, {"docs/a.md"},
+                           optional_inspections=approved_optional)
+        # An attempted read outside the bound Project is not an optional miss.
+        forbidden = {"type": "tool", "tool": "read",
+                     "state": {"status": "error", "input": {
+                         "filePath": str(self.project.parent / "foreign.txt")}}}
+        with self.assertRaises(t.NativeBlocked):
+            t._child_tools(transcript([write, forbidden, required_read, completed]),
+                           role, parent, model, self.project, {"docs/a.md"},
+                           optional_inspections={"docs/optional-not-found.md"})
+        # Even an untrusted direct caller cannot classify a required Product
+        # read failure as optional by claiming that Product path itself.
+        required_failed = {"type": "tool", "tool": "read",
+                           "state": {"status": "error",
+                                     "input": {"filePath": target}}}
+        with self.assertRaises(t.NativeBlocked):
+            t._child_tools(transcript([write, required_failed,
+                                       required_read, completed]),
+                           role, parent, model, self.project, {"docs/a.md"},
+                           optional_inspections={"docs/a.md"})
+
+    def test_optional_search_tools_reject_out_of_project_scope(self):
+        project = self.project
+        safe = str(project / "docs")
+        outside = str(project.parent / "foreign")
+        escape = project / "docs" / "untrusted-symlink"
+        escape.symlink_to(project.parent, target_is_directory=True)
+        # No filesystem traversal or absolute pattern may be hidden in an
+        # optional failed search, regardless of the native status.
+        for tool, entry in (
+            ("glob", {"path": outside, "pattern": "**/*.py"}),
+            ("glob", {"path": safe, "pattern": "../*.py"}),
+            ("glob", {"pattern": "/tmp/*"}),
+            ("grep", {"path": outside, "pattern": "search"}),
+            ("grep", {"path": safe, "pattern": "search", "include": "../*.py"}),
+            ("list", {"path": outside}),
+            ("read", {"filePath": outside}),
+            ("read", {"filePath": str(escape / "secret")}),
+            ("glob", {"path": str(escape), "pattern": "*.py"}),
+        ):
+            with self.subTest(tool=tool, entry=entry):
+                with self.assertRaises(t.NativeBlocked):
+                    t._inspection_path(tool, entry, project)
+        # Legitimate in-Project optional exploration remains allowed.
+        self.assertEqual(t._inspection_path("glob",
+                         {"path": safe, "pattern": "**/*.py"}, project),
+                         Path(safe))
+        self.assertEqual(t._inspection_path("grep",
+                         {"pattern": "search", "include": "*.py"}, project),
+                         project)
+
+    def test_successful_external_read_cannot_be_laundered_by_final_readback(self):
+        role = "kagari-v010-leaf-a"
+        parent = "ses_parent_315"
+        model = {"providerID": "openai", "modelID": "fixture"}
+        target = str(self.project / "docs/a.md")
+        write = {"type": "tool", "tool": "apply_patch",
+                 "state": {"status": "completed", "input": {
+                     "patchText": "*** Begin Patch\n*** Add File: " + target
+                                  + "\n+worker=A\n*** End Patch"}}}
+        read = {"type": "tool", "tool": "read",
+                "state": {"status": "completed", "input": {"filePath": target}}}
+        external = {"type": "tool", "tool": "read",
+                    "state": {"status": "completed", "input": {
+                        "filePath": str(self.project.parent / "external.txt")}}}
+        export = {"info": {"parentID": parent, "agent": role,
+                           "directory": str(self.project),
+                           "model": {"id": "fixture", "providerID": "openai"}},
+                  "messages": [{"info": {"role": "assistant"},
+                                "parts": [write, external, read,
+                                          {"type": "text", "text": "status: COMPLETED\n"}]}]}
+        with self.assertRaises(t.NativeBlocked):
+            t._child_tools(export, role, parent, model, self.project,
+                           {"docs/a.md"})
 
     def test_terminal_status_parsing_rejects_conflicting_reports(self):
         self.assertEqual(t._leaf_status_lines(
