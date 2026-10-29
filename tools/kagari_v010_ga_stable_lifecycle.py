@@ -587,6 +587,205 @@ def approved(jobdir:Path,request:dict)->dict:
     return decision
 
 
+def historic_task_details(jobdir: Path, project: Path, ident: dict) -> dict:
+    """Read-only historical Job projection; never recover execution authority.
+
+    The attached package and current Project HEAD may have changed since
+    this one-shot Job. Verify the *archived* GA receipt and its bound consent
+    without importing or executing code from that old Nix package.
+    """
+    record = load(jobdir / "job.json", exact_mode=0o600)
+    request = load(jobdir / "task-request.json", exact_mode=0o600)
+    need(record.get("kind") == "KAGARI_GA_WORKUNIT_JOB"
+         and record.get("schema_version") == 1
+         and record.get("job_id") == jobdir.name
+         and request.get("schema_version") == 1
+         and request.get("kind") == ASK_KIND
+         and request.get("job_id") == jobdir.name,
+         "historic Job/request identity invalid")
+    need(request.get("request_id") ==
+         sha(canonical({k: v for k, v in request.items()
+                        if k != "request_id"}))[:24],
+         "historic Task request digest invalid")
+    need(type(record.get("Project_head")) is str
+         and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}",
+                          record["Project_head"]) is not None,
+         "historic Job base revision invalid")
+    for key, value in (
+        ("Project_root", str(project)),
+        ("Project_device", ident["device"]),
+        ("Project_inode", ident["inode"]),
+    ):
+        need(record.get(key) == value and request.get(key) == value,
+             "historic Project physical identity mismatch: " + key)
+    for record_key, request_key in (
+        ("Project_head", "Project_head"),
+        ("ga_install_nonce", "GA_install_nonce"),
+        ("ga_receipt_sha256", "GA_receipt_sha256"),
+        ("task_spec_sha256", "TaskSpec_sha256"),
+        ("allowed_paths", "TaskSpec_allowed_paths"),
+        ("tests", "TaskSpec_tests"),
+        ("model_executable", "model_executable"),
+        ("model_executable_sha256", "model_executable_sha256"),
+        ("repository", "repository"),
+        ("task", "task"),
+        ("workunit_clone", "workunit_clone"),
+    ):
+        need(record.get(record_key) == request.get(request_key),
+             "historic immutable Task binding mismatch: " + record_key)
+
+    package_name = request.get("GA_package_root")
+    need(type(package_name) is str and bool(package_name),
+         "historic GA Nix package identity missing")
+    historic_package = Path(package_name)
+    need(historic_package.is_absolute()
+         and historic_package.parent == Path("/nix/store")
+         and STORE_NAME.fullmatch(historic_package.name) is not None
+         and historic_package.is_dir() and not historic_package.is_symlink()
+         and stat.S_IMODE(historic_package.stat().st_mode) == 0o555,
+         "historic exact immutable GA package unavailable")
+    historic_receipt_path = historic_package / RECEIPT
+    receipt_raw = bytes_regular(historic_receipt_path,
+                                exact_mode=0o444, max_bytes=128 * 1024)
+    need(sha(receipt_raw) == record.get("ga_receipt_sha256")
+         and sha(receipt_raw) == request.get("GA_receipt_sha256"),
+         "historic immutable GA receipt SHA-256 mismatch")
+    old = load(historic_receipt_path, exact_mode=0o444)
+    need(old.get("root") == package_name and old.get("version") == VERSION
+         and old.get("qualification") == "GA_BOUNDED_PROFILE_QUALIFIED"
+         and old.get("production_activation") is False
+         and old.get("native_receipt_sha256") == record.get("native_receipt_sha256"),
+         "historic GA release profile/Native receipt differs")
+    spec = bytes_regular(jobdir / "task-spec.json", exact_mode=0o600)
+    need(sha(spec) == record.get("task_spec_sha256"),
+         "historic TaskSpec snapshot altered")
+    parsed = json.loads(spec)
+    need(type(parsed) is dict
+         and parsed.get("allowed_paths") == record["allowed_paths"]
+         and parsed.get("tests") == record["tests"],
+         "historic TaskSpec scope invalid")
+
+    # Only observation: never consult a newer installation, generate an Ask,
+    # create a runtime, or re-authorize an already consumed Job.
+    dispatch_path = jobdir / "run-dispatch.json"
+    result_path = jobdir / "result.json"
+    dispatched = dispatch_path.exists() or dispatch_path.is_symlink()
+    result_present = result_path.exists() or result_path.is_symlink()
+    if not dispatched:
+        need(not result_present, "historic terminal outcome without dispatch")
+        return {
+            "status": "GA_JOB_NOT_DISPATCHED_HISTORIC",
+            "job_id": jobdir.name, "historical_read_only": True,
+            "run_dispatched": False, "Product_commit": None,
+            "source_head": record["Project_head"],
+            "current_project_head": ident["head"],
+            "task_execution_authorized": False,
+        }
+    approved(jobdir, request)
+    dispatch = load(dispatch_path, exact_mode=0o600)
+    need(dispatch.get("schema_version") == 1
+         and dispatch.get("kind") == "KAGARI_GA_ONE_SHOT_DISPATCH"
+         and dispatch.get("Task_approval_sha256") ==
+             sha(bytes_regular(jobdir / "task-approval.json", exact_mode=0o600))
+         and dispatch.get("Task_request_id") == request["request_id"]
+         and dispatch.get("TaskSpec_sha256") == record["task_spec_sha256"]
+         and dispatch.get("Project_head") == record["Project_head"]
+         and dispatch.get("native_receipt_sha256") ==
+             record["native_receipt_sha256"],
+         "historic dispatch consent/identity invalid")
+    status, product_commit = "GA_JOB_RESULT_UNAVAILABLE", None
+    result_status, reason, result_sha = None, None, None
+    native_readback = None
+    if result_present:
+        outcome = load(result_path, exact_mode=0o600)
+        need(outcome.get("schema_version") == 1
+             and outcome.get("kind") == "KAGARI_GA_MANAGED_WORKUNIT_TASK_RESULT"
+             and outcome.get("job_id") == jobdir.name
+             and outcome.get("original_Project_root") == record["Project_root"]
+             and outcome.get("native_runtime_receipt_sha256") ==
+                 record["native_receipt_sha256"]
+             and outcome.get("status") in ("GA_MANAGED_WORKUNIT_TASK_PASS", "BLOCKED"),
+             "historic terminal result identity invalid")
+        result_status = outcome["status"]
+        result_sha = sha(bytes_regular(result_path, exact_mode=0o600))
+        if result_status == "GA_MANAGED_WORKUNIT_TASK_PASS":
+            import kagari_v010_ga_product_archive as archive
+            try:
+                verified = archive.verify(jobdir, result_override=outcome)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise RCBlocked("historic Product archive verification failed") from exc
+            need(verified.get("status") == "DURABLE_PRODUCT_ARTIFACT_VERIFIED"
+                 and verified.get("product_commit") == outcome.get("Product_commit"),
+                 "historic Product archive or commit mismatch")
+            # The durable Product archive binds the native report bytes.
+            # A result.json alone must not promote a forged/unverified
+            # native_v4_Evidence_readback field into a completed Job view.
+            # Native's externally retained report uses its own JSON
+            # serialization (not GA's canonical authority-record format).
+            # Its exact raw bytes are already hash-bound by archive.verify.
+            # Reject ambiguous duplicate/nonfinite JSON before displaying
+            # any claimed Native Evidence, without rewriting the report.
+            native_raw = bytes_regular(jobdir / "evidence/report.json",
+                                       exact_mode=0o600)
+            def no_duplicate_evidence_keys(pairs):
+                parsed = {}
+                for key, value in pairs:
+                    need(key not in parsed,
+                         "duplicate historic Native Evidence field: " + key)
+                    parsed[key] = value
+                return parsed
+            native_report = json.loads(
+                native_raw, object_pairs_hook=no_duplicate_evidence_keys,
+                parse_constant=lambda _: need(
+                    False, "nonfinite historic Native Evidence value"))
+            need(type(native_report) is dict,
+                 "historic Native Evidence must be a JSON object")
+            observed_readback = outcome.get("native_v4_Evidence_readback")
+            stored_readback = native_report.get("fresh_process_readback")
+            native_ids = native_report.get("native")
+            need(type(observed_readback) is dict
+                 and type(stored_readback) is dict
+                 and type(native_ids) is dict
+                 and observed_readback == stored_readback
+                 and observed_readback.get("status") ==
+                     "FRESH_PROCESS_NATIVE_READBACK_PASS"
+                 and observed_readback.get("product_commit") ==
+                     verified["product_commit"]
+                 and native_report.get("status") ==
+                     "REAL_NATIVE_GENERIC_TASK_TEST_ONLY_PASS"
+                 and native_report.get("product_commit") ==
+                     verified["product_commit"],
+                 "historic Native Evidence readback mismatch")
+            for field, target in (
+                ("contract_id", native_report.get("contract_id")),
+                ("record_id", native_report.get("record_id")),
+                ("evidence_id", native_ids.get("evidence_id")),
+                ("snapshot_id", native_ids.get("snapshot_id")),
+            ):
+                need(type(target) is str
+                     and re.fullmatch(r"[0-9a-f]{64}", target) is not None
+                     and observed_readback.get(field) == target,
+                     "historic Native Evidence identity mismatch: " + field)
+            native_readback = observed_readback
+            status = "GA_JOB_COMPLETED"
+            product_commit = verified["product_commit"]
+        else:
+            status = "GA_JOB_BLOCKED"
+            reason = outcome.get("reason")
+    return {
+        "status": status, "job_id": jobdir.name,
+        "historical_read_only": True, "task_execution_authorized": False,
+        "GA_package_root": package_name,
+        "GA_receipt_sha256": sha(receipt_raw),
+        "source_head": record["Project_head"],
+        "current_project_head": ident["head"],
+        "run_dispatched": True, "Task_approved": True,
+        "Product_commit": product_commit, "result_status": result_status,
+        "result_sha256": result_sha, "result_reason": reason,
+        "native_v4_Evidence_readback": native_readback,
+    }
+
+
 def task_details(jobdir:Path,record:dict,request:dict,
                  native:Path,admin:object,receipt:dict)->dict:
     clone=Path(record["workunit_clone"])
@@ -856,6 +1055,14 @@ def operate(args,rc:Path,receipt:dict,native:Path,location:object,
     need(args.project_root is not None,"explicit --project-root required")
     project=Path(args.project_root)
     ident,namespace,attachment=project_info(location,project,args.state_home)
+    if args.operation=="history-show-task":
+        need(args.job_id is not None, "explicit historic --job-id required")
+        # Unlike an active attachment, retained history can outlive the
+        # install. Its namespace and history parent must still be owned,
+        # private and canonical before any historic authority file is read.
+        private(namespace)
+        private(namespace/"history")
+        return historic_task_details(job_folder(namespace,args.job_id),project,ident)
     expected=owner(project,rc,receipt,ident)
     # Owner generation nonce differs by design; not among immutable expected
     # binding fields until load and validation.
@@ -960,7 +1167,7 @@ def main(argv:list[str]|None=None) -> int:
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation",choices=(
         "version","inspect","doctor","install","repair","uninstall",
-        "prepare-task","show-task","approve-task","run-task",
+        "prepare-task","show-task","history-show-task","approve-task","run-task",
         "show-agents","show-permission","approve-agents","approve-permission",
         "deny-agents","deny-permission","apply-agents"))
     parser.add_argument("--project-root",type=Path)
