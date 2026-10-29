@@ -180,6 +180,243 @@ class ReleaseCandidateLifecycleTests(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["status"],"BLOCKED")
         self.unchanged()
 
+    def test_historic_show_after_original_head_advances_is_read_only(self):
+        self.assertEqual(self.run_cli("install")[0], 0)
+        code, prepared = self.run_cli("prepare-task", *self.task_options())
+        self.assertEqual(code, 0, prepared)
+        job_id = prepared["job_id"]
+        job = self.state / "kagari-v010-ga-stable" / "history" / job_id
+        before = {(job / name).read_bytes() for name in ("job.json", "task-request.json")}
+        code, before_view = self.run_cli("history-show-task", "--job-id", job_id)
+        self.assertEqual(code, 0, before_view)
+        self.assertEqual(before_view["status"], "GA_JOB_NOT_DISPATCHED_HISTORIC")
+        self.assertIs(before_view["task_execution_authorized"], False)
+        self.assertFalse(before_view["run_dispatched"])
+        self.assertEqual(before_view["source_head"], self.head)
+
+        # Advance only the disposable original Project; old Task authority
+        # must not be revived just because the history can now be read.
+        self.git("-c", "user.name=Fixture", "-c",
+                 "user.email=fixture@example.invalid",
+                 "commit", "-qm", "advance disposable original")
+        current = self.git("rev-parse", "HEAD").decode().strip()
+        self.assertNotEqual(current, self.head)
+        code, old = self.run_cli("show-task", "--job-id", job_id)
+        self.assertEqual(code, 2, old)
+        self.assertIn("Project_head", old["reason"])
+        code, historic = self.run_cli("history-show-task", "--job-id", job_id)
+        self.assertEqual(code, 0, historic)
+        self.assertEqual(historic["current_project_head"], current)
+        self.assertEqual(historic["source_head"], self.head)
+        self.assertFalse(historic["task_execution_authorized"])
+        self.assertEqual(before,
+                         {(job / name).read_bytes() for name in ("job.json", "task-request.json")})
+
+    def test_historic_show_does_not_require_active_installation(self):
+        self.assertEqual(self.run_cli("install")[0], 0)
+        code, prepared = self.run_cli("prepare-task", *self.task_options())
+        self.assertEqual(code, 0, prepared)
+        job_id = prepared["job_id"]
+        self.assertEqual(self.run_cli("uninstall")[1]["status"], "ABSENT")
+        code, historical = self.run_cli("history-show-task", "--job-id", job_id)
+        self.assertEqual(code, 0, historical)
+        self.assertEqual(historical["status"], "GA_JOB_NOT_DISPATCHED_HISTORIC")
+        self.assertFalse(historical["task_execution_authorized"])
+        self.unchanged()
+
+    def test_historic_show_rejects_missing_approval_and_tampered_authority(self):
+        self.assertEqual(self.run_cli("install")[0], 0)
+        code, prepared = self.run_cli("prepare-task", *self.task_options())
+        self.assertEqual(code, 0, prepared)
+        job_id = prepared["job_id"]
+        folder = self.state / "kagari-v010-ga-stable" / "history" / job_id
+        record = json.loads((folder / "job.json").read_bytes())
+        request = json.loads((folder / "task-request.json").read_bytes())
+        # Synthetic dispatch marker cannot confer original missing grant.
+        (folder / "run-dispatch.json").write_text(json.dumps({
+            "schema_version": 1, "kind": "KAGARI_GA_ONE_SHOT_DISPATCH",
+            "Task_request_id": request["request_id"],
+            "TaskSpec_sha256": record["task_spec_sha256"],
+            "Project_head": record["Project_head"],
+            "native_receipt_sha256": record["native_receipt_sha256"]}))
+        code, refused = self.run_cli("history-show-task", "--job-id", job_id)
+        self.assertEqual(code, 2, refused)
+        self.assertIn("required exact file missing", refused["reason"])
+        (folder / "run-dispatch.json").unlink()
+        record["ga_receipt_sha256"] = "0" * 64
+        (folder / "job.json").write_text(json.dumps(
+            record, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False) + "\n")
+        code, refused = self.run_cli("history-show-task", "--job-id", job_id)
+        self.assertEqual(code, 2, refused)
+        self.assertIn("historic immutable Task binding mismatch", refused["reason"])
+        self.assertFalse((folder / "result.json").exists())
+
+    def _historic_dispatched_fixture(self):
+        code, installed = self.run_cli("install")
+        self.assertEqual(code, 0, installed)
+        code, prepared = self.run_cli("prepare-task", *self.task_options())
+        self.assertEqual(code, 0, prepared)
+        job_id = prepared["job_id"]
+        job = self.state / "kagari-v010-ga-stable" / "history" / job_id
+        request = json.loads((job / "task-request.json").read_bytes())
+        record = json.loads((job / "job.json").read_bytes())
+
+        def frozen(name, document):
+            payload = (json.dumps(document, sort_keys=True, ensure_ascii=False,
+                                  separators=(",", ":")) + "\n").encode()
+            dest = job / name
+            self.assertFalse(dest.exists())
+            dest.write_bytes(payload)
+            dest.chmod(0o600)
+            return payload
+
+        approval = {
+            "schema_version": 1, "kind": request["kind"],
+            "request_id": request["request_id"],
+            "request_sha256": hashlib.sha256(
+                (json.dumps(request, sort_keys=True, ensure_ascii=False,
+                            separators=(",", ":")) + "\n").encode()
+            ).hexdigest(),
+            "decision": "APPROVED",
+            "origin": "LOCAL_FOREGROUND_TTY_NOT_REMOTE_VERIFIED",
+        }
+        frozen_approval = frozen("task-approval.json", approval)
+        frozen("run-dispatch.json", {
+            "schema_version": 1,
+            "kind": "KAGARI_GA_ONE_SHOT_DISPATCH",
+            "Task_request_id": request["request_id"],
+            "Task_approval_sha256": hashlib.sha256(frozen_approval).hexdigest(),
+            "TaskSpec_sha256": record["task_spec_sha256"],
+            "Project_head": record["Project_head"],
+            "native_receipt_sha256": record["native_receipt_sha256"],
+        })
+        return job_id, job, record, frozen
+
+    def test_historic_dispatched_without_result_stays_unavailable(self):
+        job_id, job, record, frozen = self._historic_dispatched_fixture()
+        code, view = self.run_cli("history-show-task", "--job-id", job_id)
+        self.assertEqual(code, 0, view)
+        self.assertEqual(view["status"], "GA_JOB_RESULT_UNAVAILABLE")
+        self.assertTrue(view["run_dispatched"])
+        self.assertTrue(view["Task_approved"])
+        self.assertFalse(view["task_execution_authorized"])
+        self.assertIsNone(view["Product_commit"])
+        self.assertFalse((job / "result.json").exists())
+        code, refusal = self.run_cli("run-task", "--job-id", job_id)
+        self.assertEqual(code, 2)
+        self.assertFalse((job / "result.json").exists())
+        self.unchanged()
+
+    def test_historic_dispatched_terminal_blocked_remains_blocked(self):
+        job_id, job, record, frozen = self._historic_dispatched_fixture()
+        frozen("result.json", {
+            "schema_version": 1, "kind": "KAGARI_GA_MANAGED_WORKUNIT_TASK_RESULT",
+            "job_id": job_id, "original_Project_root": record["Project_root"],
+            "native_runtime_receipt_sha256": record["native_receipt_sha256"],
+            "status": "BLOCKED", "reason": "synthetic native leaf failed required read",
+        })
+        code, view = self.run_cli("history-show-task", "--job-id", job_id)
+        self.assertEqual(code, 0, view)
+        self.assertEqual(view["status"], "GA_JOB_BLOCKED")
+        self.assertEqual(view["result_status"], "BLOCKED")
+        self.assertIn("required read", view["result_reason"])
+        self.assertIsNone(view["Product_commit"])
+        self.assertFalse(view["task_execution_authorized"])
+        self.unchanged()
+
+    def test_historic_verified_terminal_success_uses_real_archive(self):
+        job_id, job, record, frozen = self._historic_dispatched_fixture()
+        clone = Path(record["workunit_clone"])
+        (clone / "docs/a.md").write_text("A after\n")
+        (clone / "docs/b.md").write_text("B after\n")
+        subprocess.run(["git", "-C", str(clone), "add", "--", "docs/a.md", "docs/b.md"],
+                       capture_output=True, check=True, timeout=20)
+        subprocess.run(["git", "-C", str(clone), "-c", "user.name=Fixture",
+                        "-c", "user.email=fixture@example.invalid",
+                        "-c", "core.hooksPath=/dev/null",
+                        "commit", "-qm", "disposable authentic Product commit"],
+                       capture_output=True, check=True, timeout=20)
+        product = subprocess.check_output(
+            ["git", "-C", str(clone), "rev-parse", "HEAD"], timeout=20).decode().strip()
+        (job / "evidence").mkdir(mode=0o700)
+        ids = {
+            "contract_id": "a" * 64,
+            "record_id": "b" * 64,
+            "evidence_id": "c" * 64,
+            "snapshot_id": "d" * 64,
+        }
+        native_readback = {
+            **ids, "status": "FRESH_PROCESS_NATIVE_READBACK_PASS",
+            "product_commit": product,
+        }
+        frozen("evidence/report.json", {
+            "status": "REAL_NATIVE_GENERIC_TASK_TEST_ONLY_PASS",
+            "product_commit": product,
+            "contract_id": ids["contract_id"],
+            "record_id": ids["record_id"],
+            "native": {"evidence_id": ids["evidence_id"],
+                       "snapshot_id": ids["snapshot_id"]},
+            "fresh_process_readback": native_readback,
+        })
+        outcome = {
+            "schema_version": 1, "kind": "KAGARI_GA_MANAGED_WORKUNIT_TASK_RESULT",
+            "job_id": job_id, "original_Project_root": record["Project_root"],
+            "native_runtime_receipt_sha256": record["native_receipt_sha256"],
+            "status": "GA_MANAGED_WORKUNIT_TASK_PASS",
+            "Native_exit": 0, "Native_status": "REAL_NATIVE_GENERIC_TASK_TEST_ONLY_PASS",
+            "Product_commit": product,
+            "native_v4_Evidence_readback": native_readback,
+        }
+
+        # The real archive function binds the actual binary Git patch, not a
+        # mocked archive.verify return value.
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / (
+            "tools/kagari_v010_ga_product_archive.py")
+        module_spec = importlib.util.spec_from_file_location(
+            "kagari_v010_ga_product_archive", path)
+        artifact = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(artifact)
+        self.assertEqual(
+            artifact.archive(job, result_override=outcome)["product_commit"], product)
+        frozen_result = frozen("result.json", outcome)
+        before_sha = hashlib.sha256(frozen_result).hexdigest()
+        code, view = self.run_cli("history-show-task", "--job-id", job_id)
+        self.assertEqual(code, 0, view)
+        self.assertEqual(view["status"], "GA_JOB_COMPLETED")
+        self.assertEqual(view["Product_commit"], product)
+        self.assertEqual(view["result_status"], "GA_MANAGED_WORKUNIT_TASK_PASS")
+        self.assertEqual(view["result_sha256"], before_sha)
+        self.assertFalse(view["task_execution_authorized"])
+        self.assertTrue(view["historical_read_only"])
+        self.assertEqual((job / "result.json").read_bytes(), frozen_result)
+        self.unchanged()
+
+        # A forged success is never accepted as historical fact.
+        bad = {**outcome, "Product_commit": "f" * 40}
+        (job / "result.json").write_bytes(
+            (json.dumps(bad, sort_keys=True, ensure_ascii=False,
+                        separators=(",", ":")) + "\n").encode())
+        code, failure = self.run_cli("history-show-task", "--job-id", job_id)
+        self.assertEqual(code, 2, failure)
+        self.assertEqual(failure["status"], "BLOCKED")
+        self.assertIn("archive verification failed", failure["reason"])
+        (job / "result.json").write_bytes(frozen_result)
+        # A forged Native readback field in a canonical successful result
+        # must not be displayed as verified after the genuine archive succeeds.
+        forged = json.loads(frozen_result)
+        forged["native_v4_Evidence_readback"] = {
+            **native_readback, "product_commit": "e" * 40}
+        (job / "result.json").write_bytes(
+            (json.dumps(forged, sort_keys=True, ensure_ascii=False,
+                        separators=(",", ":")) + "\n").encode())
+        code, failure = self.run_cli("history-show-task", "--job-id", job_id)
+        self.assertEqual(code, 2, failure)
+        self.assertEqual(failure["status"], "BLOCKED")
+        self.assertIn("historic Native Evidence readback mismatch", failure["reason"])
+        self.unchanged()
+
     def test_managed_workunit_requires_separate_ask_and_no_original_changes(self):
         self.assertEqual(self.run_cli("install")[0],0)
         code,pending=self.run_cli("prepare-task",*self.task_options())
