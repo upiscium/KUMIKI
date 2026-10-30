@@ -2,11 +2,17 @@
 
 ## Phase A — trusted-host initial collaboration (source-only)
 
-This Phase-A candidate is based on `65082ec5e8e3ffcb9b69073b6c30d65cde6328f1`.
-It remains **uncommitted, unactivated and pending independent review**. The
-historical r7 notes below describe the preceding implementation. No real
-GitHub writes, user Project installation or real model Task execution are
-part of Phase A; the shipped KAGARI v0.1.0 default is unchanged.
+Phase A R3 was developed from `65082ec5e8e3ffcb9b69073b6c30d65cde6328f1`.
+Its source-only tests and independent prepublication reviews were completed,
+and the candidate was committed and pushed for review in
+[Draft PR #325](https://github.com/upiscium/KUMIKI/pull/325) on 2026-10-30.
+At that publication checkpoint it was **not merged, installed or activated**.
+The historical r7 notes below describe the preceding implementation.
+Phase A verification used synthetic GitHub/OpenCode fixtures: no live
+Issue/Task model execution, Task-scoped GitHub collaboration writes or
+consumer Project installation occurred. Commit/Push/Draft PR were source
+publication only, not real workflow E2E. The shipped KAGARI v0.1.0 default
+is unchanged.
 
 The existing opt-in `tools.kagari_vnext_main_service` module now exports:
 
