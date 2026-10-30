@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
@@ -23,10 +24,10 @@ from typing import Any, Callable
 
 if __package__:
     from .kagari_vnext_main import (
-        ApprovedTask, MainError, RepositoryMain, github_issue_reader)
+        ApprovedTask, InitialCollaboration, MainError, RepositoryMain, github_issue_reader)
 else:
     from kagari_vnext_main import (
-        ApprovedTask, MainError, RepositoryMain, github_issue_reader)
+        ApprovedTask, InitialCollaboration, MainError, RepositoryMain, github_issue_reader)
 
 V4 = Path(__file__).resolve().parents[1] / "components/agent-core-v4"
 import sys
@@ -157,7 +158,33 @@ def load_selection(path: Path) -> dict[str, Any]:
     return data
 
 
-def build_main(plan: dict[str, Any]) -> RepositoryMain:
+@dataclass(frozen=True)
+class MainHostCapabilities:
+    """In-process capabilities installed by the trusted execution host only.
+
+    This is a typed handoff, NOT a new grant or an authorization registry.
+    The provider must return the existing #194 facade bound to the requested
+    registered Worktree, with its real TaskGit, GitHubTransport, prerequisites,
+    authorization, WriteIntent/content policy and retry-safe #217 publisher.
+    Main validates that binding and #194 alone owns collaboration effects.
+    No plan field, environment variable or dynamically loaded source installs
+    this object. The default packaged CLI deliberately has no provider.
+    """
+
+    read_issue: Callable[[int], dict]
+    initial_collaboration_for_issue: Callable[[int, Path], InitialCollaboration]
+
+    def __post_init__(self) -> None:
+        if (not callable(self.read_issue)
+                or not callable(self.initial_collaboration_for_issue)):
+            raise MainError("MAIN_HOST_CAPABILITIES_INVALID")
+
+
+def build_main(
+    plan: dict[str, Any], *, host: MainHostCapabilities | None = None,
+) -> RepositoryMain:
+    if host is not None and type(host) is not MainHostCapabilities:
+        raise MainError("MAIN_HOST_CAPABILITIES_INVALID")
     _exact_dir(Path(plan["project_root"]), "PRIMARY_PROJECT_REQUIRED")
     try:
         store = MetadataStore(
@@ -184,8 +211,8 @@ def build_main(plan: dict[str, Any]) -> RepositoryMain:
         for item in plan["tasks"] if item.get("evidence")}
     return RepositoryMain(
         store, approved=approved,
-        read_issue=github_issue_reader(
-            plan["repository"], gh=plan.get("github_bin", "gh")),
+        read_issue=(host.read_issue if host is not None else github_issue_reader(
+            plan["repository"], gh=plan.get("github_bin", "gh"))),
         runtime_home=Path(plan["runtime_home"]),
         port_for_issue=ports.__getitem__,
         opencode_bin=plan.get("opencode_bin", "opencode"),
@@ -194,6 +221,8 @@ def build_main(plan: dict[str, Any]) -> RepositoryMain:
         read_pr=(github_pr_reader(
             plan["repository"], gh=plan.get("github_bin", "gh"))
             if pr_for_issue else None),
+        initial_collaboration_for_issue=(
+            host.initial_collaboration_for_issue if host is not None else None),
     )
 
 
@@ -535,7 +564,14 @@ class MainSupervisor:
             }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None, *, host: MainHostCapabilities | None = None,
+) -> int:
+    """Ordinary one-cycle/observe/follow runner, optionally called by a host.
+
+    ``host`` is Python-only dependency injection; CLI/config inputs cannot
+    select a provider or turn observed Issue/PR facts into authorization.
+    """
     parser = argparse.ArgumentParser(description="KAGARI local repository Main runner")
     parser.add_argument("--config", type=Path, required=True,
                         help="Trusted, explicitly approved Issue list; not Task authority")
@@ -548,11 +584,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         plan = load_selection(args.config)
-        host = build_main(plan)
+        controller = build_main(plan, host=host)
         if args.follow and not 2 <= args.interval <= 3600:
             raise MainError("MAIN_INTERVAL_INVALID")
         with MainSupervisor(
-            host, cleanup_for_issue=build_cleanup_handlers(host, plan),
+            controller, cleanup_for_issue=build_cleanup_handlers(controller, plan),
             observe_only=args.operation == "observe",
         ) as runner:
             def emit_cycle() -> None:

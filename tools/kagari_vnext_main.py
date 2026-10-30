@@ -484,19 +484,29 @@ class RepositoryMain:
                     choice, snapshot = self._spec(issue)
                     runtime = self._runtime(issue)
                     collab_marker = runtime / "initial-collaboration.json"
+                    pending = runtime / "prompt.pending.json"
+                    accepted = runtime / "prompt.sent.json"
                     # New Tasks must have the trusted #194 collaboration capability.
                     # A previous prompt may resume with its already pinned marker,
                     # but a plan file or an open Issue is not a grant.
                     if (not collab_marker.exists()
                             and self.initial_collaboration_for_issue is None):
                         raise MainError("MAIN_INITIAL_COLLABORATION_REQUIRED")
+                    if (not pending.exists() and not accepted.exists()
+                            and any(path.exists() or path.is_symlink() for path in (
+                                runtime / "context.json", runtime / "launch.pending.json",
+                                runtime / "process.json"))):
+                        # A materialized #191 Task/registered Worktree is safe to
+                        # adopt regardless of its creator's model Session. An
+                        # already launched Session is different: absent Main's
+                        # kickoff receipt, its first-turn outcome is unknown.
+                        # Preserve it for host reconciliation, even if idle.
+                        raise MainError("MAIN_SESSION_RECONCILIATION_REQUIRED")
                     allocation = IssueWorktreeAllocator(self.store).ensure(
                         task=str(issue), branch_ref=choice.branch_ref,
                         base_revision=choice.base_revision,
                         expected_contract_id=choice.contract_id)
                     worktree = Path(allocation.worktree)
-                    pending = runtime / "prompt.pending.json"
-                    accepted = runtime / "prompt.sent.json"
                     if collab_marker.exists():
                         prepared = _read_receipt(collab_marker)
                         self._validate_collaboration_marker(
@@ -525,8 +535,34 @@ class RepositoryMain:
                     latest_choice, latest_snapshot = self._spec(issue)
                     if latest_choice != choice or latest_snapshot != snapshot:
                         raise MainError("ISSUE_SNAPSHOT_DRIFT")
+                    payload = self._payload(issue, snapshot, choice)
+                    encoded = json.dumps(payload, sort_keys=True).encode()
+                    fingerprint = hashlib.sha256(encoded).hexdigest()
+                    kickoff_identity = {
+                        "schema_version": 1, "issue": issue,
+                        "repository": self.store.repository,
+                        "contract_id": choice.contract_id,
+                        "prompt_sha256": fingerprint,
+                    }
+                    kickoff_paths = [path for path in (pending, accepted)
+                                     if path.exists() or path.is_symlink()]
+                    if len(kickoff_paths) > 1:
+                        raise MainError("PROMPT_RECONCILIATION_REQUIRED")
+                    previous_kickoff = None
+                    if kickoff_paths:
+                        previous_kickoff = _read_receipt(kickoff_paths[0])
+                        sid = previous_kickoff.get("session_id")
+                        if (type(sid) is not str or not sid
+                                or previous_kickoff != {**kickoff_identity, "session_id": sid}):
+                            raise MainError("PROMPT_RECONCILIATION_REQUIRED")
+                    # The early runtime check is only a preflight. #163 must
+                    # decide first-launch ownership atomically under its .lock,
+                    # including state created during Worktree/PR establishment.
                     started = start_root_session(
-                        self._session_args(choice, Path(allocation.worktree)))
+                        self._session_args(choice, Path(allocation.worktree)),
+                        strict_new_session=not kickoff_paths,
+                        resume_session_id=(previous_kickoff["session_id"]
+                                           if previous_kickoff is not None else None))
                     context = Path(started["context"])
                     with context.open(encoding="utf-8") as stream:
                         location = json.load(stream)
@@ -545,16 +581,12 @@ class RepositoryMain:
                     current_choice, current_snapshot = self._spec(issue)
                     if current_choice != choice or current_snapshot != snapshot:
                         raise MainError("ISSUE_SNAPSHOT_DRIFT")
-                    payload = self._payload(issue, snapshot, choice)
-                    encoded = json.dumps(payload, sort_keys=True).encode()
-                    fingerprint = hashlib.sha256(encoded).hexdigest()
                     receipt = {
-                        "schema_version": 1, "issue": issue,
-                        "repository": self.store.repository,
-                        "contract_id": choice.contract_id,
+                        **kickoff_identity,
                         "session_id": current_binding.session_id,
-                        "prompt_sha256": fingerprint,
                     }
+                    if previous_kickoff is not None and previous_kickoff != receipt:
+                        raise MainError("PROMPT_RECONCILIATION_REQUIRED")
                     runtime.mkdir(parents=True, exist_ok=True)
                     uncertain = pending
                     if uncertain.exists():
@@ -566,6 +598,8 @@ class RepositoryMain:
                         if _read_receipt(accepted) != receipt:
                             raise MainError("PROMPT_RECONCILIATION_REQUIRED")
                         dispatch_state = "ALREADY_DISPATCHED"
+                    elif previous_kickoff is not None:
+                        raise MainError("PROMPT_RECONCILIATION_REQUIRED")
                     else:
                         # Persist uncertainty *before* the non-idempotent native POST.
                         # A lost HTTP acknowledgement never causes a duplicate turn.

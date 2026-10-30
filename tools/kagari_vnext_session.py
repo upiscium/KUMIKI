@@ -65,7 +65,10 @@ def _read_json(path: Path) -> dict[str, object]:
                            "Invalid runtime locator; preserve and reconcile it") from None
 
 
-def _existing(args: argparse.Namespace, path: Path, contract_id: str) -> dict:
+def _existing(
+    args: argparse.Namespace, path: Path, contract_id: str,
+    *, expected_session_id: str | None = None,
+) -> dict:
     obj = _read_json(path)
     expected = {
         "schema_version": 1, "project_root": str(args.project_root),
@@ -74,6 +77,8 @@ def _existing(args: argparse.Namespace, path: Path, contract_id: str) -> dict:
         "branch_ref": args.branch_ref, "remote": args.remote,
         "server_url": "http://127.0.0.1:" + str(args.port),
     }
+    if expected_session_id is not None:
+        expected["session_id"] = expected_session_id
     if any(obj.get(key) != value for key, value in expected.items()):
         raise ControlError("SESSION_RECONCILIATION_REQUIRED",
                            "Runtime locator belongs to a different Issue or endpoint")
@@ -135,7 +140,28 @@ def _port_available(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) != 0
 
 
-def start(args: argparse.Namespace) -> dict:
+def start(
+    args: argparse.Namespace, *, strict_new_session: bool = False,
+    resume_session_id: str | None = None,
+) -> dict:
+    """Start/resume with optional, mutually exclusive host-only restrictions.
+
+    ``strict_new_session`` is Python-only caller policy, not a Task grant.
+    Its decision is made under the same runtime lock as ordinary starts so a
+    first-turn caller cannot adopt an outside Session that won that lock.
+    ``resume_session_id`` instead requires an intact existing binding to that
+    exact Session under the same lock, and can never fall through to creation.
+    Process evidence is checked for consistency, never treated as authority;
+    #191 and the native exact-root Session still must be verified.
+    The CLI/default retains its existing idempotent resume behavior.
+    """
+    if type(strict_new_session) is not bool:
+        raise ControlError("SESSION_INVALID", "strict_new_session must be a Boolean")
+    if resume_session_id is not None and (
+        strict_new_session or type(resume_session_id) is not str
+        or not SESSION_PATTERN.fullmatch(resume_session_id)
+    ):
+        raise ControlError("SESSION_INVALID", "Specify only one valid Session start restriction")
     # No process or runtime-file effects before the registered Task and frozen
     # Contract are observed. KAGARI Main remains responsible for *which* IDs
     # a Human authorized to run, and #286 for creating the Worktree.
@@ -162,6 +188,30 @@ def start(args: argparse.Namespace) -> dict:
             _, current = verify_task_record(args)
             if current != contract_id:
                 raise ControlError("STALE_TASK_CONTRACT", "Issue Contract changed before launch")
+            if strict_new_session and any(
+                path.exists() or path.is_symlink()
+                for path in (context, pending, root / "process.json")
+            ):
+                # Check *after acquiring* .lock and before _existing can resume.
+                # Keep complete, partial and dangling-symlink launch evidence;
+                # an idle endpoint or a PID is not proof of a pristine Session.
+                raise ControlError("SESSION_RECONCILIATION_REQUIRED",
+                                   "First launch encountered existing Session state; reconcile it")
+            if resume_session_id is not None:
+                process = root / "process.json"
+                if (not context.is_file() or context.is_symlink()
+                        or pending.exists() or pending.is_symlink()
+                        or not process.is_file() or process.is_symlink()):
+                    raise ControlError("SESSION_RECONCILIATION_REQUIRED",
+                                       "Receipted Session state is missing or partial; do not replace it")
+                observed = _read_json(process)
+                if (observed.keys() != {"pid", "port", "worktree"}
+                        or type(observed.get("pid")) is not int or observed["pid"] <= 0
+                        or type(observed.get("port")) is not int or observed["port"] != args.port
+                        or observed.get("worktree") != str(worktree)):
+                    raise ControlError("SESSION_RECONCILIATION_REQUIRED",
+                                       "Receipted Session process evidence is inconsistent")
+                return _existing(args, context, current, expected_session_id=resume_session_id)
             if context.exists():
                 return _existing(args, context, current)
             if pending.exists():

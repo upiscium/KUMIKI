@@ -8,12 +8,16 @@ is required for upstream compatibility qualification.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import socket
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -167,6 +171,210 @@ class OpenCodeSessionLaunchTests(unittest.TestCase):
         self.assertEqual(second["outcome"], "RESUMED")
         self.assertEqual(second["context"], first["context"])
         self.assertEqual(len(list(self.launch_root.glob("context.json"))), 1)
+
+    def test_strict_new_creates_once_refuses_adoption_and_default_still_resumes(self):
+        args = launcher.parser().parse_args(self.taskargs)
+        first = launcher.start(args, strict_new_session=True)
+        self.assertEqual(first["outcome"], "CREATED")
+        before = {name: (self.launch_root / name).read_bytes()
+                  for name in ("context.json", "process.json")}
+        with self.assertRaises(launcher.ControlError) as refused:
+            launcher.start(args, strict_new_session=True)
+        self.assertEqual(refused.exception.code, "SESSION_RECONCILIATION_REQUIRED")
+        self.assertEqual({name: (self.launch_root / name).read_bytes() for name in before}, before)
+        second = launcher.start(args)
+        self.assertEqual(second["outcome"], "RESUMED")
+        self.assertEqual(first["context"], second["context"])
+        self.assertEqual(first["task"]["session_id"], second["task"]["session_id"])
+
+    def test_resume_only_reuses_exact_session_and_rejects_other_id_before_resolution(self):
+        args = launcher.parser().parse_args(self.taskargs)
+        first = launcher.start(args, strict_new_session=True)
+        sid = first["task"]["session_id"]
+        before = {name: (self.launch_root / name).read_bytes()
+                  for name in ("context.json", "process.json")}
+        resumed = launcher.start(args, resume_session_id=sid)
+        self.assertEqual(resumed["outcome"], "RESUMED")
+        self.assertEqual(resumed["task"]["session_id"], sid)
+        with patch.object(launcher, "resolve", side_effect=AssertionError("wrong ID reached resolver")):
+            with self.assertRaises(launcher.ControlError) as refused:
+                launcher.start(args, resume_session_id="ses_DIFFERENTRecordedSession012345")
+        self.assertEqual(refused.exception.code, "SESSION_RECONCILIATION_REQUIRED")
+        self.assertEqual({name: (self.launch_root / name).read_bytes() for name in before}, before)
+
+    def test_resume_only_validates_policy_without_runtime_effects(self):
+        args = launcher.parser().parse_args(self.taskargs)
+        for strict, sid in ((True, "ses_RecordedSession012345"), (False, True),
+                            (False, ""), (False, "not-a-session")):
+            with self.subTest(strict=strict, sid=sid):
+                with self.assertRaises(launcher.ControlError) as refused:
+                    launcher.start(args, strict_new_session=strict, resume_session_id=sid)
+                self.assertEqual(refused.exception.code, "SESSION_INVALID")
+                self.assertFalse(self.launch_root.exists())
+
+    def test_resume_only_preserves_missing_partial_and_symlink_evidence(self):
+        args = launcher.parser().parse_args(self.taskargs)
+        first = launcher.start(args, strict_new_session=True)
+        sid = first["task"]["session_id"]
+
+        def snapshot():
+            return ({p.name: (p.stat().st_ino, p.read_bytes())
+                     for p in self.launch_root.iterdir() if p.is_file() and not p.is_symlink()},
+                    {p.name: p.readlink() for p in self.launch_root.iterdir() if p.is_symlink()})
+
+        def assert_refused_unchanged():
+            before = snapshot()
+            children = set(launcher._DETACHED_CHILDREN)
+            with self.assertRaises(launcher.ControlError) as refused:
+                launcher.start(args, resume_session_id=sid)
+            self.assertEqual(refused.exception.code, "SESSION_RECONCILIATION_REQUIRED")
+            self.assertEqual(snapshot(), before)
+            self.assertEqual(set(launcher._DETACHED_CHILDREN), children)
+
+        for name in ("context.json", "process.json"):
+            path = self.launch_root / name
+            original = path.read_bytes()
+            with self.subTest(name=name, state="partial"):
+                path.write_text("{}")
+                try:
+                    assert_refused_unchanged()
+                finally:
+                    path.write_bytes(original)
+            for symlink in (False, True):
+                with self.subTest(name=name, symlink=symlink):
+                    parked = path.with_suffix(".parked")
+                    path.rename(parked)
+                    try:
+                        if symlink:
+                            path.symlink_to(parked.name)
+                        assert_refused_unchanged()
+                    finally:
+                        if path.is_symlink():
+                            path.rename(path.with_suffix(".link-preserved"))
+                        parked.rename(path)
+        pending = self.launch_root / "launch.pending.json"
+        for symlink in (False, True):
+            with self.subTest(pending=True, symlink=symlink):
+                if symlink:
+                    pending.symlink_to("missing-outside-start")
+                else:
+                    pending.write_text('{"stage":"uncertain outside start"}')
+                try:
+                    assert_refused_unchanged()
+                finally:
+                    pending.rename(pending.with_suffix(".link-preserved" if symlink else ".preserved"))
+
+    def test_strict_new_process_only_partial_state_is_preserved_without_launch(self):
+        self.launch_root.mkdir()
+        process = self.launch_root / "process.json"
+        process.write_text('{"stage":"unknown outside launch"}')
+        before = process.read_bytes()
+        args = launcher.parser().parse_args(self.taskargs)
+        with self.assertRaises(launcher.ControlError) as refused:
+            launcher.start(args, strict_new_session=True)
+        self.assertEqual(refused.exception.code, "SESSION_RECONCILIATION_REQUIRED")
+        self.assertEqual(process.read_bytes(), before)
+        self.assertFalse((self.launch_root / "context.json").exists())
+        self.assertFalse((self.launch_root / "launch.pending.json").exists())
+
+    def test_strict_new_rejects_dangling_launch_evidence(self):
+        self.launch_root.mkdir()
+        args = launcher.parser().parse_args(self.taskargs)
+        for name in ("context.json", "launch.pending.json", "process.json"):
+            with self.subTest(name=name):
+                path = self.launch_root / name
+                path.symlink_to("missing-outside-state")
+                with self.assertRaises(launcher.ControlError) as refused:
+                    launcher.start(args, strict_new_session=True)
+                self.assertEqual(refused.exception.code, "SESSION_RECONCILIATION_REQUIRED")
+                self.assertTrue(path.is_symlink())
+                path.rename(path.with_suffix(".preserved"))
+
+    def test_strict_new_does_not_relax_context_issue_or_contract_binding(self):
+        args = launcher.parser().parse_args(self.taskargs)
+        launcher.start(args, strict_new_session=True)
+        context = self.launch_root / "context.json"
+        original = json.loads(context.read_text())
+        for field, value in (("issue", 999), ("worktree", str(self.project))):
+            with self.subTest(field=field):
+                context.write_text(json.dumps({**original, field: value}))
+                before = context.read_bytes()
+                for strict in (True, False):
+                    with self.assertRaises(launcher.ControlError) as refused:
+                        launcher.start(args, strict_new_session=strict)
+                    self.assertEqual(refused.exception.code, "SESSION_RECONCILIATION_REQUIRED")
+                    self.assertEqual(context.read_bytes(), before)
+        context.write_text(json.dumps(original))
+        args.expected_contract_id = "f" * 64
+        with self.assertRaises(launcher.ControlError) as refused:
+            launcher.start(args, strict_new_session=True)
+        self.assertEqual(refused.exception.code, "STALE_TASK_CONTRACT")
+        self.assertEqual(json.loads(context.read_text()), original)
+
+    def test_strict_new_requires_actual_bool_and_has_no_cli_switch(self):
+        args = launcher.parser().parse_args(self.taskargs)
+        for value in (1, "true", None):
+            with self.subTest(value=value):
+                with self.assertRaises(launcher.ControlError) as refused:
+                    launcher.start(args, strict_new_session=value)
+                self.assertEqual(refused.exception.code, "SESSION_INVALID")
+                self.assertFalse(self.launch_root.exists())
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as refused:
+                launcher.parser().parse_args([*self.taskargs, "--strict-new-session"])
+        self.assertEqual(refused.exception.code, 2)
+
+    def test_strict_new_checks_state_after_waiting_for_same_lock_in_second_process(self):
+        self.launch_root.mkdir()
+        script = """
+import fcntl
+import sys
+from tools import kagari_vnext_session as launcher
+flock = fcntl.flock
+def notified_flock(file, operation):
+    if operation == fcntl.LOCK_EX:
+        print("WAITING_FOR_RUNTIME_LOCK", flush=True)
+    return flock(file, operation)
+launcher.fcntl.flock = notified_flock
+try:
+    launcher.start(launcher.parser().parse_args(sys.argv[1:]), strict_new_session=True)
+    print("UNEXPECTED_LAUNCH", flush=True)
+except launcher.ControlError as error:
+    print(error.code, flush=True)
+finally:
+    for proc in launcher._DETACHED_CHILDREN.values():
+        if proc.poll() is None:
+            proc.terminate()
+        proc.wait(timeout=5)
+"""
+        with (self.launch_root / ".lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            child = subprocess.Popen(
+                [sys.executable, "-B", "-c", script, *self.taskargs],
+                cwd=Path(__file__).resolve().parents[1],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True)
+            try:
+                ready, _, _ = select.select([child.stdout], [], [], 15)
+                self.assertTrue(ready, "second starter did not reach the runtime lock")
+                self.assertEqual(child.stdout.readline().strip(), "WAITING_FOR_RUNTIME_LOCK")
+                self.assertIsNone(child.poll())
+                # Independent owner publishes partial state while holding the
+                # same .lock, after the child's pre-lock validation completed.
+                process = self.launch_root / "process.json"
+                process.write_text('{"stage":"external owner under runtime lock"}')
+                before = process.read_bytes()
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                output, errors = child.communicate(timeout=20)
+                self.assertEqual(child.returncode, 0, errors)
+                self.assertEqual(output.strip(), "SESSION_RECONCILIATION_REQUIRED")
+                self.assertEqual(process.read_bytes(), before)
+                self.assertFalse((self.launch_root / "context.json").exists())
+                self.assertFalse((self.launch_root / "launch.pending.json").exists())
+            finally:
+                if child.poll() is None:
+                    child.terminate()
+                child.communicate(timeout=10)
 
     def test_two_distinct_tasks_get_distinct_sessions_and_servers(self):
         first_code, first = self.invoke()
