@@ -1,5 +1,145 @@
 # KAGARI #291 — Repository Main: approved-Issue vertical slice
 
+## Phase A — trusted-host initial collaboration (source-only)
+
+This Phase-A candidate is based on `65082ec5e8e3ffcb9b69073b6c30d65cde6328f1`.
+It remains **uncommitted, unactivated and pending independent review**. The
+historical r7 notes below describe the preceding implementation. No real
+GitHub writes, user Project installation or real model Task execution are
+part of Phase A; the shipped KAGARI v0.1.0 default is unchanged.
+
+The existing opt-in `tools.kagari_vnext_main_service` module now exports:
+
+```python
+MainHostCapabilities(
+    read_issue=trusted_issue_reader,
+    initial_collaboration_for_issue=trusted_collaboration_provider,
+)
+build_main(plan, *, host=None)
+main(argv=None, *, host=None)
+```
+
+A trusted **in-process execution host** supplies these Python capabilities
+to the ordinary runner for one cycle, `observe`, or `--follow`. Alternatively
+it constructs Main with `build_main` and holds the existing `MainSupervisor`
+across cycles. There is no provider CLI option, environment switch, plan
+field, arbitrary module/path loader, credential handling or new privilege
+system. The selection JSON still only selects exact previously approved
+Task identities; it never creates a grant. The default packaged executable
+passes no host and refuses new first dispatch with
+`MAIN_INITIAL_COLLABORATION_REQUIRED`, before Worktree/Session allocation.
+
+The provider accepts `(issue: int, worktree: Path)` and returns the existing
+`InitialCollaboration(facade, metadata_provider, report)`. The facade must be
+the real #194 `TaskCollaboration`, rooted in the exact registered #286
+Worktree with the same repository/remote/Issue/branch/base. The host installs
+the existing `TaskGit` publication endpoint, operation prerequisites,
+`GitHubTransport`, execution authorization, immutable `WriteIntent` recorder
+and content policy. Main does not supply permissive defaults or implement
+unguarded GitHub/shell writes. `establish` remains the sole owner of guarded
+bootstrap/push/Draft PR/initial checkpoint establishment; Main checks its
+receipt against actual Git subject and re-observed PR/checkpoint provenance
+before first Task Session creation and model kickoff.
+
+The existing #217 metadata callback has signature
+`(repository, task, branch_ref, pr_number, subject) -> MetadataBinding`.
+It must publish the real immutable #144 `explicit-handoff` snapshot with
+the exact #191 record/Contract and subject/PR, under genuine host grants.
+It owns interrupted publication recovery: persist the exact candidate and
+binding with a stable repository/Task/branch/PR/subject/record/Contract key,
+not the advancing metadata tip. Re-capturing a different snapshot after an
+uncertain write is unsafe. #194 validates/re-reads that binding, and adopts
+an already posted identical initial checkpoint without calling the publisher
+again. This seam does **not** implement a production publisher, grant source
+or network adapter; those are supplied by the external trusted host.
+
+### First-Task adoption and uncertainty
+
+The host can first use the existing `bootstrap_approved_issue` with the exact
+approved snapshot and genuine #191 `AuthorityRequest` callback. An identical
+existing Task Record is read-only `RESUMED`, without replaying create
+authorization. Main then adopts its exact registered Worktree through the
+unchanged #286 allocator. The Task need not have been created by this Main
+or by the same model Session. The immutable Contract, exact base/branch and
+live Issue snapshot still have to match; dirty/unregistered/orphan/retired
+bindings are not pristine adoption. A different approved Issue gets its own
+independent Worktree and root Session without a per-Job Question.
+
+Before a first kickoff, pre-existing `context.json`, `launch.pending.json`
+or `process.json` without either Main kickoff receipt is now
+`MAIN_SESSION_RECONCILIATION_REQUIRED`, **before collaboration effects**.
+This includes an apparently idle, otherwise valid Session created outside
+Main and a crash after Session creation but before writing a kickoff receipt.
+It is not safe to infer that the first prompt was never sent. Preserve and
+reconcile this state with the host; do not delete locators, synthesize receipts
+or launch another Session. After a recorded Main kickoff, existing #163/#292
+exact-root verification and Main's pending/sent prompt reconciliation remain
+unchanged and retries do not re-create the Task, PR, Session or prompt.
+
+The early Main check is only a preflight: an independent #163 starter may
+win while Worktree allocation or PR-first establishment is in progress.
+Main therefore uses the Python-only
+`start(args, strict_new_session=True)` for a first launch. The starter checks
+`context.json`, `launch.pending.json` and `process.json` (including dangling
+symlinks) **after acquiring its existing runtime `.lock`**, before allowing
+resume or process creation, and retains that lock through Session creation.
+State appearing after Main's preflight is refused with
+`SESSION_RECONCILIATION_REQUIRED`, preserving the outside Session/runtime
+and already authorized #194 artifacts. This is not an unlocked last-minute
+recheck or a second lock/authority database. To permit normal restart, Main
+first validates an existing kickoff receipt's Issue/Contract/prompt identity;
+the exact native Session ID is still verified before accepting or recovering
+that kickoff. Invalid or lost receipt evidence requires reconciliation.
+The #163 CLI/default `start(args)` retains its idempotent CREATED/RESUMED
+behavior; the strict parameter is an in-process caller restriction, not a
+public CLI option or an execution grant. A dead Session with unclear prompt
+identity is not automatically replaced or re-prompted.
+
+For an already validated kickoff receipt, Main now passes the exact recorded
+ID using Python-only `resume_session_id`. This is mutually exclusive with
+`strict_new_session=True`. Under that **same** runtime `.lock`, resume-only
+requires a regular non-symlink context with the exact receipted Session ID,
+no pending launch marker (including a dangling symlink), and intact process
+evidence for the expected Worktree/port. The saved PID is only a consistency
+field, never authority: #191/Contract and the native exact-root Session are
+still verified. Missing/partial/symlink/mismatched state refuses with
+`SESSION_RECONCILIATION_REQUIRED` before port checks, process creation or
+process-record overwrites. In particular, a valid prompt receipt plus a free
+port and retained process record but missing context may **not** create a
+replacement Session. Main keeps its post-return Session-ID comparison as
+defense-in-depth. Callers supplying neither restriction retain the existing
+default #163 CREATED/RESUMED policy; no CLI switch or new grant is introduced.
+
+R2 regression coverage includes a real synthetic Session started immediately
+after #194 checkpoint establishment, process-only partial state at the same
+boundary, and a second Python process waiting on the real runtime `.lock`
+while its current owner publishes partial launch evidence. All must refuse
+without a new initial prompt. This is cooperative single-host runtime-lock
+serialization, not exclusion of hostile same-UID writers replacing lock
+inodes or modifying runtime files without honoring that lock.
+
+### Phase-A evidence and residual gates
+
+`tests/test_kagari_vnext_main_host.py` exercises the ordinary host-installed
+runner with real temporary Git repositories/linked Worktrees, real #191
+Records, `TaskGit`, #194 facade and #217 snapshot publication/readback. Only
+GitHub transport and OpenCode HTTP/model are faithful local fixtures. It
+covers first dispatch, pre-materialized pristine adoption, existing initial
+PR checkpoint adoption, restarted/follow Main, separate Issues, observation,
+absent/denied host capabilities, mismatched bindings, dirty source, unknown
+or partial Session state, and stale/unconfirmed checkpoints. Test grant and
+metadata journals are fixtures, not a new production authority store.
+
+Production host installation must still provide genuine narrowly scoped
+#191/#194/#217 endpoints and a durable publisher recovery implementation.
+Actual GitHub writes, real model execution and a real consumer E2E are
+Phase B, not claimed by these tests. Independent review and Human-approved
+installation/publication remain separate gates. Existing canonical shared
+Main lock, unsafe ancestor/nonempty lock refusal, fork-safe release, native
+tool Permissions and Human product decisions are preserved.
+
+## Prior implementation context
+
 Status: **isolated r7 source-correction candidate, not committed, published,
 merged or activated**. The main branch already contains the independently
 reviewed [PR #299](https://github.com/upiscium/KUMIKI/pull/299) (#286
@@ -87,9 +227,9 @@ is requested for in-scope work. The opt-in `kagari-vnext-main` runner now
 holds a **host-owned canonical-repository lock**, shared by independently
 cloned Project roots on the supported single host/UID. An Issue-local Git lock
 separately serializes individual dispatch. This does not implement multi-host
-leader election or hostile same-UID exclusion. The full production GitHub
-transport and initial #144/#217 metadata publisher are **not yet wired** into
-the ordinary Main CLI; with no installed #194 capability, first dispatch
+leader election or hostile same-UID exclusion. The production GitHub
+transport and initial #144/#217 metadata publisher are **host-supplied** via
+the Phase-A in-process interface above, not selected by the CLI; with no installed #194 capability, first dispatch
 refuses rather than inventing consent. Full real-Issue Task/Evidence/PR/model
 E2E and wider eligible-set scheduling remain unqualified.
 
@@ -117,7 +257,7 @@ without interpreting issue visibility as execution approval.
 
 The prerequisite #299/#300 PRs are already merged; this r7 candidate does
 not change shipped GA or publish source. The first Main substantial remaining
-work is an approved production-host #194 collaboration provider and an actual
+work is installation of approved production-host #194/#217 capabilities and an actual
 authorized
 GitHub Issue and Task lifecycle, including setting up a trustworthy
 explicit allowed-Issue source, #191 Contract creation from that
@@ -262,7 +402,7 @@ or independent Merge/Release gates. Tests run the positive and refusal
 paths against #194's existing hermetic GitHub transport, not a live PR.
 
 These additions remain **r7 source-only** after #299/#300 merged. A
-production #194 GitHub/metadata provider is still an integration gate;
+production #194 GitHub/metadata provider installation is still an integration gate;
 without it normal first dispatch refuses. No actual user GitHub Issue was
 bootstrapped or dispatched,
 and no actual PR or Evidence was written by this candidate. Later full
