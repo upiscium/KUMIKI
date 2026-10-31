@@ -14,6 +14,7 @@ let
     cp ${../tools/kagari_vnext_main.py} "$out/tools/kagari_vnext_main.py"
     cp ${../tools/kagari_vnext_main_observation.py} "$out/tools/kagari_vnext_main_observation.py"
     cp ${../tools/kagari_vnext_main_service.py} "$out/tools/kagari_vnext_main_service.py"
+    cp ${../tools/kagari_vnext_trusted_host.py} "$out/tools/kagari_vnext_trusted_host.py"
     cp ${../tools/kagari_vnext_issue_bootstrap.py} "$out/tools/kagari_vnext_issue_bootstrap.py"
     cp ${../tools/kagari_vnext_progress.py} "$out/tools/kagari_vnext_progress.py"
     cp ${../tools/kagari_vnext_test_evidence.py} "$out/tools/kagari_vnext_test_evidence.py"
