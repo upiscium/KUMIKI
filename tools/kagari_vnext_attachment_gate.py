@@ -12,9 +12,15 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
+import sys
 from typing import Any, Iterator
 
+# Existing Attach/Host Prepare entrypoints import their sibling modules as
+# top-level names. Resolve all of them from this pinned source directory in
+# both package imports and immutable direct-CLI execution.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import kagari_vnext_attach as attach
 
 
@@ -61,6 +67,7 @@ def hold(project: Path, state_home: Path, package_root: Path,
             fcntl.flock(namespace, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise GateBlocked("GATE_ATTACHMENT_BUSY") from None
+        owner_pid = os.getpid()
         try:
             def verify() -> dict[str, int]:
                 attach.same_namespace(home, namespace)
@@ -102,9 +109,91 @@ def hold(project: Path, state_home: Path, package_root: Path,
             try:
                 yield result
             finally:
+                require(os.getpid() == owner_pid, "GATE_OWNER_NOT_ACTIVE")
                 require(verify() == before, "GATE_ATTACHMENT_CHANGED_DURING_USE")
         finally:
-            fcntl.flock(namespace, fcntl.LOCK_UN)
+            # flock ownership follows the open file description. After fork,
+            # a child must close its duplicate without releasing the parent's
+            # still-live attachment lease.
+            if os.getpid() == owner_pid:
+                fcntl.flock(namespace, fcntl.LOCK_UN)
+
+
+_LEASE_FACTORY_KEY = object()
+
+
+class AttachmentLease:
+    """Re-check the same held receipt before each host-owned Main effect.
+
+    This object is a health precondition, not a Task or Main authorization.
+    It is valid only inside an active ``hold_verified`` context in its PID.
+    """
+
+    def __init__(self, project: Path, state_home: Path, package_root: Path,
+                 profile: str, report: dict[str, Any], *,
+                 _factory_key: object | None = None):
+        # A plain Doctor report is not an active flock. Constructing a lease
+        # without the scoped factory must not accidentally promote it to one.
+        require(_factory_key is _LEASE_FACTORY_KEY, "GATE_OWNER_NOT_ACTIVE")
+        self._project = project
+        self._home = state_home
+        self._package = package_root
+        self._profile = profile
+        self._project_identity = report["project"].copy()
+        self._package_identity = attach.package_identity(package_root)
+        self._expected = attach.expected_state(
+            self._project_identity, state_home, self._package_identity)
+        self._fingerprint = report["attachment_receipt_sha256"]
+        self._pid = os.getpid()
+        self._active = True
+
+    def verify(self, *, project: Path | None = None) -> None:
+        require(self._active and self._pid == os.getpid(),
+                "GATE_OWNER_NOT_ACTIVE")
+        require(project is None or project == self._project,
+                "GATE_PROJECT_MISMATCH")
+        require(attach.project_identity(self._project) == self._project_identity,
+                "GATE_PROJECT_CHANGED")
+        require(attach.package_identity(self._package) == self._package_identity,
+                "GATE_PACKAGE_CHANGED")
+        require(attach.expected_state(
+            self._project_identity, attach.host.private_dir(self._home),
+            self._package_identity) == self._expected,
+            "GATE_HOST_SOURCE_CHANGED")
+        require(hashlib.sha256(attach.host.canonical(self._expected)).hexdigest()
+                == self._fingerprint, "GATE_RECEIPT_CHANGED")
+        with attach.namespace(self._home, create=False) as fd:
+            require(fd is not None, "GATE_ATTACHMENT_REQUIRED")
+            attach.same_namespace(self._home, fd)
+            attach.inventory(fd)
+            require(attach.stored(fd, attach.state_name(self._project_identity),
+                                  self._expected) is not None,
+                    "GATE_ATTACHMENT_REQUIRED")
+        try:
+            prepared = attach.host.operate(
+                self._project, self._home, "doctor", self._profile)
+        except (attach.host.HostBlocked, attach.host.ignore.IgnoreBlocked):
+            raise GateBlocked("GATE_WORKTREE_PREFLIGHT_NOT_READY") from None
+        require(prepared["status"] == "READY"
+                and prepared["host_preflight_recorded"] is True
+                and prepared["ignore"]["git_ignore_effective"] is True,
+                "GATE_WORKTREE_PREFLIGHT_NOT_READY")
+
+
+@contextmanager
+def hold_verified(project: Path, state_home: Path, package_root: Path,
+                  profile: str = attach.PROFILE) -> Iterator[AttachmentLease]:
+    """Hold the existing receipt lock and expose effect-time revalidation."""
+    with hold(project, state_home, package_root, profile) as report:
+        lease = AttachmentLease(project, state_home, package_root,
+                                profile, report, _factory_key=_LEASE_FACTORY_KEY)
+        try:
+            lease.verify()
+            yield lease
+        finally:
+            # Even when a host operation raises, release the lease on exit.
+            # ``hold`` still performs its own exact final check before unlock.
+            lease._active = False
 
 
 def doctor(project: Path, state_home: Path, package_root: Path,
