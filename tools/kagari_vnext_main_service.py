@@ -8,7 +8,7 @@ owns no extra semantic/permission database or independent Ask broker.
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import fcntl
 import hashlib
@@ -42,8 +42,10 @@ from issue_worktree_cleanup import (
 )
 if __package__:
     from .kagari_vnext_progress import github_pr_reader
+    from . import kagari_vnext_attachment_gate as attachment_gate
 else:
     from kagari_vnext_progress import github_pr_reader
+    import kagari_vnext_attachment_gate as attachment_gate
 
 
 def _exact_dir(path: Path, name: str) -> Path:
@@ -362,12 +364,18 @@ class MainSupervisor:
         self, main: RepositoryMain, *,
         cleanup_for_issue: dict[int, Callable[[], CleanupReceipt]] | None = None,
         observe_only: bool = False,
+        attachment_lease: attachment_gate.AttachmentLease | None = None,
     ) -> None:
         requested = dict(cleanup_for_issue or {})
         if (type(observe_only) is not bool
                 or any(n not in main.approved or not callable(f)
                        for n, f in requested.items())):
             raise MainError("MAIN_CLEANUP_CONFIGURATION_INVALID")
+        if (attachment_lease is not None
+                and (type(attachment_lease) is not attachment_gate.AttachmentLease
+                     or observe_only)):
+            raise MainError("MAIN_ATTACHMENT_BINDING_INVALID")
+        self._attachment_lease = attachment_lease
         self.main = main
         self.cleanup_for_issue = requested
         self.observe_only = observe_only
@@ -405,10 +413,26 @@ class MainSupervisor:
             _verify_lock_file(expected, self._file.fileno(), "MAIN_OWNER_UNVERIFIED")
         except (OSError, RuntimeError):
             raise MainError("MAIN_OWNER_UNVERIFIED") from None
+        self._verify_attachment()
+
+    def _verify_attachment(self) -> None:
+        """Never allow a bound host effect to outrun the pinned Attach receipt."""
+        lease = self._attachment_lease
+        if lease is None:
+            return  # Existing independently authorized Main mode is unchanged.
+        try:
+            lease.verify(project=self.main.store.root)
+        except (attachment_gate.GateBlocked,
+                attachment_gate.attach.Blocked,
+                attachment_gate.attach.host.HostBlocked,
+                attachment_gate.attach.host.ignore.IgnoreBlocked,
+                OSError, ValueError, RuntimeError):
+            raise MainError("MAIN_ATTACHMENT_UNVERIFIED") from None
 
     def __enter__(self) -> MainSupervisor:
         if self._entered:
             raise MainError("MAIN_ALREADY_ACTIVE")
+        self._verify_attachment()
         if self.observe_only:
             # Observation is a reader: no repository lock file, no exclusive
             # owner and no source/Task lifecycle side effect. Multiple
@@ -564,8 +588,53 @@ class MainSupervisor:
             }
 
 
+@dataclass(frozen=True)
+class MainAttachmentConfig:
+    """Explicit trusted host binding, not a Task grant or plan-file field."""
+
+    state_home: Path
+    package_root: Path
+    profile: str = attachment_gate.attach.PROFILE
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.state_home, Path)
+                or not isinstance(self.package_root, Path)
+                or self.profile != attachment_gate.attach.PROFILE):
+            raise MainError("MAIN_ATTACHMENT_BINDING_INVALID")
+
+
+@contextmanager
+def attached_supervisor(
+    main: RepositoryMain, config: MainAttachmentConfig, *,
+    cleanup_for_issue: dict[int, Callable[[], CleanupReceipt]] | None = None,
+):
+    """Hold Attach receipt + canonical Main lease through bounded host effects.
+
+    The existing Task/Session/PR capabilities remain mandatory. This does
+    NOT install a daemon, approve an Issue or persist an active-runtime record.
+    """
+    if type(main) is not RepositoryMain or type(config) is not MainAttachmentConfig:
+        raise MainError("MAIN_ATTACHMENT_BINDING_INVALID")
+    try:
+        with attachment_gate.hold_verified(
+            main.store.root, config.state_home, config.package_root,
+            config.profile,
+        ) as lease:
+            with MainSupervisor(main, cleanup_for_issue=cleanup_for_issue,
+                                attachment_lease=lease) as runner:
+                runner._assert_owned(main)
+                yield runner
+    except (attachment_gate.GateBlocked,
+            attachment_gate.attach.Blocked,
+            attachment_gate.attach.host.HostBlocked,
+            attachment_gate.attach.host.ignore.IgnoreBlocked,
+            OSError, RuntimeError):
+        raise MainError("MAIN_ATTACHMENT_UNVERIFIED") from None
+
+
 def main(
     argv: list[str] | None = None, *, host: MainHostCapabilities | None = None,
+    attachment: MainAttachmentConfig | None = None,
 ) -> int:
     """Ordinary one-cycle/observe/follow runner, optionally called by a host.
 
@@ -587,10 +656,21 @@ def main(
         controller = build_main(plan, host=host)
         if args.follow and not 2 <= args.interval <= 3600:
             raise MainError("MAIN_INTERVAL_INVALID")
-        with MainSupervisor(
-            controller, cleanup_for_issue=build_cleanup_handlers(controller, plan),
-            observe_only=args.operation == "observe",
-        ) as runner:
+        if attachment is not None and type(attachment) is not MainAttachmentConfig:
+            raise MainError("MAIN_ATTACHMENT_BINDING_INVALID")
+        if attachment is not None and args.operation == "observe":
+            raise MainError("MAIN_ATTACHMENT_OBSERVE_ONLY_UNSUPPORTED")
+        cleanup = build_cleanup_handlers(controller, plan)
+        if attachment is not None and args.operation == "dispatch":
+            runner_context = attached_supervisor(
+                controller, attachment, cleanup_for_issue=cleanup)
+        else:
+            # Observe never acquires an Attach/Main lease. The ordinary CLI
+            # path does not infer a Host attachment from its plan file.
+            runner_context = MainSupervisor(
+                controller, cleanup_for_issue=cleanup,
+                observe_only=args.operation == "observe")
+        with runner_context as runner:
             def emit_cycle() -> None:
                 result = runner.cycle(dispatch=args.operation == "dispatch")
                 print(json.dumps(result, sort_keys=True, ensure_ascii=False),
