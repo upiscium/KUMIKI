@@ -21,10 +21,8 @@ from urllib.request import ProxyHandler, Request, build_opener
 from tools.kagari_vnext_opencode_control import OpenCode, TaskBinding, status
 from tools.kagari_vnext_session import SUPPORTED_OPENCODE
 
-_NATIVE = "KAGARI_339_NATIVE_SMOKE"
 
-
-@unittest.skipUnless(os.environ.get(_NATIVE) == "1",
+@unittest.skipUnless(os.environ.get("KAGARI_339_NATIVE_SMOKE") == "1",
                      "opt-in: isolate native OpenCode servers, no model prompts")
 class NativeWorkerSmokeTests(unittest.TestCase):
     def setUp(self) -> None:
