@@ -153,11 +153,16 @@ simultaneous HTTP handlers by default (configurable as an integer 1–64).
 Admission uses a non-blocking semaphore *before creating a request thread*;
 overflow receives `503 SERVER_BUSY` with `Connection: close` and triggers no
 Main/status/Ask callback. Active handlers release their slots even if
-callbacks fail. The request-header/body socket timeout is 8 seconds by
-default to keep inadvertently abandoned local connections from indefinitely
-occupying capacity. This bounds active handlers, not OS connection backlog,
-OpenCode model concurrency, memory consumption of external callbacks or
-total application task duration.
+callbacks fail. The request-header/body socket timeout is 8 seconds of **I/O
+inactivity**, so a client that stops sending bytes eventually releases its
+handler. This is **not an absolute elapsed-time deadline**: a slow caller
+continuously sending small fragments can occupy its admitted slot longer.
+This bounds the number of admitted handler threads, not the duration of a
+slow request, OS connection backlog, OpenCode model concurrency, memory
+consumption of external callbacks or total Task execution time. Malicious
+co-resident processes remain outside the accepted threat model; a future
+absolute deadline should be justified by observed nonmalicious operational
+needs rather than silently adding a new local-attacker security guarantee.
 
 On shutdown, already admitted request threads are non-daemon and
 `server_close()` waits for them. A long-running/blocked Host callback
@@ -189,11 +194,68 @@ or Worktree state mechanism was added.
 - Separate permission for live model turns, actual GitHub/Task effects,
   protected consumer updates and production activation as applicable.
 
-#291 Phase B's last observed GitHub evidence has source-only host
-assembly, but no real granted live GitHub/Metadata publisher or approved
-real-Task fixture. R5 therefore does not start model turns or claim a
-native two-Issue implementation E2E. The independent review/publication
-and installer/host cutover gates remain unchanged.
+## R9 fresh-client source-only observation qualification (after PR #342)
+
+The approved `#339` source-only Control Server has merged into
+`main` (regular PR #342 merge `add1f7e9598807ce03bc8fde63a17ff72337123e`).
+No persistent listener, installed service or actual native model Task
+has been activated by that source merge.
+
+An isolated post-merge `tests.test_kagari_loopback_main_bridge` regression
+now exercises **different Python interpreter processes**, each launched
+with `stdin=DEVNULL`, a standalone HOME, no provider/GitHub credentials
+and no KUMIKI project import or Main/Task handle. Each subprocess receives
+only the 127.0.0.1 port and canonical Issue ID. The initiating Dispatch
+HTTP request and `MainSupervisor` owner scope end before either new
+process performs fresh `GET /tasks/{issue}/status` and
+`GET /tasks/{issue}/asks` requests.
+
+The synthetic #191 Issue/Contract/Worktree fixture and fake #163 OpenCode
+processes verify:
+- Two separately created client processes recover **the same** started Task,
+  exact Contract ID, root Session ID and pending Permission from the
+  surviving loopback listener, without any second Task kickoff. The expected
+  Session and Permission IDs are first captured through trusted Main observation
+  in the parent test; they are **not** passed to either fresh client.
+- The fresh subprocesses each run with a distinct, empty temporary HOME/cwd
+  **outside** the synthetic repository/metadata/Worktree fixture, and receive
+  only the loopback port and Issue ID as explicit arguments. This isolates the
+  test inputs but makes no same-UID adversarial access-control claim.
+- Two independent Issues can be dispatched in parallel to different fake
+  OpenCode Sessions; simultaneous fresh clients see separate Contract IDs,
+  root Sessions and pending Ask request IDs, with exactly one fake kickoff
+  per Issue.
+- Before an Issue has begun, a detached read reports Task `UNKNOWN` and
+  `409 ASK_SESSION_NOT_STARTED`, **not** an empty successful Ask queue.
+- A transient `503 TASK_OBSERVATION_UNAVAILABLE` or
+  `503 ASK_OBSERVATION_UNAVAILABLE` can trigger only a small bounded
+  read-only retry inside the *test client*, never model dispatch, Ask reply
+  or an override of Main authority.
+
+These tests prove HTTP caller-lifetime separation over real OS processes
+with **synthetic** approved Task records and fake OpenCode. The optional
+`tests.native_kagari_loopback_smoke` separately proves real OpenCode
+1.18.35 server/root Session read behavior without model turns. The two
+proofs must **not** be combined into a claim that real GitHub-approved
+Tasks or two native model-backed Issues have completed end to end.
+
+### Post-merge dependency and authority boundary
+
+At this checkpoint, #291 B2a host qualification (PR #331) and #337
+Metadata v2 Phase 2A *read-only* Host binding (PR #343) were merged, but
+the existing #291 Main's write path still relies on v1 MetadataStore
+and host-supplied PR-first collaboration. The v2 writer/remote CAS,
+protected archive retention, actual #194 publisher grants, #256 active
+Main lifecycle, real bounded Issue/Contract fixture, provider/model
+and Human Ask reply authority remain independently unqualified.
+No local testing invents those missing privileges or changes the v1/v2
+metadata boundary.
+
+The next live B2b/B3 milestone therefore requires an **explicitly
+authorized disposable repository/Issue set** and exact trusted Host
+capabilities before any real model prompts, GitHub writes, Ask reply,
+or production listener activation. The test-only R9 work neither
+publishes nor activates that milestone.
 
 #317 Native Shell/B2 acceptance remains independent; #332–#334 own automatic
 Leaf recovery, durable Inbox and Cleanup.

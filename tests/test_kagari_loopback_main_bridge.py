@@ -5,6 +5,11 @@ existing #291 fixture; no production Task, credential, or GitHub mutation.
 """
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -16,6 +21,45 @@ from tests import test_kagari_vnext_main as main_fixture
 from tools.kagari_vnext_main_service import MainSupervisor
 import tools.kagari_vnext_main_service as service
 from tools.kagari_loopback_main_bridge import MainBridge, create_main_control_server
+
+
+# This code runs in a separate Python interpreter with no KUMIKI imports,
+# Task metadata object, Worktree handle, or MainSupervisor owner. The only
+# observation capability it receives is an exact loopback listening port.
+_FRESH_OBSERVER = r"""
+import json
+import sys
+import time
+from urllib.error import HTTPError
+from urllib.request import Request, ProxyHandler, build_opener
+
+port, issue = sys.argv[1:]
+base = "http://127.0.0.1:" + port + "/tasks/" + issue + "/"
+opener = build_opener(ProxyHandler({}))
+result = {}
+for endpoint in ("status", "asks"):
+    for _ in range(12):
+        try:
+            with opener.open(Request(base + endpoint), timeout=3) as response:
+                code = response.status
+                payload = json.loads(response.read(65537))
+        except HTTPError as error:
+            try:
+                code = error.code
+                payload = json.loads(error.read(65537))
+            finally:
+                error.close()
+        if code == 503 and payload.get("error_code") in (
+            "TASK_OBSERVATION_UNAVAILABLE", "ASK_OBSERVATION_UNAVAILABLE",
+        ):
+            time.sleep(0.15)
+            continue
+        result[endpoint] = {"code": code, "body": payload}
+        break
+    else:
+        raise RuntimeError("fresh caller cannot establish bounded readback")
+print(json.dumps(result, sort_keys=True))
+"""
 
 
 class MainBridgeHTTPTests(unittest.TestCase):
@@ -56,6 +100,178 @@ class MainBridgeHTTPTests(unittest.TestCase):
                 "expected_contract_id": expected or self.fixture.pub.contract_id}
         return self.get("/tasks/291/dispatch", body=body_override or body,
                         method="POST", headers=headers)
+
+    def _fresh_subprocess_read(self, issue: int) -> dict:
+        # No GitHub token, provider credentials, source checkout, Main,
+        # TestFixture, shared session handle or ambient OPENCODE_ variables.
+        # This subprocess can only observe the same Task via the loopback API.
+        with tempfile.TemporaryDirectory(prefix="kagari339-fresh-reader-") as home:
+            # This private process cwd/HOME is physically outside the entire
+            # synthetic Main/Worktree/metadata fixture, not merely a different
+            # Python object reference within the same shared directory.
+            self.assertFalse(Path(home).is_relative_to(self.fixture.fixture.temp_root))
+            env = {
+                "HOME": home,
+                "XDG_CONFIG_HOME": home,
+                "XDG_DATA_HOME": home,
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            observed = subprocess.run(
+                [sys.executable, "-B", "-c", _FRESH_OBSERVER,
+                 str(self.server.server_port), str(issue)],
+                cwd=home, env=env,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, timeout=18, check=False,
+            )
+        self.assertEqual(observed.returncode, 0, observed.stderr[-2000:])
+        self.assertLess(len(observed.stdout), 65536)
+        return json.loads(observed.stdout)
+
+    def _parent_started_observation(self, issue: int) -> dict:
+        # The parent, not the detached HTTP caller, obtains the original
+        # trusted Main-observed native root Session and Ask request identity.
+        for _ in range(12):
+            try:
+                result = self.main.observe(issue)
+            except main_fixture.MainError as error:
+                if error.code != "SESSION_OBSERVATION_UNAVAILABLE":
+                    raise
+                time.sleep(0.15)
+                continue
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["kickoff"], "SENT")
+            self.assertEqual(result["runtime"]["status"], "ok")
+            self.assertEqual(len(result["pending"]), 1)
+            return result
+        self.fail("parent Main could not establish a bounded native observation")
+
+    def test_fresh_process_after_dispatch_reads_same_task_and_pending_ask(self):
+        # Only a disposable fake OpenCode server receives a kickoff. There is
+        # no production agent, model request, user Answer or GitHub mutation.
+        with patch.object(service, "_host_state_home",
+                          return_value=self.fixture.fixture.temp_root):
+            with MainSupervisor(self.main):
+                receipt = self.send_dispatch()
+                authoritative = self._parent_started_observation(291)
+        self.assertEqual(receipt[0], 202)
+        self.assertEqual(receipt[1]["prompt_state"], "SUBMITTED")
+        self.assertEqual(len(self.fixture.prompts()), 1)
+        # The initiating request and Main dispatch-owner lifetime have ended.
+        # Two fresh, unrelated Python processes must recover the same facts.
+        first = self._fresh_subprocess_read(291)
+        second = self._fresh_subprocess_read(291)
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"],
+                         {"code": 200, "body": {"task": "291", "state": "BLOCKED"}})
+        self.assertEqual(first["asks"]["code"], 200)
+        ask_view = first["asks"]["body"]
+        self.assertEqual(ask_view["task"], "291")
+        self.assertEqual(ask_view["contract_id"], self.fixture.pub.contract_id)
+        self.assertEqual(
+            ask_view["root_session_id"],
+            authoritative["runtime"]["task"]["session_id"],
+        )
+        self.assertEqual(len(ask_view["pending"]), 1)
+        entry = ask_view["pending"][0]
+        self.assertEqual(
+            entry["request_id"], authoritative["pending"][0]["request_id"]
+        )
+        self.assertEqual(entry["kind"], "permission")
+        self.assertEqual(entry["upstream"]["id"], entry["request_id"])
+        self.assertEqual(entry["upstream"]["sessionID"], ask_view["root_session_id"])
+        self.assertEqual(len(self.fixture.prompts()), 1,
+                         "read-only fresh clients must not re-dispatch")
+
+    def test_two_independent_fresh_processes_observe_distinct_task_asks(self):
+        # The fixture's two synthetic #191 Contracts and fake OpenCode
+        # instances are isolated. No actual provider turn is sent.
+        self.fixture.facts[292] = {
+            "repository": "acme/widgets", "number": 292, "state": "OPEN",
+            "title": "Independent second Issue", "body": "Different approved Task.",
+        }
+        second = self.fixture.writer.create(
+            task="292", branch_ref="refs/heads/issue-292",
+            base_revision=self.fixture.base,
+            title=self.fixture.facts[292]["title"],
+            body=self.fixture.facts[292]["body"],
+        )
+        self.fixture.approved[292] = main_fixture.ApprovedTask(
+            292, "refs/heads/issue-292", self.fixture.base, second.contract_id,
+        )
+        self.fixture.ports[292] = main_fixture.next_port()
+        self.main = self.fixture.make_main()
+        bridge = MainBridge(self.main)
+        self.server.status_provider = bridge.status
+        self.server.ask_provider = bridge.asks
+        self.server.dispatch_provider = bridge.dispatch
+
+        def dispatch(item):
+            issue, contract = item
+            return self.get(
+                "/tasks/" + issue + "/dispatch", method="POST",
+                body={"schema_version": 1, "expected_contract_id": contract},
+            )
+        with patch.object(service, "_host_state_home",
+                          return_value=self.fixture.fixture.temp_root):
+            with MainSupervisor(self.main):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    receipts = list(pool.map(dispatch, [
+                        ("291", self.fixture.pub.contract_id),
+                        ("292", second.contract_id),
+                    ]))
+                original = {
+                    291: self._parent_started_observation(291),
+                    292: self._parent_started_observation(292),
+                }
+        self.assertEqual([code for code, _ in receipts], [202, 202])
+        self.assertEqual(len(self.fixture.prompts()), 2)
+
+        # The dispatching client and owner are gone. New subprocesses only
+        # have the HTTP port and requested Issue number, never the records.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, later = list(pool.map(self._fresh_subprocess_read, (291, 292)))
+        self.assertEqual(first["asks"]["code"], 200)
+        self.assertEqual(later["asks"]["code"], 200)
+        for expected, expected_contract, result in (
+            (291, self.fixture.pub.contract_id, first),
+            (292, second.contract_id, later),
+        ):
+            self.assertEqual(result["status"],
+                             {"code": 200,
+                              "body": {"task": str(expected), "state": "BLOCKED"}})
+            self.assertEqual(result["asks"]["body"]["task"], str(expected))
+            self.assertEqual(result["asks"]["body"]["contract_id"], expected_contract)
+            self.assertEqual(len(result["asks"]["body"]["pending"]), 1)
+            # The new process cannot choose or infer the expected binding:
+            # compare against Main's source observation captured beforehand.
+            self.assertEqual(
+                result["asks"]["body"]["root_session_id"],
+                original[expected]["runtime"]["task"]["session_id"],
+            )
+            self.assertEqual(
+                result["asks"]["body"]["pending"][0]["request_id"],
+                original[expected]["pending"][0]["request_id"],
+            )
+        self.assertNotEqual(
+            first["asks"]["body"]["root_session_id"],
+            later["asks"]["body"]["root_session_id"],
+        )
+        self.assertNotEqual(
+            first["asks"]["body"]["pending"][0]["request_id"],
+            later["asks"]["body"]["pending"][0]["request_id"],
+        )
+        self.assertEqual(len(self.fixture.prompts()), 2)
+
+    def test_fresh_process_cannot_infer_missing_ask_is_empty_success(self):
+        observed = self._fresh_subprocess_read(291)
+        self.assertEqual(observed["status"],
+                         {"code": 200, "body": {"task": "291", "state": "UNKNOWN"}})
+        self.assertEqual(observed["asks"],
+                         {"code": 409,
+                          "body": {"error_code": "ASK_SESSION_NOT_STARTED"}})
+        self.assertFalse(self.fixture.runtime.exists())
+        self.assertEqual(self.fixture.prompts(), [])
 
     def test_main_observe_before_start_does_not_report_completed(self):
         self.assertEqual(self.get("/tasks/291/status"),
