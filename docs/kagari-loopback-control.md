@@ -116,11 +116,16 @@ are reused. Metadata v2 remains independent.
 
 ## R4 native OpenCode read-only smoke and HTTP method correction
 
-The optional `tests.test_kagari_loopback_native_smoke` fixture is **disabled
-by default**; run with `KAGARI_339_NATIVE_SMOKE=1` to start two real
-OpenCode 1.18.35 `serve --pure` processes bound to 127.0.0.1 under distinct
-disposable HOME/XDG/workspace directories. The fixture creates two native
-root Sessions with read/edit Ask policies and uses the existing #292
+The optional `tests.native_kagari_loopback_smoke` fixture is deliberately
+**not discovered by canonical `tests/test*.py` CI**. Explicitly run
+`KAGARI_339_NATIVE_SMOKE=1 python3 -B -m unittest -v tests.native_kagari_loopback_smoke`
+to start two real OpenCode 1.18.35 `serve --pure` processes bound to
+127.0.0.1 under distinct disposable HOME/XDG/workspace directories. The opt-in
+module is deliberately outside the canonical `ci_contract_runner` discovery
+pattern; the strict unreviewed-Skip policy is unchanged. An explicit invocation
+without the opt-in environment or supported OpenCode executable **fails**,
+rather than returning a misleading successful Skip. The fixture creates two
+native root Sessions with read/edit Ask policies and uses the existing #292
 `OpenCode.verify_session`/`pending`/`status` read path. Both processes
 must be alive simultaneously with different root Session IDs, and neither
 native idle Session may be mistaken for a completed Task. No model prompt,

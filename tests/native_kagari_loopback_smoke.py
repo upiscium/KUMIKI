@@ -1,8 +1,11 @@
-"""#339 R4 opt-in native OpenCode 1.18.35 two-server read-only smoke.
+"""#339 opt-in native OpenCode 1.18.35 two-server read-only smoke.
 
-Disposable HOME/XDG and Worktrees; NO model prompt, Task dispatch, native Ask
-reply, live repository, credential, privileged Git, or persistent host service.
-A successful test proves only native server/session and #292 read APIs.
+Intentionally named native_*.py: canonical CI discovers only tests/test*.py.
+Run explicitly with KAGARI_339_NATIVE_SMOKE=1 and a working OpenCode 1.18.35.
+A missing opt-in or missing binary is an ERROR/FAIL, never a passing skip.
+Disposable HOME/XDG/worktrees; no model prompt, Task dispatch, Ask reply,
+live repository, credentials, privileged Git, or persistent host service.
+A successful test proves native server/session and #292 read APIs only.
 """
 from __future__ import annotations
 
@@ -22,17 +25,18 @@ from tools.kagari_vnext_opencode_control import OpenCode, TaskBinding, status
 from tools.kagari_vnext_session import SUPPORTED_OPENCODE
 
 
-@unittest.skipUnless(os.environ.get("KAGARI_339_NATIVE_SMOKE") == "1",
-                     "opt-in: isolate native OpenCode servers, no model prompts")
 class NativeWorkerSmokeTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.assertEqual(
+            os.environ.get("KAGARI_339_NATIVE_SMOKE"), "1",
+            "Native fixture requires explicit KAGARI_339_NATIVE_SMOKE=1 opt-in",
+        )
         self.temporary = tempfile.TemporaryDirectory(prefix="kagari339-native-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.worker_environments: list[dict[str, str]] = []
         self.binary = shutil.which("opencode")
-        if not self.binary:
-            self.skipTest("OpenCode unavailable")
+        self.assertIsNotNone(self.binary, "OpenCode 1.18.35 required; no silent skip")
         version = subprocess.run([self.binary, "--version"],
                                  capture_output=True, text=True,
                                  stdin=subprocess.DEVNULL, timeout=8, check=False)
