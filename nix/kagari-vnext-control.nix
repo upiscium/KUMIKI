@@ -12,6 +12,7 @@ let
     cp ${../tools/kagari_vnext_host_prepare.py} "$out/tools/kagari_vnext_host_prepare.py"
     cp ${../tools/kagari_vnext_attach.py} "$out/tools/kagari_vnext_attach.py"
     cp ${../tools/kagari_vnext_attachment_gate.py} "$out/tools/kagari_vnext_attachment_gate.py"
+    cp ${../tools/kagari_vnext_runtime.py} "$out/tools/kagari_vnext_runtime.py"
     cp ${../tools/kagari_vnext_main.py} "$out/tools/kagari_vnext_main.py"
     cp ${../tools/kagari_vnext_main_observation.py} "$out/tools/kagari_vnext_main_observation.py"
     cp ${../tools/kagari_vnext_main_service.py} "$out/tools/kagari_vnext_main_service.py"
@@ -79,7 +80,14 @@ let
       exec ${pkgs.python3}/bin/python3 -B ${sources}/tools/kagari_vnext_main_service.py "$@"
     '';
   };
+  runtime = pkgs.writeShellApplication {
+    name = "kagari-vnext-runtime";
+    runtimeInputs = [ pkgs.git pkgs.gh ];
+    text = ''
+      exec ${pkgs.python3}/bin/python3 -B ${sources}/tools/kagari_vnext_runtime.py "$@"
+    '';
+  };
 in pkgs.symlinkJoin {
   name = "kagari-vnext-control";
-  paths = [ task session worktreeInstall hostPrepare hostAttach attachmentGate main ];
+  paths = [ task session worktreeInstall hostPrepare hostAttach attachmentGate main runtime ];
 }
