@@ -8,6 +8,16 @@
 
 See [KUMIKI and KAGARI naming and migration](docs/kumiki-kagari-identity.md) and [architecture decisions](docs/adr/README.md). Historical Agent Core v3 and internal v4 protocol names remain unchanged for compatibility.
 
+The opt-in [Claude CLI preflight candidate](docs/kagari-vnext-claude-preflight.md)
+is a diagnostic-only first slice of #340, not an enabled Task executor. OpenCode
+remains unchanged; Claude execution and Human Ask/recovery are **UNQUALIFIED**.
+The follow-on [Lane B offline fixture candidate](docs/kagari-vnext-claude-lane-b.md)
+tests a fixed personal-config, no-tools diagnostic protocol without enabling
+Claude dispatch in Main or providing a live model transport.
+The [Main executor-selection gate](docs/kagari-vnext-executor-selection.md)
+accepts an explicit `claude-cli` choice for factual observation, but refuses
+Claude dispatch, guarded PR continuation and cleanup while it is unqualified.
+
 ## Develop KUMIKI
 
 The repository root `flake.nix` is the development-environment source of truth. Its default devShell provides the repository tools required for KUMIKI development, including `just`, `python3`, `git`, and `gh`.

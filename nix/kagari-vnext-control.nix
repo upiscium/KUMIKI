@@ -13,12 +13,14 @@ let
     cp ${../tools/kagari_vnext_attach.py} "$out/tools/kagari_vnext_attach.py"
     cp ${../tools/kagari_vnext_attachment_gate.py} "$out/tools/kagari_vnext_attachment_gate.py"
     cp ${../tools/kagari_vnext_main.py} "$out/tools/kagari_vnext_main.py"
+    cp ${../tools/kagari_vnext_executor_selection.py} "$out/tools/kagari_vnext_executor_selection.py"
     cp ${../tools/kagari_vnext_main_observation.py} "$out/tools/kagari_vnext_main_observation.py"
     cp ${../tools/kagari_vnext_main_service.py} "$out/tools/kagari_vnext_main_service.py"
     cp ${../tools/kagari_vnext_trusted_host.py} "$out/tools/kagari_vnext_trusted_host.py"
     cp ${../tools/kagari_vnext_issue_bootstrap.py} "$out/tools/kagari_vnext_issue_bootstrap.py"
     cp ${../tools/kagari_vnext_progress.py} "$out/tools/kagari_vnext_progress.py"
     cp ${../tools/kagari_vnext_test_evidence.py} "$out/tools/kagari_vnext_test_evidence.py"
+    cp ${../tools/kagari_vnext_claude_preflight.py} "$out/tools/kagari_vnext_claude_preflight.py"
     cp ${../components/agent-core-v4/issue_worktree.py} "$out/components/agent-core-v4/issue_worktree.py"
     cp ${../components/agent-core-v4/issue_worktree_cleanup.py} "$out/components/agent-core-v4/issue_worktree_cleanup.py"
     cp ${../components/agent-core-v4/evidence.py} "$out/components/agent-core-v4/evidence.py"
@@ -79,7 +81,14 @@ let
       exec ${pkgs.python3}/bin/python3 -B ${sources}/tools/kagari_vnext_main_service.py "$@"
     '';
   };
+  # Diagnostic only: this does not register or activate a Claude executor.
+  claudePreflight = pkgs.writeShellApplication {
+    name = "kagari-vnext-claude-preflight";
+    text = ''
+      exec ${pkgs.python3}/bin/python3 -B ${sources}/tools/kagari_vnext_claude_preflight.py "$@"
+    '';
+  };
 in pkgs.symlinkJoin {
   name = "kagari-vnext-control";
-  paths = [ task session worktreeInstall hostPrepare hostAttach attachmentGate main ];
+  paths = [ task session worktreeInstall hostPrepare hostAttach attachmentGate main claudePreflight ];
 }

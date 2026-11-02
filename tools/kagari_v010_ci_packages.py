@@ -66,7 +66,9 @@ VNEXT_MAIN_ENTRYPOINTS = {
     "kagari-vnext-worktree-install": "tools/kagari_vnext_worktree_ignore.py",
     "kagari-vnext-host-prepare": "tools/kagari_vnext_host_prepare.py",
     "kagari-vnext-attach": "tools/kagari_vnext_attach.py",
+    "kagari-vnext-attachment-gate": "tools/kagari_vnext_attachment_gate.py",
     "kagari-vnext-main": "tools/kagari_vnext_main_service.py",
+    "kagari-vnext-claude-preflight": "tools/kagari_vnext_claude_preflight.py",
 }
 SHARD_RANGE = range(8)
 
@@ -392,7 +394,7 @@ def verify_package(root: Path, package: str, path: Path) -> None:
         verify_package(root,"composed",composed_root)
         verify_package(root,"native",native_root)
     elif package == "vnext-main":
-        # This symlinkJoin has no GA qualification receipt. Verify all five
+        # This symlinkJoin has no GA qualification receipt. Verify the declared
         # entrypoints and their single shared immutable source copy instead.
         expected = VNEXT_MAIN_ENTRYPOINTS
         roots = set()

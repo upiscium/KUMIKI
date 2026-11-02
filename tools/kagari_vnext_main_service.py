@@ -29,6 +29,15 @@ else:
     from kagari_vnext_main import (
         ApprovedTask, InitialCollaboration, MainError, RepositoryMain, github_issue_reader)
 
+try:
+    from .kagari_vnext_executor_selection import (
+        CLAUDE_CLI, OPENCODE, is_executor_name,
+    )
+except ImportError:
+    from kagari_vnext_executor_selection import (
+        CLAUDE_CLI, OPENCODE, is_executor_name,
+    )
+
 V4 = Path(__file__).resolve().parents[1] / "components/agent-core-v4"
 import sys
 sys.path.insert(0, str(V4))
@@ -58,15 +67,22 @@ def _exact_dir(path: Path, name: str) -> Path:
     return path
 
 
-def load_selection(path: Path) -> dict[str, Any]:
-    """Trusted operator's explicit Issue selection, never an authority mint."""
-    try:
-        if (not path.is_absolute() or path.is_symlink()
-                or not path.is_file() or path.stat().st_size > 64_000):
-            raise ValueError("invalid plan file")
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError):
-        raise MainError("MAIN_PLAN_INVALID") from None
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _validate_selection(data: Any, *, legacy_python: bool = False) -> dict[str, Any]:
+    """Validate the closed plan schema for both file and Python callers."""
+    # Existing in-process hosts supplied a mapping rather than a serialized
+    # plan and omitted its version tag. Preserve that API, but not for files;
+    # all executor/task fields still pass the same closed-schema validation.
+    if legacy_python and type(data) is dict and "schema_version" not in data:
+        data = {"schema_version": 1, **data}
     required = {"schema_version", "project_root", "repository", "runtime_home", "tasks"}
     optional = {"remote", "agent", "model", "opencode_bin", "github_bin"}
     if (type(data) is not dict or data.keys() - required - optional
@@ -97,17 +113,25 @@ def load_selection(path: Path) -> dict[str, Any]:
     seen_ports: set[int] = set()
     for item in tasks:
         required_task = {
-            "issue", "branch_ref", "base_revision", "contract_id", "port"}
+            "issue", "branch_ref", "base_revision", "contract_id"}
         if (type(item) is not dict or not required_task <= item.keys()
-                or item.keys() - required_task - {"pr_number", "evidence",
-                                                 "cleanup"}):
+                or item.keys() - required_task - {"executor", "port", "pr_number",
+                                                 "evidence", "cleanup"}):
+            raise MainError("MAIN_PLAN_INVALID")
+        executor = item.get("executor", OPENCODE)
+        if not is_executor_name(executor):
             raise MainError("MAIN_PLAN_INVALID")
         number = item["issue"]
-        port = item["port"]
         if (type(number) is not int or not 1 <= number <= 10**9
-                or number in seen_issues
-                or type(port) is not int or not 1024 <= port <= 65535
-                or port in seen_ports):
+                or number in seen_issues):
+            raise MainError("MAIN_PLAN_INVALID")
+        if executor == OPENCODE:
+            port = item.get("port")
+            if ("port" not in item or type(port) is not int
+                    or not 1024 <= port <= 65535 or port in seen_ports):
+                raise MainError("MAIN_PLAN_INVALID")
+            seen_ports.add(port)
+        elif "port" in item or "cleanup" in item:
             raise MainError("MAIN_PLAN_INVALID")
         if (type(item["base_revision"]) is not str or
                 not re.fullmatch(r"(?:[a-f0-9]{40}|[a-f0-9]{64})",
@@ -156,8 +180,20 @@ def load_selection(path: Path) -> dict[str, Any]:
                     and item["pr_number"] != cleanup["pull_request"]):
                 raise MainError("MAIN_PLAN_INVALID")
         seen_issues.add(number)
-        seen_ports.add(port)
     return data
+
+
+def load_selection(path: Path) -> dict[str, Any]:
+    """Trusted operator's explicit Issue selection, never an authority mint."""
+    try:
+        if (not path.is_absolute() or path.is_symlink()
+                or not path.is_file() or path.stat().st_size > 64_000):
+            raise ValueError("invalid plan file")
+        data = json.loads(path.read_text(encoding="utf-8"),
+                          object_pairs_hook=_unique_json_object)
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        raise MainError("MAIN_PLAN_INVALID") from None
+    return _validate_selection(data)
 
 
 @dataclass(frozen=True)
@@ -185,6 +221,7 @@ class MainHostCapabilities:
 def build_main(
     plan: dict[str, Any], *, host: MainHostCapabilities | None = None,
 ) -> RepositoryMain:
+    plan = _validate_selection(plan, legacy_python=True)
     if host is not None and type(host) is not MainHostCapabilities:
         raise MainError("MAIN_HOST_CAPABILITIES_INVALID")
     _exact_dir(Path(plan["project_root"]), "PRIMARY_PROJECT_REQUIRED")
@@ -197,9 +234,11 @@ def build_main(
     approved = {
         item["issue"]: ApprovedTask(
             item["issue"], item["branch_ref"], item["base_revision"],
-            item["contract_id"]) for item in plan["tasks"]
+            item["contract_id"], item.get("executor", OPENCODE))
+        for item in plan["tasks"]
     }
-    ports = {item["issue"]: item["port"] for item in plan["tasks"]}
+    ports = {item["issue"]: item["port"] for item in plan["tasks"]
+             if item.get("executor", OPENCODE) == OPENCODE}
     configured_model = plan.get("model")
     model = (
         (configured_model["provider_id"], configured_model["model_id"])
@@ -239,16 +278,31 @@ def build_cleanup_handlers(
     """
     if type(main) is not RepositoryMain or type(plan) is not dict:
         raise MainError("MAIN_CLEANUP_CONFIGURATION_INVALID")
+    items = plan.get("tasks", [])
+    if type(items) is list:
+        for item in items:
+            if type(item) is dict:
+                executor_name = item.get("executor", OPENCODE)
+                if (type(executor_name) is str and executor_name == CLAUDE_CLI
+                        and "cleanup" in item):
+                    raise MainError("MAIN_CLEANUP_CONFIGURATION_INVALID")
+    plan = _validate_selection(plan, legacy_python=True)
     handlers: dict[int, Callable[[], CleanupReceipt]] = {}
     for item in plan.get("tasks", []):
         policy = item.get("cleanup")
-        if policy is None:
-            continue
         issue = item["issue"]
         choice = main.approved.get(issue)
-        if (choice is None or choice.branch_ref != item["branch_ref"]
+        if choice is None:
+            raise MainError("MAIN_CLEANUP_CONFIGURATION_INVALID")
+        selected_executor = main._selected_executor(issue)
+        if (selected_executor != item.get("executor", OPENCODE)
+                or choice.branch_ref != item["branch_ref"]
                 or choice.base_revision != item["base_revision"]
                 or choice.contract_id != item["contract_id"]):
+            raise MainError("MAIN_CLEANUP_CONFIGURATION_INVALID")
+        if policy is None:
+            continue
+        if selected_executor == CLAUDE_CLI:
             raise MainError("MAIN_CLEANUP_CONFIGURATION_INVALID")
         backend = IssueWorktreeCleanup(
             IssueWorktreeAllocator(main.store),
@@ -258,8 +312,8 @@ def build_cleanup_handlers(
                 main._runtime(issue)),
         )
 
-        def cleanup_one(*, selected=choice, executor=backend,
-                        request=policy) -> CleanupReceipt:
+        def cleanup_one(*, selected=choice, selected_name=selected_executor,
+                        executor=backend, request=policy) -> CleanupReceipt:
             # The returned callable can also be invoked directly by a trusted
             # host. It must not bypass the same-repository Main singleton.
             # Hold the guard across the *entire* potentially destructive #286
@@ -269,6 +323,9 @@ def build_cleanup_handlers(
                 if owner is None:
                     raise MainError("MAIN_OWNER_REQUIRED")
                 owner._assert_owned(main)
+                current_name = main._selected_executor(selected.issue)
+                if current_name != selected_name or current_name != OPENCODE:
+                    raise MainError("MAIN_CLEANUP_CONFIGURATION_INVALID")
                 return executor.cleanup(
                     task=str(selected.issue),
                     base_revision=selected.base_revision,
@@ -534,6 +591,7 @@ class MainSupervisor:
             for issue in sorted(self.main.approved):
                 if dispatch and issue in self.cleanup_for_issue:
                     try:
+                        self.main._require_executor_effects(issue)
                         receipt = self.cleanup_for_issue[issue]()
                         if type(receipt) is not CleanupReceipt:
                             raise IssueWorktreeError("CLEANUP_RESULT_INVALID")
