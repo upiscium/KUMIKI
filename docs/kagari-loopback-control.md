@@ -259,3 +259,38 @@ publishes nor activates that milestone.
 
 #317 Native Shell/B2 acceptance remains independent; #332–#334 own automatic
 Leaf recovery, durable Inbox and Cleanup.
+
+## R10 immutable Nix source inclusion (unactivated)
+
+The two existing #339 transport source modules are copied into the same
+`kagari-vnext-control-sources` derivation as the existing #291 Main,
+#163 native Session and #256 runtime. The source-copy manifest is exact
+and validated by the existing vNext CI package receipt/source hash checks.
+The modules remain importable by a **trusted Host** from an explicitly
+selected immutable source root, not from model-authored paths.
+
+- `tools/kagari_loopback_control.py`: localhost-only HTTP transport.
+- `tools/kagari_loopback_main_bridge.py`: bound adapter to an already
+  selected `RepositoryMain`; its `create_main_control_server(main)`
+  requires that in-process Main object. The package copy does not
+  construct a Main or grant it dispatch authority.
+- There is **no** new `kagari-control-server` CLI, process supervisor,
+  daemon, service unit, default port, automatic listening socket, Ask
+  reply endpoint, background queue, or second Task/metadata store.
+- The supported `kagari-vnext-main` / `kagari-vnext-runtime`
+  entrypoints and installed v0.1.0 GA remain unchanged. Activation still
+  requires a separately qualified, Host-owned #291/#256 lifecycle and
+  #194 operation capabilities. A Nix source artifact is **not** a
+  production-ready or installed Control Server.
+
+The canonical regression `tests.test_kagari_loopback_package` checks
+the exact two source-copy declarations and absence of a new listener
+entrypoint. An independent, disposable Nix package build must verify
+that the immutable installed copies have the same bytes as the selected
+checkout; mere Nix evaluation is insufficient evidence for those bytes.
+
+Outstanding real E2E gates are unchanged: #337 Metadata v2's protected
+writer/remote-CAS proof, #291 bounded real Task/Contract/PR-first
+Host operations, #256 attached Main startup/shutdown, a working
+approved model/provider and #292 Human Ask reply authority. This R10
+source inclusion creates none of them.
