@@ -16,6 +16,9 @@ let
     cp ${../tools/kagari_vnext_main.py} "$out/tools/kagari_vnext_main.py"
     cp ${../tools/kagari_vnext_main_observation.py} "$out/tools/kagari_vnext_main_observation.py"
     cp ${../tools/kagari_vnext_main_service.py} "$out/tools/kagari_vnext_main_service.py"
+    # #339: host-injected loopback Control Server/bridge, not a new CLI launcher.
+    cp ${../tools/kagari_loopback_control.py} "$out/tools/kagari_loopback_control.py"
+    cp ${../tools/kagari_loopback_main_bridge.py} "$out/tools/kagari_loopback_main_bridge.py"
     cp ${../tools/kagari_vnext_trusted_host.py} "$out/tools/kagari_vnext_trusted_host.py"
     cp ${../tools/kagari_vnext_issue_bootstrap.py} "$out/tools/kagari_vnext_issue_bootstrap.py"
     cp ${../tools/kagari_vnext_progress.py} "$out/tools/kagari_vnext_progress.py"
