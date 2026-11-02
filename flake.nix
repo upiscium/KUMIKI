@@ -62,6 +62,8 @@
             kagari = import ./nix/kagari-v010-ga-stable.nix { inherit pkgs; };
             # vNext Task Ask/status facade, deliberately separate from GA.
             kagari-control = import ./nix/kagari-vnext-control.nix { inherit pkgs; };
+            # Metadata v2 Host sources are opt-in and never alter kagari-control.
+            kagari-metadata-v2-host = import ./nix/kagari-metadata-v2-host.nix { inherit pkgs; };
           };
         })
     // {
