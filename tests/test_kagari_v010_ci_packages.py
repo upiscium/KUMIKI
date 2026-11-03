@@ -200,6 +200,7 @@ class CIPackageSetupTests(unittest.TestCase):
             "kagari-vnext-attach": "tools/kagari_vnext_attach.py",
             "kagari-vnext-attachment-gate": "tools/kagari_vnext_attachment_gate.py",
             "kagari-vnext-main": "tools/kagari_vnext_main_service.py",
+            "kagari-vnext-runtime": "tools/kagari_vnext_runtime.py",
             "kagari-vnext-claude-preflight": "tools/kagari_vnext_claude_preflight.py",
         }
         self.assertEqual(p.VNEXT_MAIN_ENTRYPOINTS, expected)

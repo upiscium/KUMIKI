@@ -26,6 +26,7 @@ MODULES = {
 # Source-only opt-in next-MVI code. Not part of the fixed GA package manifest.
 UNRELEASED_NEXT_MVI_MODULES = {
     "issue_worktree.py", "issue_worktree_cleanup.py",
+    "metadata_v2.py", "metadata_v2_archive.py",
 }
 
 

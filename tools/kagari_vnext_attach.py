@@ -48,13 +48,15 @@ def immutable_dir(path: Path) -> dict[str, int]:
     return stamp(info)
 
 
-def package_identity(package: Path) -> dict[str, Any]:
+def package_identity(package: Path, *, include_main: bool = False) -> dict[str, Any]:
     need(package.is_absolute() and not package.is_symlink()
          and package.resolve(strict=True) == package, "PACKAGE_ROOT_NOT_CANONICAL")
     root = immutable_dir(package)
     binary_dir = immutable_dir(package / "bin")
     binaries = {}
-    for name in REQUIRED_BINARIES:
+    # Keep the existing Preview receipt schema unchanged. The Runtime facade
+    # reuses these exact binary source/owner/hash checks for Main as well.
+    for name in REQUIRED_BINARIES + (("kagari-vnext-main",) if include_main else ()):
         entry = package / "bin" / name
         link_info = entry.lstat()
         need((stat.S_ISREG(link_info.st_mode) or stat.S_ISLNK(link_info.st_mode))

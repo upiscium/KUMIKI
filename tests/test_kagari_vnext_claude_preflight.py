@@ -696,17 +696,17 @@ sys.exit(73)
         result = self.run_check()
         self.assertEqual(result["status"], "VERSION_CHECKED")
         calls = self.calls()
-        self.assertEqual([call["argv"] for call in calls], [["--version"], ["--help"]])
-        for call in calls:
-            self.assertEqual(call["cwd"], str(self.project))
-            self.assertTrue(call["stdin_eof"])
+        self.assertEqual([entry["argv"] for entry in calls], [["--version"], ["--help"]])
+        for entry in calls:
+            self.assertEqual(entry["cwd"], str(self.project))
+            self.assertTrue(entry["stdin_eof"])
             self.assertEqual(
-                set(call["env"]),
+                set(entry["env"]),
                 {"HOME", "USER", "LOGNAME", "PATH", "LANG", "CLAUDE_CONFIG_DIR"},
             )
-            self.assertEqual(call["env"]["CLAUDE_CONFIG_DIR"], str(self.personal))
-            self.assertNotIn("--print", call["argv"])
-            self.assertNotIn("-p", call["argv"])
+            self.assertEqual(entry["env"]["CLAUDE_CONFIG_DIR"], str(self.personal))
+            self.assertNotIn("--print", entry["argv"])
+            self.assertNotIn("-p", entry["argv"])
         self.assert_safe_output(result)
 
 

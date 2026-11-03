@@ -12,10 +12,14 @@ let
     cp ${../tools/kagari_vnext_host_prepare.py} "$out/tools/kagari_vnext_host_prepare.py"
     cp ${../tools/kagari_vnext_attach.py} "$out/tools/kagari_vnext_attach.py"
     cp ${../tools/kagari_vnext_attachment_gate.py} "$out/tools/kagari_vnext_attachment_gate.py"
+    cp ${../tools/kagari_vnext_runtime.py} "$out/tools/kagari_vnext_runtime.py"
     cp ${../tools/kagari_vnext_main.py} "$out/tools/kagari_vnext_main.py"
     cp ${../tools/kagari_vnext_executor_selection.py} "$out/tools/kagari_vnext_executor_selection.py"
     cp ${../tools/kagari_vnext_main_observation.py} "$out/tools/kagari_vnext_main_observation.py"
     cp ${../tools/kagari_vnext_main_service.py} "$out/tools/kagari_vnext_main_service.py"
+    # #339: host-injected loopback Control Server/bridge, not a new CLI launcher.
+    cp ${../tools/kagari_loopback_control.py} "$out/tools/kagari_loopback_control.py"
+    cp ${../tools/kagari_loopback_main_bridge.py} "$out/tools/kagari_loopback_main_bridge.py"
     cp ${../tools/kagari_vnext_trusted_host.py} "$out/tools/kagari_vnext_trusted_host.py"
     cp ${../tools/kagari_vnext_issue_bootstrap.py} "$out/tools/kagari_vnext_issue_bootstrap.py"
     cp ${../tools/kagari_vnext_progress.py} "$out/tools/kagari_vnext_progress.py"
@@ -81,7 +85,14 @@ let
       exec ${pkgs.python3}/bin/python3 -B ${sources}/tools/kagari_vnext_main_service.py "$@"
     '';
   };
-  # Diagnostic only: this does not register or activate a Claude executor.
+  runtime = pkgs.writeShellApplication {
+    name = "kagari-vnext-runtime";
+    runtimeInputs = [ pkgs.git pkgs.gh ];
+    text = ''
+      exec ${pkgs.python3}/bin/python3 -B ${sources}/tools/kagari_vnext_runtime.py "$@"
+    '';
+  };
+  # Diagnostic only: does not register or activate a Claude executor.
   claudePreflight = pkgs.writeShellApplication {
     name = "kagari-vnext-claude-preflight";
     text = ''
@@ -90,5 +101,5 @@ let
   };
 in pkgs.symlinkJoin {
   name = "kagari-vnext-control";
-  paths = [ task session worktreeInstall hostPrepare hostAttach attachmentGate main claudePreflight ];
+  paths = [ task session worktreeInstall hostPrepare hostAttach attachmentGate main runtime claudePreflight ];
 }
