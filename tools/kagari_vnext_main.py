@@ -51,6 +51,21 @@ else:
     from kagari_vnext_opencode_control import OpenCode, TaskBinding
 
 
+def _v2_api():
+    """Load optional #337 v2 reader only for an explicitly selected Host lane.
+
+    Keeping this lazy prevents a circular import through the existing
+    #337 bootstrap -> #291 trusted Host -> Main service dependency.
+    """
+    if __package__:
+        from .kagari_vnext_main_v2_observation import (
+            V2ReadOnlyMainHost, V2MainObservationRefused)
+    else:
+        from kagari_vnext_main_v2_observation import (
+            V2ReadOnlyMainHost, V2MainObservationRefused)
+    return V2ReadOnlyMainHost, V2MainObservationRefused
+
+
 DISPATCH_LOCK_TIMEOUT_SECONDS = 8.0
 
 
@@ -153,6 +168,7 @@ class RepositoryMain:
         evidence_for_issue: dict[int, tuple[EvidenceRef, ...]] | None = None,
         read_pr: Callable | None = None,
         initial_collaboration_for_issue: Callable[[int, Path], InitialCollaboration] | None = None,
+        v2_readonly_for_issue: dict[int, V2ReadOnlyMainHost] | None = None,
     ) -> None:
         if not isinstance(store, MetadataStore) or not callable(read_issue):
             raise MainError("MAIN_CONFIGURATION_INVALID")
@@ -177,6 +193,24 @@ class RepositoryMain:
                 and not callable(initial_collaboration_for_issue)):
             raise MainError("MAIN_INITIAL_COLLABORATION_INVALID")
         self.initial_collaboration_for_issue = initial_collaboration_for_issue
+        if v2_readonly_for_issue is not None and type(v2_readonly_for_issue) is not dict:
+            raise MainError("V2_MAIN_HOST_INVALID")
+        self.v2_readonly_for_issue = dict(v2_readonly_for_issue or {})
+        # R5A0 is an all-observe Host lane. Do not let an incomplete v2 map
+        # leave a different Issue eligible for legacy v1 Task effects.
+        if (self.v2_readonly_for_issue
+                and self.v2_readonly_for_issue.keys() != self.approved.keys()):
+            raise MainError("V2_MAIN_PARTIAL_HOST_SELECTION")
+        if self.v2_readonly_for_issue:
+            V2ReadOnlyMainHost, _ = _v2_api()
+        else:
+            V2ReadOnlyMainHost = None
+        if any(type(n) is not int or n not in self.approved
+               or type(capability) is not V2ReadOnlyMainHost
+               or capability.selection.issue != n
+               or capability.selection.repository != self.store.repository
+               for n, capability in self.v2_readonly_for_issue.items()):
+            raise MainError("V2_MAIN_HOST_BINDING_MISMATCH")
         if (any(n not in self.approved or type(v) is not int or v < 1
                 for n, v in self.pr_for_issue.items())
                 or any(n not in self.approved or type(v) is not tuple
@@ -450,6 +484,9 @@ class RepositoryMain:
         """
         if type(issue) is not int or issue not in self.approved:
             raise MainError("ISSUE_NOT_APPROVED")
+        # R5A0 must never fall back to the v1 dispatcher for a v2 Issue.
+        if self.v2_readonly_for_issue:
+            raise MainError("V2_MAIN_EXECUTION_NOT_QUALIFIED")
         with self._main_owner_guard:
             owner = self._main_owner
             if owner is None:
@@ -664,6 +701,8 @@ class RepositoryMain:
         """
         if type(issue) is not int or issue not in self.approved:
             raise MainError("ISSUE_NOT_APPROVED")
+        if self.v2_readonly_for_issue:
+            raise MainError("V2_MAIN_PR_NOT_QUALIFIED")
         with self._main_owner_guard:
             owner = self._main_owner
             if owner is None:
@@ -694,6 +733,24 @@ class RepositoryMain:
             except TaskCollaborationError:
                 raise MainError("GUARDED_PR_PUBLICATION_REFUSED") from None
 
+    def observe_v2(self, issue: int) -> dict:
+        """Observe current v2 Host authority only; never fall back to v1."""
+        if type(issue) is not int or issue not in self.approved:
+            raise MainError("ISSUE_NOT_APPROVED")
+        observer = self.v2_readonly_for_issue.get(issue)
+        if observer is None:
+            raise MainError("V2_MAIN_HOST_REQUIRED")
+        _, V2MainObservationRefused = _v2_api()
+        choice = self.approved[issue]
+        try:
+            return observer.observe(
+                project=self.store.root, repository=self.store.repository,
+                issue=issue, branch_ref=choice.branch_ref,
+                base_revision=choice.base_revision,
+                contract_id=choice.contract_id, read_issue=self.read_issue)
+        except V2MainObservationRefused as exc:
+            raise MainError(exc.code) from None
+
     def observe(self, issue: int) -> dict:
         """Factually observe Task without writing FETCH_HEAD into Product Git.
 
@@ -701,6 +758,8 @@ class RepositoryMain:
         object/ref environment; #144 Git HEAD/status still reads the genuine
         Project or exact Issue Worktree. No Main lock, Task or PR effect.
         """
+        if issue in self.v2_readonly_for_issue:
+            return self.observe_v2(issue)
         try:
             with isolated_metadata_observation(self.store) as reader:
                 return self._observe_isolated(issue, reader)

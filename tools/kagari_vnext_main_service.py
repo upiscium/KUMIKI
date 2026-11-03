@@ -182,10 +182,34 @@ class MainHostCapabilities:
             raise MainError("MAIN_HOST_CAPABILITIES_INVALID")
 
 
+@dataclass(frozen=True)
+class MainV2ReadOnlyCapabilities:
+    """Host-selected v2 read-only lane; never a new Main or Task grant."""
+
+    read_issue: Callable[[int], dict]
+    observers: dict[int, V2ReadOnlyMainHost]
+
+    def __post_init__(self) -> None:
+        # Same delayed optional import as Main, to avoid #337's bootstrap cycle.
+        if __package__:
+            from .kagari_vnext_main_v2_observation import V2ReadOnlyMainHost
+        else:
+            from kagari_vnext_main_v2_observation import V2ReadOnlyMainHost
+        if (not callable(self.read_issue) or type(self.observers) is not dict
+                or not self.observers
+                or any(type(n) is not int
+                       or type(observer) is not V2ReadOnlyMainHost
+                       or observer.selection.issue != n
+                       for n, observer in self.observers.items())):
+            raise MainError("V2_MAIN_HOST_INVALID")
+
+
 def build_main(
-    plan: dict[str, Any], *, host: MainHostCapabilities | None = None,
+    plan: dict[str, Any], *,
+    host: MainHostCapabilities | MainV2ReadOnlyCapabilities | None = None,
 ) -> RepositoryMain:
-    if host is not None and type(host) is not MainHostCapabilities:
+    if host is not None and type(host) not in (
+            MainHostCapabilities, MainV2ReadOnlyCapabilities):
         raise MainError("MAIN_HOST_CAPABILITIES_INVALID")
     _exact_dir(Path(plan["project_root"]), "PRIMARY_PROJECT_REQUIRED")
     try:
@@ -224,7 +248,10 @@ def build_main(
             plan["repository"], gh=plan.get("github_bin", "gh"))
             if pr_for_issue else None),
         initial_collaboration_for_issue=(
-            host.initial_collaboration_for_issue if host is not None else None),
+            host.initial_collaboration_for_issue
+            if type(host) is MainHostCapabilities else None),
+        v2_readonly_for_issue=(
+            host.observers if type(host) is MainV2ReadOnlyCapabilities else None),
     )
 
 
@@ -245,6 +272,8 @@ def build_cleanup_handlers(
         if policy is None:
             continue
         issue = item["issue"]
+        if issue in main.v2_readonly_for_issue:
+            raise MainError("V2_MAIN_CLEANUP_NOT_QUALIFIED")
         choice = main.approved.get(issue)
         if (choice is None or choice.branch_ref != item["branch_ref"]
                 or choice.base_revision != item["base_revision"]
@@ -432,6 +461,9 @@ class MainSupervisor:
     def __enter__(self) -> MainSupervisor:
         if self._entered:
             raise MainError("MAIN_ALREADY_ACTIVE")
+        if (not self.observe_only and type(self.main) is RepositoryMain
+                and self.main.v2_readonly_for_issue):
+            raise MainError("V2_MAIN_EXECUTION_NOT_QUALIFIED")
         self._verify_attachment()
         if self.observe_only:
             # Observation is a reader: no repository lock file, no exclusive
@@ -571,9 +603,16 @@ class MainSupervisor:
                             "runtime": launched["runtime"],
                         })
                     else:
-                        entries.append({
-                            "issue": issue, "status": "ok",
-                            "observation": self.main.observe(issue)})
+                        observed = self.main.observe(issue)
+                        if observed.get("status") == "blocked":
+                            entries.append({
+                                "issue": issue, "status": "blocked",
+                                "reason": observed["reason"],
+                                "observation": observed})
+                        else:
+                            entries.append({
+                                "issue": issue, "status": "ok",
+                                "observation": observed})
                 except MainError as err:
                     # One blocked Task does not expand authorization or silently
                     # suppress observations of other approved Tasks.
@@ -633,7 +672,8 @@ def attached_supervisor(
 
 
 def main(
-    argv: list[str] | None = None, *, host: MainHostCapabilities | None = None,
+    argv: list[str] | None = None, *,
+    host: MainHostCapabilities | MainV2ReadOnlyCapabilities | None = None,
     attachment: MainAttachmentConfig | None = None,
 ) -> int:
     """Ordinary one-cycle/observe/follow runner, optionally called by a host.
@@ -654,6 +694,9 @@ def main(
     try:
         plan = load_selection(args.config)
         controller = build_main(plan, host=host)
+        if (type(host) is MainV2ReadOnlyCapabilities
+                and args.operation != "observe"):
+            raise MainError("V2_MAIN_EXECUTION_NOT_QUALIFIED")
         if args.follow and not 2 <= args.interval <= 3600:
             raise MainError("MAIN_INTERVAL_INVALID")
         if attachment is not None and type(attachment) is not MainAttachmentConfig:
