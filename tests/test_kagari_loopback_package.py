@@ -44,16 +44,17 @@ class LoopbackPackageContractTests(unittest.TestCase):
             "kagari-vnext-worktree-install", "kagari-vnext-host-prepare",
             "kagari-vnext-attach", "kagari-vnext-attachment-gate",
             "kagari-vnext-main", "kagari-vnext-runtime",
+            "kagari-vnext-claude-preflight",
         )
         named_outputs = re.findall(r'(?m)^\s*name = "([^"]+)";', definition)
         self.assertCountEqual(
             named_outputs, (*expected_bins, "kagari-vnext-control"),
         )
-        self.assertEqual(definition.count("pkgs.writeShellApplication {"), 8)
+        self.assertEqual(definition.count("pkgs.writeShellApplication {"), 9)
         self.assertEqual(definition.count("in pkgs.symlinkJoin {"), 1)
         self.assertIn(
             "paths = [ task session worktreeInstall hostPrepare "
-            "hostAttach attachmentGate main runtime ];", definition,
+            "hostAttach attachmentGate main runtime claudePreflight ];", definition,
         )
         self.assertEqual(
             len(re.findall(r'cp \$\{\.\./tools/kagari_loopback_'

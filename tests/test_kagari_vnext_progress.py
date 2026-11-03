@@ -81,7 +81,6 @@ class TaskProgressObservationTests(unittest.TestCase):
         self.addCleanup(self.inner.doCleanups)
 
     def test_selected_pr_and_existing_evidence_observed_through_task_view(self):
-        root=self.inner.project
         result=IssueWorktreeAllocator(self.inner.store).ensure(
             task="291",branch_ref=self.inner.branch_ref,
             base_revision=self.inner.base,
@@ -132,7 +131,7 @@ class TaskProgressObservationTests(unittest.TestCase):
         def failed_reader(_request):
             raise ConnectionError("not connected")
         selected=type(self.inner.main)(
-            self.inner.store,approved=expected,
+            self.inner.store,approved=dict(expected),
             read_issue=lambda n:self.inner.facts[n].copy(),
             runtime_home=self.inner.runtime,
             port_for_issue=self.inner.ports.__getitem__,
