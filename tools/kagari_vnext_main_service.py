@@ -228,14 +228,36 @@ class MainV2WorktreeCapabilities:
             raise MainError("V2_MAIN_WORKTREE_HOST_INVALID")
 
 
+@dataclass(frozen=True)
+class MainV2SessionReadOnlyCapabilities:
+    """Host-only R5B0 current-v2 Session/Ask observation; no reply/launch."""
+
+    read_issue: Callable[[int], dict]
+    sessions: dict[int, object]
+
+    def __post_init__(self) -> None:
+        if __package__:
+            from .kagari_vnext_main_v2_session_observation import V2MainSessionReadOnlyHost
+        else:
+            from kagari_vnext_main_v2_session_observation import V2MainSessionReadOnlyHost
+        if (not callable(self.read_issue) or type(self.sessions) is not dict
+                or not self.sessions
+                or any(type(issue) is not int
+                       or type(host) is not V2MainSessionReadOnlyHost
+                       or host.readonly.selection.issue != issue
+                       for issue, host in self.sessions.items())):
+            raise MainError("V2_SESSION_HOST_INVALID")
+
+
 def build_main(
     plan: dict[str, Any], *,
     host: MainHostCapabilities | MainV2ReadOnlyCapabilities
-          | MainV2WorktreeCapabilities | None = None,
+          | MainV2WorktreeCapabilities | MainV2SessionReadOnlyCapabilities
+          | None = None,
 ) -> RepositoryMain:
     if host is not None and type(host) not in (
             MainHostCapabilities, MainV2ReadOnlyCapabilities,
-            MainV2WorktreeCapabilities):
+            MainV2WorktreeCapabilities, MainV2SessionReadOnlyCapabilities):
         raise MainError("MAIN_HOST_CAPABILITIES_INVALID")
     _exact_dir(Path(plan["project_root"]), "PRIMARY_PROJECT_REQUIRED")
     try:
@@ -280,9 +302,14 @@ def build_main(
             host.observers if type(host) is MainV2ReadOnlyCapabilities
             else {issue: admission.readonly
                   for issue, admission in host.admissions.items()}
-            if type(host) is MainV2WorktreeCapabilities else None),
+            if type(host) is MainV2WorktreeCapabilities
+            else {issue: session.readonly
+                  for issue, session in host.sessions.items()}
+            if type(host) is MainV2SessionReadOnlyCapabilities else None),
         v2_worktree_for_issue=(
             host.admissions if type(host) is MainV2WorktreeCapabilities else None),
+        v2_session_for_issue=(
+            host.sessions if type(host) is MainV2SessionReadOnlyCapabilities else None),
     )
 
 
@@ -729,7 +756,8 @@ def attached_supervisor(
 def main(
     argv: list[str] | None = None, *,
     host: MainHostCapabilities | MainV2ReadOnlyCapabilities
-          | MainV2WorktreeCapabilities | None = None,
+          | MainV2WorktreeCapabilities | MainV2SessionReadOnlyCapabilities
+          | None = None,
     attachment: MainAttachmentConfig | None = None,
 ) -> int:
     """Ordinary one-cycle/observe/follow runner, optionally called by a host.
@@ -753,7 +781,8 @@ def main(
         if type(host) is MainV2WorktreeCapabilities:
             # R5A1 is an injected Python Host operation only; no CLI mode.
             raise MainError("V2_MAIN_WORKTREE_HOST_ONLY")
-        if (type(host) is MainV2ReadOnlyCapabilities
+        if (type(host) in (MainV2ReadOnlyCapabilities,
+                           MainV2SessionReadOnlyCapabilities)
                 and args.operation != "observe"):
             raise MainError("V2_MAIN_EXECUTION_NOT_QUALIFIED")
         if args.follow and not 2 <= args.interval <= 3600:
