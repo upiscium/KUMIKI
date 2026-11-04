@@ -51,6 +51,17 @@ else:
     from kagari_vnext_opencode_control import OpenCode, TaskBinding
 
 
+def _v2_worktree_api():
+    """Load R5A1 only under explicit trusted Host admission; no v1 import cycle."""
+    if __package__:
+        from .kagari_vnext_main_v2_worktree import (
+            V2MainWorktreeHost, V2MainWorktreeRefused)
+    else:
+        from kagari_vnext_main_v2_worktree import (
+            V2MainWorktreeHost, V2MainWorktreeRefused)
+    return V2MainWorktreeHost, V2MainWorktreeRefused
+
+
 def _v2_api():
     """Load optional #337 v2 reader only for an explicitly selected Host lane.
 
@@ -169,6 +180,7 @@ class RepositoryMain:
         read_pr: Callable | None = None,
         initial_collaboration_for_issue: Callable[[int, Path], InitialCollaboration] | None = None,
         v2_readonly_for_issue: dict[int, V2ReadOnlyMainHost] | None = None,
+        v2_worktree_for_issue: dict[int, object] | None = None,
     ) -> None:
         if not isinstance(store, MetadataStore) or not callable(read_issue):
             raise MainError("MAIN_CONFIGURATION_INVALID")
@@ -211,6 +223,18 @@ class RepositoryMain:
                or capability.selection.repository != self.store.repository
                for n, capability in self.v2_readonly_for_issue.items()):
             raise MainError("V2_MAIN_HOST_BINDING_MISMATCH")
+        if v2_worktree_for_issue is not None and type(v2_worktree_for_issue) is not dict:
+            raise MainError("V2_MAIN_WORKTREE_HOST_INVALID")
+        self.v2_worktree_for_issue = dict(v2_worktree_for_issue or {})
+        if self.v2_worktree_for_issue:
+            V2MainWorktreeHost, _ = _v2_worktree_api()
+            if (self.v2_worktree_for_issue.keys() != self.approved.keys()
+                    or self.v2_readonly_for_issue.keys() != self.approved.keys()
+                    or any(type(host) is not V2MainWorktreeHost
+                           or host.readonly is not self.v2_readonly_for_issue.get(issue)
+                           or host.readonly.selection.issue != issue
+                           for issue, host in self.v2_worktree_for_issue.items())):
+                raise MainError("V2_MAIN_WORKTREE_HOST_BINDING_MISMATCH")
         if (any(n not in self.approved or type(v) is not int or v < 1
                 for n, v in self.pr_for_issue.items())
                 or any(n not in self.approved or type(v) is not tuple
@@ -732,6 +756,32 @@ class RepositoryMain:
                 return collaboration.ensure_draft_pr()
             except TaskCollaborationError:
                 raise MainError("GUARDED_PR_PUBLICATION_REFUSED") from None
+
+    def admit_v2_worktree(self, issue: int) -> dict:
+        """One bounded #337 Worktree effect under the existing Main owner."""
+        if type(issue) is not int or issue not in self.approved:
+            raise MainError("ISSUE_NOT_APPROVED")
+        host = self.v2_worktree_for_issue.get(issue)
+        if host is None:
+            raise MainError("V2_MAIN_WORKTREE_HOST_REQUIRED")
+        with self._main_owner_guard:
+            owner = self._main_owner
+            if (owner is None or owner.admission_only is not True
+                    or owner._attachment_lease is not host.readonly.lease):
+                raise MainError("V2_MAIN_WORKTREE_OWNER_REQUIRED")
+            owner._assert_owned(self)
+            choice = self.approved[issue]
+            _, V2MainWorktreeRefused = _v2_worktree_api()
+            try:
+                return host.admit(
+                    store=self.store, repository=self.store.repository,
+                    issue=issue, branch_ref=choice.branch_ref,
+                    base_revision=choice.base_revision,
+                    contract_id=choice.contract_id, read_issue=self.read_issue,
+                    check_main_owner=lambda: owner._assert_owned(self),
+                )
+            except V2MainWorktreeRefused as exc:
+                raise MainError(exc.code) from None
 
     def observe_v2(self, issue: int) -> dict:
         """Observe current v2 Host authority only; never fall back to v1."""
