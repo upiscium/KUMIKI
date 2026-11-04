@@ -20,7 +20,7 @@ import re
 import signal
 import stat
 import threading
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 if __package__:
     from .kagari_vnext_main import (
@@ -28,6 +28,9 @@ if __package__:
 else:
     from kagari_vnext_main import (
         ApprovedTask, InitialCollaboration, MainError, RepositoryMain, github_issue_reader)
+
+if TYPE_CHECKING:
+    from .kagari_vnext_main_v2_observation import V2ReadOnlyMainHost
 
 try:
     from .kagari_vnext_executor_selection import (
@@ -218,11 +221,61 @@ class MainHostCapabilities:
             raise MainError("MAIN_HOST_CAPABILITIES_INVALID")
 
 
+@dataclass(frozen=True)
+class MainV2ReadOnlyCapabilities:
+    """Host-selected v2 read-only lane; never a new Main or Task grant."""
+
+    read_issue: Callable[[int], dict]
+    observers: dict[int, V2ReadOnlyMainHost]
+
+    def __post_init__(self) -> None:
+        # Same delayed optional import as Main, to avoid #337's bootstrap cycle.
+        if __package__:
+            from .kagari_vnext_main_v2_observation import V2ReadOnlyMainHost
+        else:
+            from kagari_vnext_main_v2_observation import V2ReadOnlyMainHost
+        if (not callable(self.read_issue) or type(self.observers) is not dict
+                or not self.observers
+                or any(type(n) is not int
+                       or type(observer) is not V2ReadOnlyMainHost
+                       or observer.selection.issue != n
+                       for n, observer in self.observers.items())):
+            raise MainError("V2_MAIN_HOST_INVALID")
+
+
+@dataclass(frozen=True)
+class MainV2WorktreeCapabilities:
+    """Host-only R5A1 capability: exact Issue-scoped local Git admission.
+
+    No plan field or CLI action creates this object; a separate Worktree
+    operation grant remains mandatory even if R5A0 observation was approved.
+    """
+    read_issue: Callable[[int], dict]
+    admissions: dict[int, object]
+
+    def __post_init__(self) -> None:
+        if __package__:
+            from .kagari_vnext_main_v2_worktree import V2MainWorktreeHost
+        else:
+            from kagari_vnext_main_v2_worktree import V2MainWorktreeHost
+        if (not callable(self.read_issue) or type(self.admissions) is not dict
+                or not self.admissions
+                or any(type(issue) is not int
+                       or type(host) is not V2MainWorktreeHost
+                       or host.readonly.selection.issue != issue
+                       for issue, host in self.admissions.items())):
+            raise MainError("V2_MAIN_WORKTREE_HOST_INVALID")
+
+
 def build_main(
-    plan: dict[str, Any], *, host: MainHostCapabilities | None = None,
+    plan: dict[str, Any], *,
+    host: MainHostCapabilities | MainV2ReadOnlyCapabilities
+          | MainV2WorktreeCapabilities | None = None,
 ) -> RepositoryMain:
     plan = _validate_selection(plan, legacy_python=True)
-    if host is not None and type(host) is not MainHostCapabilities:
+    if host is not None and type(host) not in (
+            MainHostCapabilities, MainV2ReadOnlyCapabilities,
+            MainV2WorktreeCapabilities):
         raise MainError("MAIN_HOST_CAPABILITIES_INVALID")
     _exact_dir(Path(plan["project_root"]), "PRIMARY_PROJECT_REQUIRED")
     try:
@@ -263,7 +316,15 @@ def build_main(
             plan["repository"], gh=plan.get("github_bin", "gh"))
             if pr_for_issue else None),
         initial_collaboration_for_issue=(
-            host.initial_collaboration_for_issue if host is not None else None),
+            host.initial_collaboration_for_issue
+            if type(host) is MainHostCapabilities else None),
+        v2_readonly_for_issue=(
+            host.observers if type(host) is MainV2ReadOnlyCapabilities
+            else {issue: admission.readonly
+                  for issue, admission in host.admissions.items()}
+            if type(host) is MainV2WorktreeCapabilities else None),
+        v2_worktree_for_issue=(
+            host.admissions if type(host) is MainV2WorktreeCapabilities else None),
     )
 
 
@@ -282,6 +343,11 @@ def build_cleanup_handlers(
     if type(items) is list:
         for item in items:
             if type(item) is dict:
+                issue = item.get("issue")
+                if (type(issue) is int
+                        and issue in main.v2_readonly_for_issue
+                        and item.get("cleanup") is not None):
+                    raise MainError("V2_MAIN_CLEANUP_NOT_QUALIFIED")
                 executor_name = item.get("executor", OPENCODE)
                 if (type(executor_name) is str and executor_name == CLAUDE_CLI
                         and "cleanup" in item):
@@ -291,6 +357,10 @@ def build_cleanup_handlers(
     for item in plan.get("tasks", []):
         policy = item.get("cleanup")
         issue = item["issue"]
+        if issue in main.v2_readonly_for_issue:
+            if policy is not None:
+                raise MainError("V2_MAIN_CLEANUP_NOT_QUALIFIED")
+            continue
         choice = main.approved.get(issue)
         if choice is None:
             raise MainError("MAIN_CLEANUP_CONFIGURATION_INVALID")
@@ -422,20 +492,33 @@ class MainSupervisor:
         cleanup_for_issue: dict[int, Callable[[], CleanupReceipt]] | None = None,
         observe_only: bool = False,
         attachment_lease: attachment_gate.AttachmentLease | None = None,
+        admission_only: bool = False,
     ) -> None:
         requested = dict(cleanup_for_issue or {})
+        if type(admission_only) is not bool:
+            raise MainError("V2_MAIN_ADMISSION_CONFIGURATION_INVALID")
+        if admission_only and (
+                observe_only or requested or type(main) is not RepositoryMain
+                or not main.v2_worktree_for_issue or attachment_lease is None
+                or any(host.readonly.lease is not attachment_lease
+                       for host in main.v2_worktree_for_issue.values())):
+            raise MainError("V2_MAIN_ADMISSION_CONFIGURATION_INVALID")
         if (type(observe_only) is not bool
                 or any(n not in main.approved or not callable(f)
                        for n, f in requested.items())):
             raise MainError("MAIN_CLEANUP_CONFIGURATION_INVALID")
         if (attachment_lease is not None
-                and (type(attachment_lease) is not attachment_gate.AttachmentLease
-                     or observe_only)):
+                and (observe_only or not (
+                    type(attachment_lease) is attachment_gate.AttachmentLease
+                    or (admission_only and main.v2_worktree_for_issue
+                        and attachment_lease is next(iter(
+                            main.v2_worktree_for_issue.values())).readonly.lease)))):
             raise MainError("MAIN_ATTACHMENT_BINDING_INVALID")
         self._attachment_lease = attachment_lease
         self.main = main
         self.cleanup_for_issue = requested
         self.observe_only = observe_only
+        self.admission_only = admission_only
         self._entered = False
         self._file = None
         self._lock_path: Path | None = None
@@ -489,6 +572,10 @@ class MainSupervisor:
     def __enter__(self) -> MainSupervisor:
         if self._entered:
             raise MainError("MAIN_ALREADY_ACTIVE")
+        if (not self.observe_only and not self.admission_only
+                and type(self.main) is RepositoryMain
+                and self.main.v2_readonly_for_issue):
+            raise MainError("V2_MAIN_EXECUTION_NOT_QUALIFIED")
         self._verify_attachment()
         if self.observe_only:
             # Observation is a reader: no repository lock file, no exclusive
@@ -576,9 +663,19 @@ class MainSupervisor:
         else:
             release()
 
+    def admit_worktree(self, issue: int) -> dict[str, Any]:
+        """No cycle/dispatch/Session: only a Main-owned #337 Worktree effect."""
+        if not self.admission_only or not self._entered:
+            raise MainError("V2_MAIN_ADMISSION_OWNER_REQUIRED")
+        with self.main._main_owner_guard:
+            self._assert_owned(self.main)
+            return self.main.admit_v2_worktree(issue)
+
     def cycle(self, *, dispatch: bool = True) -> dict[str, Any]:
         if not self._entered:
             raise MainError("MAIN_NOT_ACTIVE")
+        if self.admission_only and dispatch:
+            raise MainError("V2_MAIN_EXECUTION_NOT_QUALIFIED")
         if dispatch and self.observe_only:
             raise MainError("MAIN_OBSERVE_ONLY")
         if dispatch and type(self.main) is not RepositoryMain:
@@ -629,9 +726,16 @@ class MainSupervisor:
                             "runtime": launched["runtime"],
                         })
                     else:
-                        entries.append({
-                            "issue": issue, "status": "ok",
-                            "observation": self.main.observe(issue)})
+                        observed = self.main.observe(issue)
+                        if observed.get("status") == "blocked":
+                            entries.append({
+                                "issue": issue, "status": "blocked",
+                                "reason": observed["reason"],
+                                "observation": observed})
+                        else:
+                            entries.append({
+                                "issue": issue, "status": "ok",
+                                "observation": observed})
                 except MainError as err:
                     # One blocked Task does not expand authorization or silently
                     # suppress observations of other approved Tasks.
@@ -691,7 +795,9 @@ def attached_supervisor(
 
 
 def main(
-    argv: list[str] | None = None, *, host: MainHostCapabilities | None = None,
+    argv: list[str] | None = None, *,
+    host: MainHostCapabilities | MainV2ReadOnlyCapabilities
+          | MainV2WorktreeCapabilities | None = None,
     attachment: MainAttachmentConfig | None = None,
 ) -> int:
     """Ordinary one-cycle/observe/follow runner, optionally called by a host.
@@ -712,6 +818,12 @@ def main(
     try:
         plan = load_selection(args.config)
         controller = build_main(plan, host=host)
+        if type(host) is MainV2WorktreeCapabilities:
+            # R5A1 is an injected Python Host operation only; no CLI mode.
+            raise MainError("V2_MAIN_WORKTREE_HOST_ONLY")
+        if (type(host) is MainV2ReadOnlyCapabilities
+                and args.operation != "observe"):
+            raise MainError("V2_MAIN_EXECUTION_NOT_QUALIFIED")
         if args.follow and not 2 <= args.interval <= 3600:
             raise MainError("MAIN_INTERVAL_INVALID")
         if attachment is not None and type(attachment) is not MainAttachmentConfig:
