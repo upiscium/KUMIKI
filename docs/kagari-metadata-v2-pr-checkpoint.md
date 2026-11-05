@@ -74,8 +74,13 @@ arbitrary Git command, Metadata ref write or Issue ref deletion is provided.
 A candidate PR must be open/draft, with the exact published head, author,
 repository, Task branch and base. The historical Snapshot/Record/Contract
 must already be retrievable. An initial checkpoint requires an absent
-previous-Snapshot observation and no prior owned v2 checkpoint. Later
-turns/handoffs require the **explicit previous comment ID**, original
+previous-Snapshot observation and no prior owned v2 checkpoint. When
+adopting an existing initial checkpoint, its authenticated comment ID must
+also precede **every** other owned v2 checkpoint ID; a later valid turn
+must not break an idempotent initial read. Recheck the same invariant after
+posting an initial checkpoint, treating a post-effect violation as uncertain,
+never as permission to retry. Later turns/handoffs require the
+**explicit previous comment ID**, original
 previous Snapshot/subject/commit IDs, an **exact-read verified** initial
 checkpoint, and a fully observed unambiguous current predecessor. Both new
 posts and adoption must traverse the **full authenticated PR comment chain**
@@ -132,8 +137,9 @@ lost ACK both before and after post, pending unknown ACK under a different
 key (stream guard), corrupted historical initial, adoption with a wrong
 explicit predecessor, dangling intermediate comment ID, unknown
 `commits_after` observation, original parent deletion or canonical-body
-rewrite during posting, final PR drift during readback and symbolic archive
-refs.
+rewrite during posting, reverse chronological initial-comment
+adoption, a valid later turn's idempotent initial adoption, post-effect
+initial-order drift, final PR drift during readback and symbolic archive refs.
 Fixture-only ref deletion is test setup, **not a production deletion API**.
 
 Remaining independent gates: source review and separate approval to

@@ -747,8 +747,83 @@ class CheckpointV2Test(unittest.TestCase):
                 turn, previous_comment_id=initial.comment_id)
         self.assertEqual(1, self.post_calls)
         self.assertEqual(1, len(list(self.jpath.iterdir())))
-        with self.assertRaisesRegex(CheckpointRefused, "successor_order_invalid"):
+        # The global initial-first invariant now detects this backward
+        # sequence before the child-specific successor-order check.
+        with self.assertRaisesRegex(CheckpointRefused, "initial_order_invalid"):
             self.publisher.publish(turn, previous_comment_id=initial.comment_id)
+        self.assertEqual(1, self.post_calls)
+
+    def test_initial_adoption_refuses_older_owned_turn(self):
+        future_initial_id = self.next_comment + 2
+        previous = {
+            "state": "observed", "checkpoint_id": str(future_initial_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn = self.add_snapshot(self.initial.metadata_commit,
+                                 boundary="turn-end", previous=previous)
+        earlier_turn = self.add_comment(turn)
+        later_initial = self.add_comment(self.initial)
+        self.assertLess(earlier_turn.comment_id, later_initial.comment_id)
+        self.assertEqual(future_initial_id, later_initial.comment_id)
+        with self.assertRaisesRegex(CheckpointRefused, "initial_order_invalid"):
+            self.publisher.publish(self.initial)
+        with self.assertRaisesRegex(CheckpointRefused, "initial_order_invalid"):
+            self.publisher.publish(turn, previous_comment_id=later_initial.comment_id)
+        self.assertEqual(0, self.post_calls)
+        self.assertFalse(list(self.jpath.iterdir()))
+
+    def test_initial_adoption_still_succeeds_with_later_owned_turn(self):
+        earlier_initial = self.add_comment(self.initial)
+        previous = {
+            "state": "observed", "checkpoint_id": str(earlier_initial.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn = self.add_snapshot(self.initial.metadata_commit,
+                                 boundary="turn-end", previous=previous)
+        later_turn = self.add_comment(turn)
+        self.assertLess(earlier_initial.comment_id, later_turn.comment_id)
+        result = self.publisher.publish(self.initial)
+        self.assertEqual(earlier_initial.comment_id, result.comment_id)
+        self.assertEqual(result, self.publisher.publish(self.initial))
+        self.assertEqual(0, self.post_calls)
+        self.assertFalse(list(self.jpath.iterdir()))
+
+    def test_initial_post_readback_with_earlier_owned_turn_is_uncertain(self):
+        earlier_turn_id = self.next_comment + 1
+        future_initial_id = self.next_comment + 2
+        previous = {
+            "state": "observed", "checkpoint_id": str(future_initial_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn = self.add_snapshot(self.initial.metadata_commit,
+                                 boundary="turn-end", previous=previous)
+
+        def post_with_earlier_turn(pr_number, body, deadline):
+            self.assertLess(time.monotonic(), deadline)
+            self.post_calls += 1
+            self.comments.append(CommentFacts(
+                REPO_ID, REPOSITORY, pr_number, earlier_turn_id, PRINCIPAL,
+                render_checkpoint(turn)))
+            self.comments.append(CommentFacts(
+                REPO_ID, REPOSITORY, pr_number, future_initial_id, PRINCIPAL, body))
+            self.next_comment = future_initial_id
+            return future_initial_id
+
+        with self.assertRaisesRegex(CheckpointUncertain, "post_outcome_uncertain"):
+            self.publisher_for(post=post_with_earlier_turn).publish(self.initial)
+        self.assertEqual(1, self.post_calls)
+        self.assertEqual(1, len(list(self.jpath.iterdir())))
+        with self.assertRaisesRegex(CheckpointRefused, "initial_order_invalid"):
+            self.publisher.publish(self.initial)
         self.assertEqual(1, self.post_calls)
 
 

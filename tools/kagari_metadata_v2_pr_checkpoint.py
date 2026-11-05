@@ -465,6 +465,14 @@ class SourceOnlyCheckpointPublisher:
                         value.base_ref), "checkpoint_comment_namespace_conflict")
             require(parsed.key not in checkpoints, "checkpoint_key_duplicate")
             checkpoints[parsed.key] = comment
+        # The initial checkpoint must be the earliest owned v2 comment.
+        # Validate on every inventory read: adoption and post-effect
+        # reconciliation must not bypass the fresh-post initial gate.
+        first = checkpoints.get("initial")
+        if first is not None:
+            require(all(key == "initial" or entry.comment_id > first.comment_id
+                        for key, entry in checkpoints.items()),
+                    "checkpoint_initial_order_invalid")
         return checkpoints
 
     def _confirmed(
