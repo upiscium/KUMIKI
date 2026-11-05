@@ -477,6 +477,61 @@ class SourceOnlyCheckpointPublisher:
                 "checkpoint_readback_mismatch")
         return confirmed
 
+    def _predecessor_chain(
+        self, value: V2PRCheckpoint, previous: dict[str, Any],
+        previous_comment_id: int, owned: dict[str, CommentFacts], deadline: float,
+    ) -> None:
+        """Validate the exact PR-comment chain, not only snapshot ancestors.
+
+        The Metadata v2 DAG proves immutable Snapshot ancestry, but does not
+        attest to the historical GitHub comment IDs attached to those links.
+        Both adoption and fresh publication require a complete bounded chain.
+        """
+        initial = owned.get("initial")
+        require(initial is not None, "checkpoint_initial_required")
+        by_id = {comment.comment_id: comment for comment in owned.values()}
+        current_id = previous_comment_id
+        seen: set[int] = set()
+        for _ in range(64):
+            require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
+            require(type(previous) is dict and previous.get("state") == "observed"
+                    and type(previous.get("commits_after")) is dict
+                    and previous["commits_after"].get("state") == "observed",
+                    "checkpoint_previous_observation_unknown")
+            require(previous.get("checkpoint_id") == str(current_id)
+                    and positive(current_id) and current_id not in seen,
+                    "checkpoint_previous_id_or_cycle_invalid")
+            seen.add(current_id)
+            comment = by_id.get(current_id)
+            require(comment is not None and comment.author_id == value.principal,
+                    "checkpoint_previous_comment_absent")
+            verified = self._exact.read(value.pr_number, current_id)
+            require(comment.body == render_checkpoint(verified.checkpoint)
+                    and owned.get(verified.checkpoint.key) == comment
+                    and (verified.checkpoint.subject,
+                         verified.checkpoint.metadata_commit,
+                         verified.checkpoint.snapshot_id)
+                    == (previous["subject"], previous["metadata_commit"],
+                        previous["snapshot_id"]),
+                    "checkpoint_previous_graph_mismatch")
+            if verified.checkpoint.boundary == "initial":
+                require(verified.checkpoint.key == "initial"
+                        and comment == initial
+                        and verified.snapshot["view"]["previous_checkpoint"]
+                        == {"state": "absent"},
+                        "checkpoint_initial_history_invalid")
+                return
+            previous = verified.snapshot["view"]["previous_checkpoint"]
+            raw_id = previous.get("checkpoint_id")
+            require(type(raw_id) is str
+                    and re.fullmatch(r"[1-9][0-9]{0,18}", raw_id, re.ASCII)
+                    is not None, "checkpoint_previous_id_invalid")
+            parent_id = int(raw_id)
+            require(positive(parent_id) and parent_id < current_id,
+                    "checkpoint_previous_order_invalid")
+            current_id = parent_id
+        raise CheckpointRefused("checkpoint_history_depth_limit")
+
     def publish(
         self, value: V2PRCheckpoint, *,
         previous_comment_id: int | None = None,
@@ -537,29 +592,8 @@ class SourceOnlyCheckpointPublisher:
             require(previous == {"state": "absent"},
                     "checkpoint_initial_boundary_mismatch")
         else:
-            initial = owned.get("initial")
-            require(initial is not None, "checkpoint_initial_required")
-            initial_verified = self._exact.read(value.pr_number, initial.comment_id)
-            require(initial_verified.checkpoint.boundary == "initial",
-                    "checkpoint_initial_history_invalid")
-            require(previous["state"] == "observed"
-                    and previous["checkpoint_id"] == str(previous_comment_id),
-                    "checkpoint_previous_binding_mismatch")
-            expected = next((c for c in comments_before
-                             if c.comment_id == previous_comment_id), None)
-            require(expected is not None and expected.author_id == value.principal,
-                    "checkpoint_invalid_previous")
-            previous_verified = self._exact.read(value.pr_number,
-                                                 previous_comment_id)
-            require(previous_verified.checkpoint.key in owned
-                    and owned[previous_verified.checkpoint.key].comment_id
-                    == previous_comment_id
-                    and (previous_verified.checkpoint.subject,
-                         previous_verified.checkpoint.metadata_commit,
-                         previous_verified.checkpoint.snapshot_id)
-                    == (previous["subject"], previous["metadata_commit"],
-                        previous["snapshot_id"]),
-                    "checkpoint_previous_graph_mismatch")
+            self._predecessor_chain(value, previous, previous_comment_id,
+                                    owned, deadline)
 
         if value.key in owned:
             result = self._confirmed(value, owned[value.key], body)
@@ -610,6 +644,12 @@ class SourceOnlyCheckpointPublisher:
             require(self._pull_facts(value, deadline) == pull_before,
                     "checkpoint_pr_changed_after_effect")
             after = self._comments(value, deadline)
+            # A stable *new* inventory is insufficient if the original
+            # predecessor disappeared/changed during this publication.
+            retained = {comment.comment_id: comment for comment in after}
+            require(all(retained.get(comment.comment_id) == comment
+                        for comment in owned.values()),
+                    "checkpoint_owned_history_changed_after_post")
             selected = self._owned(value, after).get(value.key)
             require(selected is not None, "checkpoint_post_not_observed")
             result = self._confirmed(value, selected, body)

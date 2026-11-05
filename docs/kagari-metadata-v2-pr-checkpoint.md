@@ -78,9 +78,14 @@ previous-Snapshot observation and no prior owned v2 checkpoint. Later
 turns/handoffs require the **explicit previous comment ID**, original
 previous Snapshot/subject/commit IDs, an **exact-read verified** initial
 checkpoint, and a fully observed unambiguous current predecessor. Both new
-posts and adoption validate the explicit predecessor and historical binding;
-**only new posts** must name the latest confirmed predecessor. No latest
-substitution.
+posts and adoption must traverse the **full authenticated PR comment chain**
+from the explicit predecessor to the initial comment, checking every comment
+ID against its exact pinned Snapshot/subject/commit tuple and requiring
+`previous_checkpoint.commits_after.state = "observed"` at every link.
+The chain is bounded to 64 links with strictly descending GitHub comment IDs;
+ambiguous, missing, cyclic, over-budget or unknown-observation histories
+fail closed. **Only new posts** must name the latest confirmed predecessor.
+No latest-tip substitution.
 
 Before even reading an intent, the Host's stream lease must serialize the
 (repository ID, Issue, PR, principal) stream, examine the **complete durable
@@ -100,6 +105,9 @@ A matching prior intent is **readback-only**: if still unconfirmed, report
 CheckpointUncertain and do not repost. A lost ACK after a successful post
 can succeed only through one exact owned comment, original metadata readback
 and stable comment inventory **and PR facts** at the final boundary.
+The post-readback inventory must also retain every previously verified owned
+checkpoint **with identical ID, author, repository and body**, rather than
+accepting a changed but stable post-effect inventory.
 Conflicting same-key content, duplicate keys, an invalid initial record,
 bad metadata, missing grant, stream-wide unresolved intents, drift and
 unclear effects fail closed.
@@ -118,7 +126,9 @@ two-parent Archive with multiple Issues, synthetic Issue ref deletion and
 idempotent publishing, wrong PR head, denied grant, journal conflicts,
 lost ACK both before and after post, pending unknown ACK under a different
 key (stream guard), corrupted historical initial, adoption with a wrong
-explicit predecessor, final PR drift during readback, and symbolic archive
+explicit predecessor, dangling intermediate comment ID, unknown
+`commits_after` observation, original parent deletion or canonical-body
+rewrite during posting, final PR drift during readback and symbolic archive
 refs.
 Fixture-only ref deletion is test setup, **not a production deletion API**.
 

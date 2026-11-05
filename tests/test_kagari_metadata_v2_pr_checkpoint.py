@@ -584,6 +584,106 @@ class CheckpointV2Test(unittest.TestCase):
         self.assertEqual(0, self.post_calls)
         self.assertFalse(list(self.jpath.iterdir()))
 
+    def test_broken_intermediate_pr_comment_chain_refused_new_and_adoption(self):
+        first = self.add_comment(self.initial)
+        # The Metadata Snapshot link is valid but this *comment ID* is not.
+        dangling = {
+            "state": "observed", "checkpoint_id": "999",
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn1 = self.add_snapshot(self.initial.metadata_commit,
+                                  boundary="turn-end", previous=dangling)
+        second = self.add_comment(turn1)
+        valid_immediate = {
+            "state": "observed", "checkpoint_id": str(second.comment_id),
+            "subject": turn1.subject, "metadata_commit": turn1.metadata_commit,
+            "snapshot_id": turn1.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn2 = dataclasses.replace(
+            self.add_snapshot(turn1.metadata_commit,
+                              boundary="turn-end", previous=valid_immediate),
+            key="turn-2",
+        )
+        with self.assertRaises(CheckpointRefused):
+            self.publisher.publish(turn2, previous_comment_id=second.comment_id)
+        self.add_comment(turn2)
+        with self.assertRaises(CheckpointRefused):
+            self.publisher.publish(turn2, previous_comment_id=second.comment_id)
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
+
+    def test_unknown_commits_after_refused_new_and_adoption(self):
+        first = self.add_comment(self.initial)
+        previous = {
+            "state": "observed", "checkpoint_id": str(first.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "unknown", "reason": "observation_failed"},
+        }
+        turn = self.add_snapshot(self.initial.metadata_commit,
+                                 boundary="turn-end", previous=previous)
+        with self.assertRaisesRegex(CheckpointRefused, "observation_unknown"):
+            self.publisher.publish(turn, previous_comment_id=first.comment_id)
+        self.add_comment(turn)
+        with self.assertRaisesRegex(CheckpointRefused, "observation_unknown"):
+            self.publisher.publish(turn, previous_comment_id=first.comment_id)
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
+
+    def test_post_parent_deletion_is_uncertain_without_second_effect(self):
+        initial = self.publisher.publish(self.initial)
+        previous = {
+            "state": "observed", "checkpoint_id": str(initial.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn = self.add_snapshot(self.initial.metadata_commit,
+                                 boundary="turn-end", previous=previous)
+
+        def delete_parent(pr_number, body, deadline):
+            self.comments[:] = [comment for comment in self.comments
+                                if comment.comment_id != initial.comment_id]
+            return self.post(pr_number, body, deadline)
+
+        with self.assertRaises(CheckpointUncertain):
+            self.publisher_for(post=delete_parent).publish(
+                turn, previous_comment_id=initial.comment_id)
+        self.assertEqual(2, self.post_calls)  # 1 initial + 1 uncertain turn
+        self.assertEqual(2, len(list(self.jpath.iterdir())))
+
+    def test_post_parent_valid_reencoding_is_uncertain(self):
+        initial = self.publisher.publish(self.initial)
+        previous = {
+            "state": "observed", "checkpoint_id": str(initial.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn = self.add_snapshot(self.initial.metadata_commit,
+                                 boundary="turn-end", previous=previous)
+
+        def edit_parent(pr_number, body, deadline):
+            original = self.comments[0]
+            edited = dataclasses.replace(self.initial, report="altered owner text")
+            self.comments[0] = dataclasses.replace(
+                original, body=render_checkpoint(edited))
+            self.assertEqual(edited, decode_checkpoint(self.comments[0].body))
+            return self.post(pr_number, body, deadline)
+
+        with self.assertRaises(CheckpointUncertain):
+            self.publisher_for(post=edit_parent).publish(
+                turn, previous_comment_id=initial.comment_id)
+        self.assertEqual(2, self.post_calls)
+        self.assertEqual(2, len(list(self.jpath.iterdir())))
+
 
 if __name__ == "__main__":
     unittest.main()
