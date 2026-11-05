@@ -365,7 +365,7 @@ raise SystemExit(int(mode.get("returncode", 0)))
             self.assertEqual(340, subject.issue)
             self.assertEqual(self.publication.contract_id, subject.contract_id)
             self.assertIn("--setting-sources", subject.argv)
-            self.assertEqual(lane.FIXED_PROMPT, subject.argv[-1])
+            self.assertEqual(lane.FIXED_PROMPT, subject.argv[1])
             with self.assertRaises(FrozenInstanceError):
                 subject.issue = 999
             return True
@@ -382,11 +382,11 @@ raise SystemExit(int(mode.get("returncode", 0)))
         self.assertTrue(all(subject == grants[0] for subject in grants))
         self.assertEqual(
             [
-                "-p", "--output-format", "stream-json", "--verbose",
+                "-p", lane.FIXED_PROMPT, "--output-format", "stream-json", "--verbose",
                 "--session-id", session, "--permission-mode", "default",
                 "--setting-sources", "user", "--tools", "",
                 "--disallowedTools", "mcp__*", "--strict-mcp-config",
-                "--mcp-config", '{"mcpServers":{}}', lane.FIXED_PROMPT,
+                "--mcp-config", '{"mcpServers":{}}',
             ],
             list(grants[0].argv),
         )
@@ -1142,6 +1142,71 @@ class ClaudeLaneBParserBoundaryTests(unittest.TestCase):
                                    expected_cwd=cwd, returncode=0)
         self.assertEqual("UNKNOWN", result["status"])
         self.assertNotEqual("TURN_RESULT_OBSERVED", result["stage"])
+
+    def test_official_2_1_293_no_tools_stream_remains_unqualified_and_fails_closed(self) -> None:
+        session = str(uuid.uuid4())
+        cwd = Path("/fixture/worktree")
+        events = self._valid_events(session, cwd)
+        events[0]["version"] = "2.1.293"
+        events[0]["plugins"] = [
+            {"name": name, "path": f"/fixture/plugins/{name}", "source": "local"}
+            for name in ("one", "two", "three")
+        ]
+        events[1]["message"]["stop_reason"] = None
+        events[-1].update({
+            "terminal_reason": "completed",
+            "api_error_status": None,
+            "usage": {"server_tool_use": {
+                "web_search_requests": 0, "web_fetch_requests": 0,
+            }},
+        })
+        events.insert(-1, {
+            "type": "rate_limit_event", "session_id": session,
+            "rate_limit_info": {"status": "allowed"},
+        })
+        result = lane.parse_stream(
+            b"".join(json.dumps(event).encode() + b"\n" for event in events), b"",
+            requested_session_id=session, expected_cwd=cwd, returncode=0,
+        )
+        self.assertEqual("OBSERVED", result["status"])
+        self.assertEqual("TURN_RESULT_OBSERVED", result["stage"])
+        public = lane.dispatch()
+        self.assertEqual("UNQUALIFIED", public["status"])
+        self.assertEqual("UNQUALIFIED", public["qualification"])
+        self.assertFalse(public["dispatch_allowed"])
+
+        cases = (
+            ("tool_in_init", lambda bad: bad[0].update(tools=["Bash"]),
+             "BLOCKED", "TOOL_POLICY_UNSUPPORTED"),
+            ("extra_plugin_key", lambda bad: bad[0]["plugins"][0].update(extra="value"),
+             "BLOCKED", "TOOL_POLICY_UNSUPPORTED"),
+            ("blocked_rate_status", lambda bad: bad[2]["rate_limit_info"].update(status="blocked"),
+             "UNKNOWN", "RATE_LIMITED"),
+            ("rate_session_mismatch", lambda bad: bad[2].update(session_id=str(uuid.uuid4())),
+             "UNKNOWN", "SESSION_MISMATCH"),
+            ("extra_event", lambda bad: bad.insert(-1, json.loads(json.dumps(bad[2]))),
+             "UNKNOWN", "MALFORMED_STREAM"),
+            ("nonzero_web_search", lambda bad: bad[-1]["usage"]["server_tool_use"].update(web_search_requests=1),
+             "BLOCKED", "TOOL_POLICY_UNSUPPORTED"),
+            ("nonzero_web_fetch", lambda bad: bad[-1]["usage"]["server_tool_use"].update(web_fetch_requests=1),
+             "BLOCKED", "TOOL_POLICY_UNSUPPORTED"),
+            ("api_error_status", lambda bad: bad[-1].update(api_error_status=400),
+             "UNKNOWN", "RESULT_MISMATCH"),
+            ("unknown_terminal_reason", lambda bad: bad[-1].update(terminal_reason="unknown"),
+             "UNKNOWN", "RESULT_MISMATCH"),
+        )
+        for case, mutate, expected_status, expected_reason in cases:
+            with self.subTest(case=case):
+                bad = json.loads(json.dumps(events))
+                mutate(bad)
+                rejected = lane.parse_stream(
+                    b"".join(json.dumps(event).encode() + b"\n" for event in bad), b"",
+                    requested_session_id=session, expected_cwd=cwd, returncode=0,
+                )
+                self.assertNotEqual("OBSERVED", rejected["status"])
+                self.assertNotEqual("TURN_RESULT_OBSERVED", rejected["stage"])
+                self.assertEqual(expected_status, rejected["status"])
+                self.assertEqual(expected_reason, rejected["reason"])
 
     def test_one_over_line_event_and_depth_limits_and_duplicate_keys_never_complete(self) -> None:
         session = str(uuid.uuid4())

@@ -90,6 +90,25 @@ class _LocalHTTPServer(ThreadingHTTPServer):
         finally:
             self._slots.release()
 
+    def drain_admitted_handlers(self) -> None:
+        """Wait for all admitted requests after serving has stopped.
+
+        ThreadingMixIn.server_close() can lose its join list when SIGINT
+        interrupts a join after _Threads.pop_all(). Reuse the *existing*
+        capacity semaphore as the factual in-flight barrier rather than
+        inventing a second request registry. An interruption while acquiring
+        always returns the temporarily held slots before the caller retries.
+        Only a stopped listener's trusted owner may call this method.
+        """
+        held = 0
+        try:
+            for _ in range(self.max_inflight):
+                self._slots.acquire()
+                held += 1
+        finally:
+            for _ in range(held):
+                self._slots.release()
+
 
 class _Handler(BaseHTTPRequestHandler):
     server: _LocalHTTPServer

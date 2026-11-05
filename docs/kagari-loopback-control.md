@@ -294,3 +294,105 @@ writer/remote-CAS proof, #291 bounded real Task/Contract/PR-first
 Host operations, #256 attached Main startup/shutdown, a working
 approved model/provider and #292 Human Ask reply authority. This R10
 source inclusion creates none of them.
+
+## R11 opt-in attached Main/Control lifetime (source-only, not activated)
+
+`tools.kagari_loopback_main_bridge.attached_main_control_server(main,
+attachment, port=0)` is a **Python-only trusted Host context** for an
+already constructed `RepositoryMain` and the exact
+`MainAttachmentConfig` from #256. It reuses #291's
+`attached_supervisor`, which first verifies the existing installed
+Attach receipt and holds the repository's canonical singleton lease.
+It does not install or create an Attach receipt and cannot construct
+an approved Task, Contract, #194 publisher or Main from an HTTP request.
+
+Inside that existing owner scope the context binds **127.0.0.1 only**,
+starts one temporary local HTTP serving thread, and exposes the
+previously reviewed Task-bound `GET status`, `GET asks` and
+`POST dispatch` operations. The context itself **never dispatches**
+a Task or answers an Ask. When the Host leaves the context it first
+shuts down the listener and drains admitted request handlers, and
+only then releases the existing Main and Attach leases. A
+`KeyboardInterrupt` during listener shutdown or handler draining is
+deferred until those close/join operations have finished. Because
+CPython's `ThreadingMixIn.server_close()` may lose its tracked thread
+list after an interrupted `join()`, the Host additionally waits until
+**all slots in the existing HTTP admission semaphore** can be acquired
+and released, after stopping new admissions. This is a direct in-flight
+request barrier, **not** a second queue, registry, grant or scheduler.
+On the supported Linux Host, the Python **main thread** temporarily
+replaces the process SIGINT handler during server-thread startup and
+shutdown/close/drain/join, restoring the caller's previous handler
+afterward. A pending SIGINT is replayed once after the boundary:
+the normal Python handler raises `KeyboardInterrupt`, a custom
+callable is invoked afterward, and an ignored SIGINT remains ignored.
+This scoped process-level handler change is significant: other Python
+threads also observe deferred SIGINT while the boundary is
+active. Its duration can extend while admitted callbacks complete.
+An outer Main thread-only `pthread_sigmask` is **not sufficient**,
+because a SIGINT received by another unmasked thread can execute
+Python's handler on the main thread despite that thread's mask.
+The subprocess regression uses real `pthread_kill` on another thread
+while a request callback is held: prior code released the Main/Attach
+owner while the callback was unfinished; the corrected code fully
+drained that callback before delivering the deferred interrupt.
+Existing synthetic interrupted-`server_close` and startup cases remain
+tested. A second **single-SIGINT teardown-entry** subprocess regression
+injects a real SIGINT from a Python line trace **before** the shutdown
+deferral handler can be installed. It proved that the earlier cleanup
+`finally` prologue could release Host ownership before a held HTTP
+callback completed. The bounded correction keeps an enclosing
+`KeyboardInterrupt` recovery frame active through both servicing
+and cleanup, and re-enters the same idempotent shutdown/close/drain/join
+path if that transition was interrupted before the drain was complete.
+It adds no second lifecycle owner, queue or credential. The subprocess
+records callback completion **before** the Main/Attach owner is released,
+and separately performs unconditional fixture cleanup if the assertion
+fails. The correction covers one such ordinary transition interruption;
+repeated or adversarial interrupts during recovery remain outside the
+stated operational guarantee.
+A third **single-SIGINT initialization** subprocess regression traces
+the source line after the loopback socket was bound but before its
+serving Thread was constructed. Earlier code leaked that bound socket
+outside explicit cleanup while the Attach/Main lease was released.
+The corrected startup guard now covers socket creation, Thread
+construction, thread startup/state recording, and their exception
+cleanup within the same outer recovery frame. The fixture retains
+the server object and requires its socket to be closed before the
+Host owner can be reacquired. All three signal fixtures use disposable
+local resources and perform unconditional test-only cleanup.
+A separate constructor-failure regression also confirms that a bound
+socket closes when `Thread` construction raises; existing #291 Host
+error mapping remains unchanged.
+No handler is replaced during normal request service.
+The semaphore's multi-step acquire/count/release is protected from
+that SIGINT during shutdown. The existing Host leases are not
+intentionally relinquished while an admitted handler remains active.
+This does **not** guarantee recovery from repeated asynchronous
+interruptions at every bytecode boundary, SIGKILL, process death, or
+uninterruptible Host callbacks. A Host operation
+denied by an absent/invalid Attach remains denied before
+any listener is bound. The caller still owns the lifetime of this
+explicit Python context; no standalone CLI, daemon, service unit,
+restart manager, scheduled task discovery or default fixed port is
+added. The original localhost-only/no-HTTP-client-auth threat model
+remains unchanged.
+
+**Operational limitations:** Existing admitted Host callbacks may be
+long-running; graceful close may wait for them. The HTTP 8-second
+socket timeout is an *inactivity* timer for input and does not bound
+a Main dispatch callback. A real #194 PR-first initial checkpoint
+performs metadata Git history validation before Main can acknowledge
+the first Task kickoff; this synchronous path is not yet proven to
+produce a short HTTP ACK. A lost client response is **unknown** until
+the same canonical Main receipts and upstream Session are positively
+re-observed; never trigger an independent automatic retry or create
+a second Task/Ask store. R11 therefore does **not** complete LOOP-03/04
+for real model-backed Host operations.
+
+Source-only tests use disposable real Git and #191 records, an inert
+Attach package, in-memory FakeGitHub and fake OpenCode 1.18.35 server.
+No public GitHub, provider/model, production repository or actual
+Host Install is used. True deployment/activation, real two-Issue E2E,
+and native Human #292 Ask reply remain independently authorized and
+unqualified.

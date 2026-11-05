@@ -80,7 +80,8 @@ sentinel `KUMIKI_LANE_B_DIAGNOSTIC_OK`. There is no arbitrary prompt parameter.
 The fixture asserts these options, as separate argv entries:
 
 ```text
--p --output-format stream-json --verbose
+-p <fixed diagnostic prompt>
+--output-format stream-json --verbose
 --session-id <canonical UUID>
 --permission-mode default
 --setting-sources user
@@ -88,8 +89,10 @@ The fixture asserts these options, as separate argv entries:
 --disallowedTools "mcp__*"
 --strict-mcp-config
 --mcp-config {"mcpServers":{}}
-<fixed diagnostic prompt>
 ```
+
+The fixed diagnostic prompt is a single argv entry directly after `-p`, so the
+variadic `--mcp-config` option cannot consume it.
 
 `--tools ""` removes built-ins; it is not `--allowedTools` autoapproval. MCP
 tools are separately excluded. `stdin` is `DEVNULL`, cwd is the verified Task
@@ -138,16 +141,32 @@ do not eliminate hostile same-user TOCTOU or stalled-filesystem risks.
 ## Observation semantics
 
 The synthetic parser bounds total bytes, line size, event count and JSON depth;
-rejects duplicate keys; and checks session/cwd and event order. It expects one
-init, one exact assistant response and one coherent success result. Unknown
-shapes are not silently promoted to success.
+rejects duplicate keys; and checks session/cwd and event order. Offline synthetic
+fixtures still allow the legacy three-event protocol: `system/init`, `assistant`,
+`result`, with one exact assistant response and one coherent success result.
+Separately, an official Claude Code **v2.1.293** no-tools CLI was independently
+verified returning four events in order: `system/init`, `assistant`, a single
+informational `rate_limit_event` with status `allowed`, then `result`. That
+informational event is neither a tool call nor evidence of terminal success.
+
+Bounded `init.plugins` entries containing `name`/`path`/`source` metadata are not
+actual tool calls; neither is zero-valued `usage.server_tool_use` metering. Only
+the bounded metadata and zero-metering forms are allowed: unknown or tool-bearing
+values, and nonzero metering, fail closed. These allowances do not relax the
+no-tools contract or the existing hook/MCP refusal.
+
+`assistant.message.stop_reason` may be `null` for an interim assistant event;
+this does not establish completion. `terminal_reason: completed` and
+`api_error_status: null` are allowed only when the rest of the exact result
+satisfies the success contract. Unknown shapes are not silently promoted to
+success.
 
 | Evidence | Maximum claim |
 | --- | --- |
 | Process spawn / empty stdout | No session or response established. |
 | Matching `system/init` | `SESSION_OBSERVED`, **not** accepted model work. |
 | Exact matching assistant sentinel | `RESPONSE_OBSERVED`. |
-| Coherent matching terminal result plus explicit exit 0 | `TURN_RESULT_OBSERVED`, synthetic only. |
+| Coherent matching terminal result plus explicit exit 0 | `TURN_RESULT_OBSERVED` only; never Task completion or qualification. |
 | Tools, denials, deferred call | Unsupported policy/Ask; not replyable. |
 | Truncated/malformed output, timeout, nonzero exit, lost result | Unknown/incomplete; never Task completion or a resend grant. |
 
@@ -155,6 +174,12 @@ All public results retain `qualification: UNQUALIFIED`,
 `dispatch_allowed: false`, `task_completed: false`, and
 `ask_capability: UNQUALIFIED`. The fixed sentinel is not a proof of useful work,
 model provenance, or fulfillment of the original Task requirements.
+
+Public `dispatch()` always returns `UNQUALIFIED`; no KAGARI Task, Main, Ask or PR
+path is activated. The real CLI standalone smoke is **not** full Task-binding or
+Human feedback qualification, and establishes neither real live Task execution
+nor terms clearance. It does not clear the live-use gates below. Neither account
+credentials nor stored content were retained from that smoke.
 
 ## Offline verification and remaining work
 

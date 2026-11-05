@@ -5,10 +5,14 @@ The Main owns GitHub Issue/Contract/Worktree/Session and prompt receipts.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import re
+import signal
+from threading import Thread, current_thread, main_thread
 
 from tools.kagari_vnext_main import ApprovedTask, MainError, RepositoryMain
+from tools.kagari_vnext_main_service import MainAttachmentConfig, attached_supervisor
 from tools.kagari_loopback_control import ControlActionError, create_control_server
 
 _ISSUE = re.compile(r"[1-9][0-9]{0,17}\Z")
@@ -188,3 +192,127 @@ def create_main_control_server(
         ask_provider=bridge.asks, host=host, port=port,
         repository=main.store.repository
     )
+
+
+@contextmanager
+def _defer_sigint_at_lifecycle_boundary():
+    """Defer SIGINT across a short Host-owned startup/shutdown critical section.
+
+    pthread_sigmask on the main thread is insufficient: another unmasked
+    thread can receive SIGINT, whose Python handler then executes on main
+    *despite* its mask. Temporarily replace the process SIGINT handler only
+    on the main interpreter thread; replay one pending interruption after
+    the critical section and restore the caller's original handler. A long
+    running HTTP callback can delay this replay. This is not a process-wide
+    signal-management service or a promise against SIGKILL/process crashes.
+    """
+    if current_thread() is not main_thread():
+        yield
+        return
+
+    previous = signal.getsignal(signal.SIGINT)
+    pending: list[tuple[int, object]] = []
+
+    def defer(signum: int, frame: object) -> None:
+        # Python callbacks run only on the main interpreter thread.
+        # Do not call locks, allocate a worker, or raise from this handler.
+        if not pending:
+            pending.append((signum, frame))
+
+    signal.signal(signal.SIGINT, defer)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        if pending:
+            signum, frame = pending[0]
+            if callable(previous):
+                previous(signum, frame)
+            elif previous == signal.SIG_DFL:
+                # Preserve the caller's OS-default signal disposition
+                # *after* returning Host-owned resources.
+                signal.raise_signal(signal.SIGINT)
+            # An original SIG_IGN remains ignored.
+
+
+@contextmanager
+def attached_main_control_server(
+    main: RepositoryMain, attachment: MainAttachmentConfig, *, port: int = 0,
+):
+    """Explicit trusted-Host opt-in listener bound to existing #256/#291 ownership.
+
+    No standalone CLI, daemon, task discovery, new owner, or grant is added.
+    Attach and repository Main locks must be held *before* binding the socket.
+    On exit, listener shutdown and active request-thread draining precede
+    releasing either original Host lease. Caller must provide the exact Main
+    with its already authorized Issue/Contract and #194 Host capabilities.
+    """
+    if type(main) is not RepositoryMain or type(attachment) is not MainAttachmentConfig:
+        raise MainBridgeError("MAIN_ATTACHMENT_BINDING_INVALID")
+
+    with attached_supervisor(main, attachment) as owner:
+        owner._assert_owned(main)
+        # No listener is bound before the exception-safe startup scope.
+        # This permits single-SIGINT recovery even between socket bind and
+        # creation of the serving Thread.
+        server = None
+        thread = None
+        started = False
+        cleanup_complete = False
+        interrupted: KeyboardInterrupt | None = None
+
+        def _drain_before_owner_release() -> None:
+            nonlocal cleanup_complete, interrupted
+
+            def finish_before_release(operation):
+                nonlocal interrupted
+                # Even a synthetic interrupt from a stdlib close/join call
+                # must not allow existing Host leases to be released early.
+                while True:
+                    try:
+                        operation()
+                        return
+                    except KeyboardInterrupt as error:
+                        if interrupted is None:
+                            interrupted = error
+
+            with _defer_sigint_at_lifecycle_boundary():
+                if server is not None:
+                    if started and thread is not None and thread.is_alive():
+                        finish_before_release(server.shutdown)
+                    # ThreadingMixIn.server_close() can lose its list after
+                    # an interrupted pop_all()/join. The existing admission
+                    # semaphore proves every admitted handler has exited.
+                    finish_before_release(server.server_close)
+                    finish_before_release(server.drain_admitted_handlers)
+                    if started and thread is not None:
+                        finish_before_release(thread.join)
+                cleanup_complete = True
+            if interrupted is not None:
+                raise interrupted
+
+        # A single SIGINT immediately upon entering the inner finally can
+        # arrive BEFORE _defer_sigint_at_lifecycle_boundary is installed.
+        # Keep an enclosing KeyboardInterrupt recovery frame alive across
+        # both serving and cleanup so that one interrupted entry retries the
+        # same idempotent drain instead of unwinding the Host lease.
+        try:
+            try:
+                with _defer_sigint_at_lifecycle_boundary():
+                    server = create_main_control_server(main, port=port)
+                    thread = Thread(
+                        target=server.serve_forever,
+                        name="kagari-loopback", daemon=False)
+                    try:
+                        thread.start()
+                    finally:
+                        # A Thread.start wrapper may fail after it started
+                        # the actual serving thread.
+                        started = thread.ident is not None
+                yield server
+            finally:
+                _drain_before_owner_release()
+        except KeyboardInterrupt:
+            if not cleanup_complete:
+                _drain_before_owner_release()
+            raise

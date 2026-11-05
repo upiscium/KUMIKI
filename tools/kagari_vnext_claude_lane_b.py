@@ -306,6 +306,7 @@ def _same_config_context(
 def _argv(session_id: str) -> tuple[str, ...]:
     return (
         "-p",
+        FIXED_PROMPT,
         "--output-format",
         "stream-json",
         "--verbose",
@@ -322,7 +323,6 @@ def _argv(session_id: str) -> tuple[str, ...]:
         "--strict-mcp-config",
         "--mcp-config",
         '{"mcpServers":{}}',
-        FIXED_PROMPT,
     )
 
 
@@ -845,6 +845,19 @@ def _has_tool_content(value: Any) -> bool:
     return False
 
 
+def _tool_policy_view(event: dict[str, Any]) -> dict[str, Any]:
+    """Exclude only the two zero-valued server-tool usage meters on result events."""
+    usage = event.get("usage")
+    if event.get("type") != "result" or not isinstance(usage, dict):
+        return event
+    counters = usage.get("server_tool_use")
+    if (not isinstance(counters, dict)
+            or set(counters) != {"web_search_requests", "web_fetch_requests"}
+            or any(type(value) is not int or value != 0 for value in counters.values())):
+        return event
+    return {**event, "usage": {key: value for key, value in usage.items() if key != "server_tool_use"}}
+
+
 def _session_matches(event: Mapping[str, Any], session_id: str) -> bool:
     return event.get("session_id") == session_id
 
@@ -897,13 +910,22 @@ def parse_stream(
     stage = "SESSION_OBSERVED"
     if any("session_id" in event and not _session_matches(event, requested_session_id) for event in events[1:]):
         return safe("UNKNOWN", "SESSION_MISMATCH", stage)
-    if any(_has_tool_content(event) for event in events):
+    if _has_tool_content({key: value for key, value in events[0].items() if key != "plugins"}) or any(_has_tool_content(_tool_policy_view(event)) for event in events[1:]):
         return safe("BLOCKED", "TOOL_POLICY_UNSUPPORTED", stage)
     if any(event.get("type") == "system" and event.get("subtype") == "init" for event in events[1:]):
         return safe("UNKNOWN", "MALFORMED_STREAM", stage)
     if first.get("version") not in (None, EXPECTED_VERSION) or first.get("permissionMode") not in (None, "default"):
         return safe("UNKNOWN", "SCHEMA_UNSUPPORTED", stage)
-    if first.get("tools") != [] or first.get("mcp_servers") != [] or first.get("plugins", []) != []:
+    plugins = first.get("plugins", [])
+    if (first.get("tools") != [] or first.get("mcp_servers") != []
+            or not isinstance(plugins, list) or len(plugins) > 8
+            or any(
+                not isinstance(plugin, dict)
+                or set(plugin) != {"name", "path", "source"}
+                or any(not isinstance(value, str) or not 0 < len(value) <= 1024
+                       for value in plugin.values())
+                for plugin in plugins
+            )):
         return safe("BLOCKED", "TOOL_POLICY_UNSUPPORTED", stage)
     if len(events) < 2:
         if timed_out: return safe("UNKNOWN", "PROCESS_TIMEOUT", stage)
@@ -927,7 +949,7 @@ def parse_stream(
                     ("stop_reason" in message, message.get("stop_reason")))
     if any(present and value == "tool_deferred" for present, value in stop_reasons):
         return safe("BLOCKED", "TOOL_POLICY_UNSUPPORTED", stage)
-    if any(present and value != "end_turn" for present, value in stop_reasons):
+    if any(present and value is not None and value != "end_turn" for present, value in stop_reasons):
         return safe("UNKNOWN", "SCHEMA_UNSUPPORTED", stage)
     if timed_out: return safe("UNKNOWN", "PROCESS_TIMEOUT", stage)
     if overflow: return safe("UNKNOWN", "OUTPUT_LIMIT", stage)
@@ -936,21 +958,41 @@ def parse_stream(
     if any(_session_matches(event, requested_session_id) and _contains_rate_limit_error(event)
            for event in events[2:]):
         return safe("UNKNOWN", "RATE_LIMITED", stage)
-    if len(events) != 3: return safe("UNKNOWN", "MALFORMED_STREAM", stage)
-    terminal = events[2]
+    if len(events) not in (3, 4): return safe("UNKNOWN", "MALFORMED_STREAM", stage)
+    if len(events) == 4:
+        metadata = events[2]
+        rate_limit_info = metadata.get("rate_limit_info")
+        if (metadata.get("type") != "rate_limit_event"
+                or not _session_matches(metadata, requested_session_id)
+                or not isinstance(rate_limit_info, dict)):
+            return safe("UNKNOWN", "MALFORMED_STREAM", stage)
+        if rate_limit_info.get("status") in ("rejected", "blocked", "rate_limited"):
+            return safe("UNKNOWN", "RATE_LIMITED", stage)
+        if rate_limit_info.get("status") != "allowed":
+            return safe("UNKNOWN", "MALFORMED_STREAM", stage)
+        pending = [metadata]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                if "error" in value or "errors" in value:
+                    return safe("UNKNOWN", "MALFORMED_STREAM", stage)
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+    terminal = events[-1]
     if terminal.get("type") != "result" or not _session_matches(terminal, requested_session_id):
         return safe("UNKNOWN", "SESSION_MISMATCH" if terminal.get("type") == "result" else "MALFORMED_STREAM", stage)
     if _contains_rate_limit_error(terminal.get("errors")) or _contains_rate_limit_error(terminal.get("error")):
         return safe("UNKNOWN", "RATE_LIMITED", stage)
     errors = terminal.get("errors", [])
     if (not isinstance(errors, list) or errors or "error" in terminal
-            or "api_error_status" in terminal):
+            or terminal.get("api_error_status") is not None):
         return safe("UNKNOWN", "RESULT_MISMATCH", stage)
-    if _has_tool_content(terminal): return safe("BLOCKED", "TOOL_POLICY_UNSUPPORTED", stage)
+    if _has_tool_content(_tool_policy_view(terminal)): return safe("BLOCKED", "TOOL_POLICY_UNSUPPORTED", stage)
     denials = terminal.get("permission_denials")
     if isinstance(denials, list) and denials: return safe("BLOCKED", "TOOL_POLICY_UNSUPPORTED", stage)
     if (terminal.get("subtype") != "success" or terminal.get("is_error") is not False
-            or ("terminal_reason" in terminal and terminal.get("terminal_reason") != "success")
+            or ("terminal_reason" in terminal and terminal.get("terminal_reason") not in ("success", "completed"))
             or ("stop_reason" in terminal and terminal.get("stop_reason") != "end_turn")
             or terminal.get("result") != EXPECTED_RESPONSE or denials != []
             or type(terminal.get("num_turns")) is not int or terminal.get("num_turns") != 1):
