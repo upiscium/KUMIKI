@@ -493,7 +493,7 @@ class R5C0PrFirstTests(unittest.TestCase):
                 service.build_main(copy.deepcopy(self.plan), host={"proof": True})
             with self.assertRaisesRegex(MainError, "R5C0_HOST_BINDING_MISMATCH"):
                 main_module.RepositoryMain(
-                    main.store, approved=main.approved, read_issue=self.read_issue,
+                    main.store, approved=dict(main.approved), read_issue=self.read_issue,
                     runtime_home=main.runtime_home,
                     port_for_issue=main.port_for_issue,
                     v2_pr_first_for_issue={101: self.host(lease)})
