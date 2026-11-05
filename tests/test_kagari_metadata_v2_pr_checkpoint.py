@@ -684,6 +684,73 @@ class CheckpointV2Test(unittest.TestCase):
         self.assertEqual(2, self.post_calls)
         self.assertEqual(2, len(list(self.jpath.iterdir())))
 
+    def test_existing_successor_must_follow_its_direct_predecessor_id(self):
+        initial = self.add_comment(self.initial)
+        first_previous = {
+            "state": "observed", "checkpoint_id": str(initial.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn1 = self.add_snapshot(self.initial.metadata_commit,
+                                  boundary="turn-end", previous=first_previous)
+        self.next_comment = initial.comment_id + 1
+        parent = self.add_comment(turn1)
+        backdated_child_id = parent.comment_id - 1
+        next_previous = {
+            "state": "observed", "checkpoint_id": str(parent.comment_id),
+            "subject": turn1.subject,
+            "metadata_commit": turn1.metadata_commit,
+            "snapshot_id": turn1.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn2 = dataclasses.replace(
+            self.add_snapshot(turn1.metadata_commit,
+                              boundary="turn-end", previous=next_previous),
+            key="turn-2",
+        )
+        # Authenticated sorted inventory: child < parent while its
+        # Snapshot refers forward to the later parent comment ID.
+        self.comments.append(CommentFacts(
+            REPO_ID, REPOSITORY, PR, backdated_child_id, PRINCIPAL,
+            render_checkpoint(turn2)))
+        self.comments.sort(key=lambda c: c.comment_id)
+        self.assertEqual([initial.comment_id, backdated_child_id, parent.comment_id],
+                         [c.comment_id for c in self.inventory(PR, time.monotonic() + 2)])
+        with self.assertRaisesRegex(CheckpointRefused, "successor_order_invalid"):
+            self.publisher.publish(turn2, previous_comment_id=parent.comment_id)
+        self.assertEqual(0, self.post_calls)
+        self.assertFalse(list(self.jpath.iterdir()))
+
+    def test_post_readback_rejects_nonincreasing_successor_id(self):
+        initial = self.add_comment(self.initial)  # 501
+        previous = {
+            "state": "observed", "checkpoint_id": str(initial.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn = self.add_snapshot(self.initial.metadata_commit,
+                                 boundary="turn-end", previous=previous)
+
+        def post_with_backdated_id(pr_number, body, deadline):
+            self.post_calls += 1
+            self.comments.append(CommentFacts(
+                REPO_ID, REPOSITORY, pr_number, 500, PRINCIPAL, body))
+            self.comments.sort(key=lambda c: c.comment_id)
+            return 500
+
+        with self.assertRaisesRegex(CheckpointUncertain, "post_outcome_uncertain"):
+            self.publisher_for(post=post_with_backdated_id).publish(
+                turn, previous_comment_id=initial.comment_id)
+        self.assertEqual(1, self.post_calls)
+        self.assertEqual(1, len(list(self.jpath.iterdir())))
+        with self.assertRaisesRegex(CheckpointRefused, "successor_order_invalid"):
+            self.publisher.publish(turn, previous_comment_id=initial.comment_id)
+        self.assertEqual(1, self.post_calls)
+
 
 if __name__ == "__main__":
     unittest.main()

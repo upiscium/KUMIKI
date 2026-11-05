@@ -469,9 +469,16 @@ class SourceOnlyCheckpointPublisher:
 
     def _confirmed(
         self, value: V2PRCheckpoint, candidate: CommentFacts,
-        expected_body: str,
+        expected_body: str, previous_comment_id: int | None,
     ) -> ConfirmedCheckpoint:
         require(candidate.body == expected_body, "checkpoint_key_conflict")
+        # The predecessor chain is verified on its own, but the final
+        # successor must also have a strictly later authenticated comment ID.
+        # Apply to both adoption and post-effect reconciliation.
+        require(value.boundary == "initial" or (
+                    positive(previous_comment_id)
+                    and candidate.comment_id > previous_comment_id),
+                "checkpoint_successor_order_invalid")
         confirmed = self._exact.read(value.pr_number, candidate.comment_id)
         require(confirmed.checkpoint == value,
                 "checkpoint_readback_mismatch")
@@ -596,7 +603,8 @@ class SourceOnlyCheckpointPublisher:
                                     owned, deadline)
 
         if value.key in owned:
-            result = self._confirmed(value, owned[value.key], body)
+            result = self._confirmed(value, owned[value.key], body,
+                                     previous_comment_id)
             require(self._comments(value, deadline) == comments_before,
                     "checkpoint_inventory_changed")
             require(self._pull_facts(value, deadline) == pull_before,
@@ -652,7 +660,8 @@ class SourceOnlyCheckpointPublisher:
                     "checkpoint_owned_history_changed_after_post")
             selected = self._owned(value, after).get(value.key)
             require(selected is not None, "checkpoint_post_not_observed")
-            result = self._confirmed(value, selected, body)
+            result = self._confirmed(value, selected, body,
+                                     previous_comment_id)
             require(self._comments(value, deadline) == after,
                     "checkpoint_inventory_changed")
             require(self._pull_facts(value, deadline) == pull_before,

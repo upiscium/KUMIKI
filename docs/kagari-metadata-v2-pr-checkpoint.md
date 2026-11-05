@@ -82,8 +82,12 @@ posts and adoption must traverse the **full authenticated PR comment chain**
 from the explicit predecessor to the initial comment, checking every comment
 ID against its exact pinned Snapshot/subject/commit tuple and requiring
 `previous_checkpoint.commits_after.state = "observed"` at every link.
-The chain is bounded to 64 links with strictly descending GitHub comment IDs;
-ambiguous, missing, cyclic, over-budget or unknown-observation histories
+The chain is bounded to 64 links with strictly descending GitHub comment IDs.
+The final checkpoint comment must also have an ID **strictly greater than its
+explicit predecessor**, both when adopting an existing comment and when
+reconciling a newly posted comment. An inverse or equal ID rejects adoption;
+after a posting effect the outcome is uncertain and must not be retried blindly.
+Ambiguous, missing, cyclic, over-budget or unknown-observation histories
 fail closed. **Only new posts** must name the latest confirmed predecessor.
 No latest-tip substitution.
 
