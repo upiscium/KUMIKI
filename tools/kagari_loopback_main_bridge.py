@@ -37,9 +37,54 @@ class MainBridge:
             raise MainBridgeError("INVALID_TASK")
         issue = int(task)
         choice = self.main.approved.get(issue)
-        if type(choice) is not ApprovedTask or choice.issue != issue:
+        if (type(choice) is not ApprovedTask
+                or type(choice.issue) is not int
+                or choice.issue != issue):
             raise MainBridgeError("TASK_NOT_APPROVED")
         return issue, choice
+
+    def _v2_readonly_view(
+        self, issue: int, choice: ApprovedTask, view: object,
+    ) -> dict:
+        """Validate the existing #291 v2 current-Task observation, not a grant.
+
+        R19 Phase A exposes only a conservative detached status and a
+        positively Host-confirmed NOT_STARTED Ask refusal. An unknown or
+        native-present Session is deliberately NOT offered as a completed
+        Task, a confirmed empty Ask queue, or an Ask reply capability.
+        """
+        if type(view) is not dict:
+            raise MainBridgeError("V2_MAIN_OBSERVATION_MISMATCH")
+        approved = view.get("approved_task")
+        current = view.get("current_record")
+        if (view.get("status") != "blocked"
+                or view.get("reason") != "V2_MAIN_BLOCKED_LIVE"
+                or type(view.get("metadata_version")) is not int
+                or view["metadata_version"] != 2
+                or view.get("repository") != self.main.store.repository
+                or type(view.get("issue")) is not int
+                or view["issue"] != issue
+                or type(approved) is not dict
+                or approved.get("repository") != self.main.store.repository
+                or type(approved.get("issue")) is not int
+                or approved["issue"] != issue
+                or approved.get("contract_id") != choice.contract_id
+                or approved.get("branch_ref") != choice.branch_ref
+                or approved.get("base_revision") != choice.base_revision
+                or type(current) is not dict
+                or current.get("contract_id") != choice.contract_id
+                or type(current.get("record_id")) is not str
+                or _DIGEST.fullmatch(current["record_id"]) is None
+                or type(current.get("metadata_tip")) is not str
+                or re.fullmatch(r"[0-9a-f]{40}", current["metadata_tip"]) is None
+                or type(current.get("archive_tip")) is not str
+                or re.fullmatch(r"[0-9a-f]{40}", current["archive_tip"]) is None
+                or view.get("task_execution_authorized") is not False
+                or view.get("worktree_mutation_authorized") is not False
+                or view.get("github_write_authorized") is not False
+                or view.get("kickoff") not in ("NOT_SENT", "UNKNOWN")):
+            raise MainBridgeError("V2_MAIN_OBSERVATION_MISMATCH")
+        return view
 
     def status(self, task: str) -> dict:
         """Map factual #291 observations to a conservative transport status.
@@ -52,6 +97,11 @@ class MainBridge:
             view = self.main.observe(issue)
         except MainError:
             raise MainBridgeError("MAIN_OBSERVATION_UNAVAILABLE") from None
+        if issue in self.main.v2_readonly_for_issue:
+            self._v2_readonly_view(issue, choice, view)
+            # v2 Host has not qualified a dispatched model Task: no RUNNING,
+            # BLOCKED-ON-HUMAN or COMPLETED inference from a read-only Session.
+            return {"task": task, "state": "UNKNOWN"}
         if (type(view) is not dict or view.get("status") != "ok"
                 or view.get("issue") != issue
                 or view.get("repository") != self.main.store.repository
@@ -94,6 +144,24 @@ class MainBridge:
             view = self.main.observe(issue)
         except MainError:
             raise MainBridgeError("ASK_OBSERVATION_UNAVAILABLE") from None
+        if issue in self.main.v2_readonly_for_issue:
+            self._v2_readonly_view(issue, choice, view)
+            session = view.get("session_observation")
+            if (type(session) is dict
+                    and session.get("state") == "NOT_STARTED"
+                    and session.get("reason") == "HOST_CONFIRMED_ABSENT"
+                    and session.get("session_id") is None
+                    and type(session.get("pending_asks")) is list
+                    and session["pending_asks"] == []
+                    and type(session.get("pending_count")) is int
+                    and session["pending_count"] == 0
+                    and view.get("runtime") == "NOT_STARTED"
+                    and view.get("kickoff") == "NOT_SENT"):
+                raise MainBridgeError("ASK_SESSION_NOT_STARTED")
+            # R5A0 has no authenticated native Session locator; a v2
+            # UNKNOWN or PRESENT locator also cannot establish a confirmed
+            # empty Ask queue or a writable reply path at R19 Phase A.
+            raise MainBridgeError("ASK_SESSION_UNCERTAIN")
         if (type(view) is not dict or view.get("status") != "ok"
                 or view.get("issue") != issue
                 or view.get("repository") != self.main.store.repository
