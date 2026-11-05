@@ -72,6 +72,17 @@ def _v2_worktree_api():
     return V2MainWorktreeHost, V2MainWorktreeRefused
 
 
+def _v2_pr_first_api():
+    """Lazy R5C0 Host-only PR-first proof; never the v1 collaboration facade."""
+    if __package__:
+        from .kagari_vnext_main_v2_pr_first_observation import (
+            V2PrFirstReadOnlyHost, V2PrFirstRefused)
+    else:
+        from kagari_vnext_main_v2_pr_first_observation import (
+            V2PrFirstReadOnlyHost, V2PrFirstRefused)
+    return V2PrFirstReadOnlyHost, V2PrFirstRefused
+
+
 def _v2_session_api():
     """Load R5B0 only on an explicit Host read-only lane; no v1 fallback."""
     if __package__:
@@ -208,6 +219,7 @@ class RepositoryMain:
         v2_readonly_for_issue: dict[int, V2ReadOnlyMainHost] | None = None,
         v2_worktree_for_issue: dict[int, object] | None = None,
         v2_session_for_issue: dict[int, object] | None = None,
+        v2_pr_first_for_issue: dict[int, object] | None = None,
     ) -> None:
         if not isinstance(store, MetadataStore) or not callable(read_issue):
             raise MainError("MAIN_CONFIGURATION_INVALID")
@@ -291,6 +303,19 @@ class RepositoryMain:
                            or host.readonly.selection.issue != issue
                            for issue, host in self.v2_session_for_issue.items())):
                 raise MainError("V2_SESSION_HOST_BINDING_MISMATCH")
+        if v2_pr_first_for_issue is not None and type(v2_pr_first_for_issue) is not dict:
+            raise MainError("R5C0_HOST_INVALID")
+        self.v2_pr_first_for_issue = dict(v2_pr_first_for_issue or {})
+        if self.v2_pr_first_for_issue:
+            V2PrFirstReadOnlyHost, _ = _v2_pr_first_api()
+            if (self.v2_worktree_for_issue or self.v2_session_for_issue
+                    or self.v2_pr_first_for_issue.keys() != self.approved.keys()
+                    or self.v2_readonly_for_issue.keys() != self.approved.keys()
+                    or any(type(host) is not V2PrFirstReadOnlyHost
+                           or host.readonly is not self.v2_readonly_for_issue.get(issue)
+                           or host.readonly.selection.issue != issue
+                           for issue, host in self.v2_pr_first_for_issue.items())):
+                raise MainError("R5C0_HOST_BINDING_MISMATCH")
         if (any(n not in self.approved or type(v) is not int or v < 1
                 for n, v in self.pr_for_issue.items())
                 or any(n not in self.approved or type(v) is not tuple
@@ -905,6 +930,17 @@ class RepositoryMain:
             raise MainError("V2_MAIN_HOST_REQUIRED")
         _, V2MainObservationRefused = _v2_api()
         choice = self.approved[issue]
+        pr_first = self.v2_pr_first_for_issue.get(issue)
+        if pr_first is not None:
+            _, V2PrFirstRefused = _v2_pr_first_api()
+            try:
+                return pr_first.observe(
+                    project=self.store.root, repository=self.store.repository,
+                    issue=issue, branch_ref=choice.branch_ref,
+                    base_revision=choice.base_revision,
+                    contract_id=choice.contract_id, read_issue=self.read_issue)
+            except V2PrFirstRefused as exc:
+                raise MainError(exc.code) from None
         session = self.v2_session_for_issue.get(issue)
         if session is not None:
             _, V2SessionObservationRefused = _v2_session_api()
