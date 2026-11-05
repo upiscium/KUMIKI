@@ -14,11 +14,13 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import time
 from pathlib import Path
 import re
 import subprocess
 import threading
+from types import MappingProxyType
 from typing import Callable
 from urllib.parse import quote
 
@@ -35,6 +37,14 @@ from task_view import (
 from task_collaboration import (
     TaskCollaboration, TaskCollaborationError, CollaborationReceipt,
 )
+try:
+    from .kagari_vnext_executor_selection import (
+        CLAUDE_CLI, OPENCODE, claude_runtime_diagnostic, is_executor_name,
+    )
+except ImportError:
+    from kagari_vnext_executor_selection import (
+        CLAUDE_CLI, OPENCODE, claude_runtime_diagnostic, is_executor_name,
+    )
 try:
     from .kagari_vnext_main_observation import isolated_metadata_observation
 except ImportError:
@@ -121,6 +131,11 @@ class ApprovedTask:
     branch_ref: str
     base_revision: str
     contract_id: str
+    executor: str = OPENCODE
+
+    def __post_init__(self) -> None:
+        if not is_executor_name(self.executor):
+            raise MainError("MAIN_EXECUTOR_INVALID")
 
 
 def _json_write_once(path: Path, obj: dict) -> None:
@@ -197,7 +212,23 @@ class RepositoryMain:
         if not isinstance(store, MetadataStore) or not callable(read_issue):
             raise MainError("MAIN_CONFIGURATION_INVALID")
         self.store = store
-        self.approved = approved.copy()
+        if type(approved) is not dict:
+            raise MainError("ELIGIBLE_ISSUES_REQUIRED")
+        cloned: dict[int, ApprovedTask] = {}
+        for number, selected in approved.items():
+            if type(number) is not int or type(selected) is not ApprovedTask:
+                raise MainError("ELIGIBLE_ISSUES_REQUIRED")
+            clone = ApprovedTask(
+                selected.issue, selected.branch_ref, selected.base_revision,
+                selected.contract_id, selected.executor)
+            if clone.issue != number:
+                raise MainError("ELIGIBLE_ISSUES_REQUIRED")
+            cloned[number] = clone
+        self._approved = MappingProxyType(cloned)
+        self._approved_snapshot = MappingProxyType({
+            number: self._choice_fields(choice)
+            for number, choice in cloned.items()
+        })
         self.read_issue = read_issue
         self.runtime_home = runtime_home
         self.port_for_issue = port_for_issue
@@ -268,18 +299,42 @@ class RepositoryMain:
                 or (bool(self.pr_for_issue) != bool(self.read_pr))
                 or (self.read_pr is not None and not callable(self.read_pr))):
             raise MainError("MAIN_OBSERVATION_INVALID")
-        if not self.approved or any(
-            type(n) is not int or type(p) is not ApprovedTask or p.issue != n
-            for n, p in self.approved.items()
-        ):
+        if not self.approved:
             raise MainError("ELIGIBLE_ISSUES_REQUIRED")
+
+    @staticmethod
+    def _choice_fields(choice: ApprovedTask) -> tuple[object, ...]:
+        return (choice.issue, choice.branch_ref, choice.base_revision,
+                choice.contract_id, choice.executor)
+
+    @property
+    def approved(self):
+        """Read-only mapping of Main-owned immutable selection snapshots."""
+        return self._approved
+
+    def _selected_choice(self, issue: int) -> ApprovedTask:
+        if type(issue) is not int or issue not in self.approved:
+            raise MainError("ISSUE_NOT_APPROVED")
+        choice = self.approved[issue]
+        if (type(choice) is not ApprovedTask
+                or self._choice_fields(choice) != self._approved_snapshot[issue]
+                or not is_executor_name(choice.executor)):
+            raise MainError("MAIN_SELECTION_CHANGED")
+        return choice
+
+    def _selected_executor(self, issue: int) -> str:
+        return self._selected_choice(issue).executor
+
+    def _require_executor_effects(self, issue: int) -> ApprovedTask:
+        choice = self._selected_choice(issue)
+        if choice.executor == CLAUDE_CLI:
+            raise MainError("CLAUDE_EXECUTOR_UNQUALIFIED")
+        return choice
 
     def _spec(
         self, issue: int, *, metadata_store: MetadataStore | None = None,
     ) -> tuple[ApprovedTask, dict]:
-        if type(issue) is not int or issue not in self.approved:
-            raise MainError("ISSUE_NOT_APPROVED")
-        choice = self.approved[issue]
+        choice = self._selected_choice(issue)
         store = metadata_store if metadata_store is not None else self.store
         try:
             tip = store.fetch_tip()
@@ -309,6 +364,9 @@ class RepositoryMain:
                 or facts.get("title") != snapshot["title"]
                 or facts.get("body") != snapshot["body"]):
             raise MainError("ISSUE_SNAPSHOT_DRIFT")
+        # A host reader is an external callback, not permission to change the
+        # pinned executor/Task choice during this observation.
+        self._selected_choice(issue)
         return choice, snapshot
 
     def _runtime(self, issue: int) -> Path:
@@ -548,6 +606,7 @@ class RepositoryMain:
             # lock: concurrent Git fetches can share FETCH_HEAD in one Git common dir.
             if type(issue) is not int or issue not in self.approved:
                 raise MainError("ISSUE_NOT_APPROVED")
+            choice = self._require_executor_effects(issue)
             common = Path(os.path.realpath(self.store.root / ".git"))
             if not common.is_dir() or common.parent != self.store.root:
                 raise MainError("PRIMARY_PROJECT_REQUIRED")
@@ -742,6 +801,34 @@ class RepositoryMain:
         except TaskViewError:
             raise MainError("TASK_VIEW_UNAVAILABLE") from None
 
+    def _claude_runtime_namespace(self, issue: int) -> Path:
+        """Refuse every pre-existing or unsafe per-Issue Claude runtime name."""
+        home = self.runtime_home
+        if (not isinstance(home, Path) or not home.is_absolute()
+                or ".." in home.parts):
+            raise MainError("EXECUTOR_RECONCILIATION_REQUIRED")
+        current = Path(home.anchor)
+        for component in home.parts[1:]:
+            current = current / component
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                # A missing ancestor means the complete namespace tail is absent.
+                return home / ("issue-" + str(issue))
+            except OSError:
+                raise MainError("EXECUTOR_RECONCILIATION_REQUIRED") from None
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise MainError("EXECUTOR_RECONCILIATION_REQUIRED")
+        runtime = home / ("issue-" + str(issue))
+        try:
+            runtime.lstat()
+        except FileNotFoundError:
+            return runtime
+        except OSError:
+            raise MainError("EXECUTOR_RECONCILIATION_REQUIRED") from None
+        # Includes empty directories, regular files, symlinks and dangling symlinks.
+        raise MainError("EXECUTOR_RECONCILIATION_REQUIRED")
+
     def guarded_draft_pr(self, issue: int, collaboration: object):
         """#194 PR continuation needs BOTH Task grants and a live Main owner.
 
@@ -757,6 +844,7 @@ class RepositoryMain:
             if owner is None:
                 raise MainError("MAIN_OWNER_REQUIRED")
             owner._assert_owned(self)
+            self._require_executor_effects(issue)
             choice, _snapshot = self._spec(issue)
             from task_collaboration import TaskCollaboration, TaskCollaborationError
             if (type(collaboration) is not TaskCollaboration
@@ -862,8 +950,6 @@ class RepositoryMain:
     ) -> dict:
         choice, snapshot = self._spec(
             issue, metadata_store=reader(self.store.root))
-        runtime = self._runtime(issue)
-        context = runtime / "context.json"
         approved_task = {
             "repository": self.store.repository, "issue": issue,
             "contract_id": choice.contract_id,
@@ -871,6 +957,29 @@ class RepositoryMain:
             "base_revision": choice.base_revision,
             "branch_ref": choice.branch_ref,
         }
+        if choice.executor == CLAUDE_CLI:
+            self._claude_runtime_namespace(issue)
+            target = self.store.root / ".worktrees" / str(issue)
+            try:
+                worktree_info = target.lstat()
+            except FileNotFoundError:
+                worktree_info = None
+            except OSError:
+                raise MainError("TASK_WORKTREE_MISMATCH") from None
+            if worktree_info is not None and stat.S_ISLNK(worktree_info.st_mode):
+                raise MainError("TASK_WORKTREE_MISMATCH")
+            view = self._live_view(choice, metadata_reader=reader)
+            return {
+                "status": "ok", "issue": issue,
+                "repository": self.store.repository,
+                "approved_task": approved_task,
+                "executor": CLAUDE_CLI,
+                "task_view": view,
+                "runtime": claude_runtime_diagnostic(),
+                "kickoff": "UNKNOWN",
+            }
+        runtime = self._runtime(issue)
+        context = runtime / "context.json"
         if not context.exists():
             # Before Session creation, show factual Git/Contract state. A
             # missing Worktree or an unconfirmed Task never becomes complete.

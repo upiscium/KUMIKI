@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 import copy
 import unittest
 from unittest.mock import patch
@@ -20,10 +19,8 @@ from tools.kagari_vnext_main import MainError
 from tools.kagari_vnext_main_v2_observation import (
     V2ReadOnlyMainHost, V2MainObservationRefused,
 )
-from tools.kagari_metadata_v2_task_admission import CurrentTaskReader
 from tests.test_metadata_v2 import REPOSITORY
 from task_record import encode_record
-from metadata_ref import MetadataStore
 
 
 class MainV2ReadOnlyTest(unittest.TestCase):
@@ -254,8 +251,12 @@ class MainV2ReadOnlyTest(unittest.TestCase):
             with self.assertRaisesRegex(V2MainObservationRefused, "BINDING"):
                 self.host(lease, selection=replace(self.source.selection(), issue=202))
             main = self.main(self.host(lease))
-            main.approved[self.issue] = replace(
-                main.approved[self.issue], branch_ref="refs/heads/not-approved")
+            selected = main.approved[self.issue]
+            with self.assertRaises(TypeError):
+                main.approved[self.issue] = replace(
+                    selected, branch_ref="refs/heads/not-approved")
+            # Simulate same-process corruption despite the read-only map.
+            object.__setattr__(selected, "branch_ref", "refs/heads/not-approved")
             with self.assertRaisesRegex(MainError, "V2_MAIN_TASK_BINDING_MISMATCH"):
                 main.observe(self.issue)
         self.assert_no_product_effects(before)

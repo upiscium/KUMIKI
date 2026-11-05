@@ -35,12 +35,14 @@ class CIPackageSetupTests(unittest.TestCase):
         # Core modules remain mandatory, but new package-backed test
         # modules are discovered automatically rather than forbidden.
         self.assertTrue(set(p.CORE_PACKAGE_TEST_MODULES)<=set(observed))
-        self.assertEqual(observed["test_kagari_v010_ci_packages"], {"composed","rc","ga"})
+        self.assertEqual(observed["test_kagari_v010_ci_packages"], {"composed","rc","ga","vnext-main"})
         self.assertEqual(observed["test_kagari_v010_durable_task_bridge"],
                          {"composed"})
         self.assertEqual(observed["test_kagari_vnext_main_service"],
                          {"vnext-main"})
         self.assertEqual(observed["test_kagari_vnext_cleanup_isolation"],
+                          {"vnext-main"})
+        self.assertEqual(observed["test_kagari_vnext_executor_selection"],
                          {"vnext-main"})
         self.assertEqual(set(x[1] for x in p.PACKAGES.values()),{
           "KAGARI_V010_NATIVE_GENERIC_PACKAGE",
@@ -136,9 +138,15 @@ class CIPackageSetupTests(unittest.TestCase):
                             for names in imports.values()))
         import ci_contract_runner as ci
         by_id=ci.assignments([t.id() for t in ci.discover()])
-        main_ids=[test_id for test_id in by_id if test_id.startswith((
-            "test_kagari_vnext_main_service.",
-            "test_kagari_vnext_cleanup_isolation."))]
+        vnext_modules = {module for module, needs in
+                         p.package_module_requirements(ROOT).items()
+                         if "vnext-main" in needs}
+        self.assertTrue({"test_kagari_vnext_main_service",
+                         "test_kagari_vnext_cleanup_isolation",
+                         "test_kagari_v010_ci_packages",
+                         "test_kagari_vnext_executor_selection"} <= vnext_modules)
+        main_ids=[test_id for test_id in by_id
+                  if test_id.split(".", 1)[0] in vnext_modules]
         self.assertTrue(main_ids)
         expected_shards={by_id[test_id] for test_id in main_ids}
         for shard in p.SHARD_RANGE:
@@ -190,7 +198,10 @@ class CIPackageSetupTests(unittest.TestCase):
             "kagari-vnext-worktree-install": "tools/kagari_vnext_worktree_ignore.py",
             "kagari-vnext-host-prepare": "tools/kagari_vnext_host_prepare.py",
             "kagari-vnext-attach": "tools/kagari_vnext_attach.py",
+            "kagari-vnext-attachment-gate": "tools/kagari_vnext_attachment_gate.py",
             "kagari-vnext-main": "tools/kagari_vnext_main_service.py",
+            "kagari-vnext-runtime": "tools/kagari_vnext_runtime.py",
+            "kagari-vnext-claude-preflight": "tools/kagari_vnext_claude_preflight.py",
         }
         self.assertEqual(p.VNEXT_MAIN_ENTRYPOINTS, expected)
         nix = (ROOT / "nix/kagari-vnext-control.nix").read_text()
@@ -204,6 +215,32 @@ class CIPackageSetupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ci-vnext-guard-") as tmp:
             with self.assertRaisesRegex(p.CIBlocked,"missing executable"):
                 p.verify_package(ROOT,"vnext-main",Path(tmp))
+
+    def test_vnext_package_claude_preflight_is_diagnostic_only(self):
+        import json
+        import os
+        import subprocess
+        value = os.environ.get("KAGARI_VNEXT_MAIN_PACKAGE")
+        if not value:
+            self.skipTest("KAGARI_VNEXT_MAIN_PACKAGE not supplied")
+        package = Path(value)
+        p.verify_package(ROOT, "vnext-main", package)
+        executable = package / "bin/kagari-vnext-claude-preflight"
+        # Static help and argument rejection do not inspect host profiles or
+        # invoke any Claude executable. All runtime fixtures remain synthetic.
+        help_result = subprocess.run([str(executable), "--help"],
+                                     capture_output=True, text=True, timeout=10)
+        self.assertEqual(help_result.returncode, 0)
+        self.assertIn("--probe-auth", help_result.stdout)
+        rejected = subprocess.run([str(executable), "--unexpected-secret-value"],
+                                  capture_output=True, text=True, timeout=10)
+        self.assertEqual(rejected.returncode, 1)
+        self.assertEqual(rejected.stderr, "")
+        result = json.loads(rejected.stdout)
+        self.assertEqual(result["status"], "INVALID_CONFIGURATION")
+        self.assertEqual(result["executor_qualification"], "UNQUALIFIED")
+        self.assertFalse(result["dispatch_allowed"])
+        self.assertNotIn("unexpected-secret-value", rejected.stdout)
 
     def test_vnext_package_profile_strict_store_path(self):
         prefix="/nix/store/"+"a"*32

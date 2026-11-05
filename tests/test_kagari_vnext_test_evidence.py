@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-import subprocess
 import sys
 import unittest
 from unittest.mock import patch
@@ -73,7 +72,7 @@ class TaskTestEvidenceTests(unittest.TestCase):
         observed=self.main._live_view(self.main.approved[291],self.worktree)
         self.assertEqual(observed["evidence"],[])
         selected=type(self.main)(
-            self.fixture.store,approved=self.main.approved,
+            self.fixture.store,approved=dict(self.main.approved),
             read_issue=lambda n:self.fixture.facts[n].copy(),
             runtime_home=self.main.runtime_home,
             port_for_issue=self.fixture.ports.__getitem__,

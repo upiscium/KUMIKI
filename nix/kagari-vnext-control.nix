@@ -14,6 +14,7 @@ let
     cp ${../tools/kagari_vnext_attachment_gate.py} "$out/tools/kagari_vnext_attachment_gate.py"
     cp ${../tools/kagari_vnext_runtime.py} "$out/tools/kagari_vnext_runtime.py"
     cp ${../tools/kagari_vnext_main.py} "$out/tools/kagari_vnext_main.py"
+    cp ${../tools/kagari_vnext_executor_selection.py} "$out/tools/kagari_vnext_executor_selection.py"
     cp ${../tools/kagari_vnext_main_observation.py} "$out/tools/kagari_vnext_main_observation.py"
     cp ${../tools/kagari_vnext_main_service.py} "$out/tools/kagari_vnext_main_service.py"
     # #339: host-injected loopback Control Server/bridge, not a new CLI launcher.
@@ -23,6 +24,7 @@ let
     cp ${../tools/kagari_vnext_issue_bootstrap.py} "$out/tools/kagari_vnext_issue_bootstrap.py"
     cp ${../tools/kagari_vnext_progress.py} "$out/tools/kagari_vnext_progress.py"
     cp ${../tools/kagari_vnext_test_evidence.py} "$out/tools/kagari_vnext_test_evidence.py"
+    cp ${../tools/kagari_vnext_claude_preflight.py} "$out/tools/kagari_vnext_claude_preflight.py"
     cp ${../components/agent-core-v4/issue_worktree.py} "$out/components/agent-core-v4/issue_worktree.py"
     cp ${../components/agent-core-v4/issue_worktree_cleanup.py} "$out/components/agent-core-v4/issue_worktree_cleanup.py"
     cp ${../components/agent-core-v4/evidence.py} "$out/components/agent-core-v4/evidence.py"
@@ -90,7 +92,14 @@ let
       exec ${pkgs.python3}/bin/python3 -B ${sources}/tools/kagari_vnext_runtime.py "$@"
     '';
   };
+  # Diagnostic only: does not register or activate a Claude executor.
+  claudePreflight = pkgs.writeShellApplication {
+    name = "kagari-vnext-claude-preflight";
+    text = ''
+      exec ${pkgs.python3}/bin/python3 -B ${sources}/tools/kagari_vnext_claude_preflight.py "$@"
+    '';
+  };
 in pkgs.symlinkJoin {
   name = "kagari-vnext-control";
-  paths = [ task session worktreeInstall hostPrepare hostAttach attachmentGate main runtime ];
+  paths = [ task session worktreeInstall hostPrepare hostAttach attachmentGate main runtime claudePreflight ];
 }
