@@ -1125,6 +1125,151 @@ class CheckpointV2Test(unittest.TestCase):
             self.publisher.publish(turn, previous_comment_id=original.comment_id)
         self.assertEqual(2, self.post_calls)
 
+    def test_ordinary_own_comment_mentioning_marker_is_not_checkpoint(self):
+        initial_comment = self.add_comment(self.initial)
+        note = self.add_comment(
+            self.initial, body=f"Code review note: {MARKER} is a format name")
+        self.assertGreater(note.comment_id, initial_comment.comment_id)
+        existing = self.publisher.publish(self.initial)
+        self.assertEqual(initial_comment.comment_id, existing.comment_id)
+        self.assertEqual(0, self.post_calls)
+        previous = {
+            "state": "observed", "checkpoint_id": str(initial_comment.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn = self.add_snapshot(self.initial.metadata_commit,
+                                 boundary="turn-end", previous=previous)
+        posted = self.publisher.publish(
+            turn, previous_comment_id=initial_comment.comment_id)
+        self.assertGreater(posted.comment_id, note.comment_id)
+        self.assertEqual(1, self.post_calls)
+
+    def test_malformed_first_line_checkpoint_opener_is_not_ignored(self):
+        bad = self.add_comment(
+            self.initial, body=f"<!-- {MARKER} sha256=bad -->\nCapsule: broken")
+        with self.assertRaises(CheckpointRefused):
+            self.publisher.publish(self.initial)
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
+        self.assertEqual(bad, self.comments[0])
+
+    def test_lease_exit_refusal_after_confirmed_post_is_uncertain(self):
+        @contextmanager
+        def release_failure(value, deadline):
+            self.assertLess(time.monotonic(), deadline)
+            yield True
+            raise CheckpointRefused("synthetic_lease_release_failure")
+
+        with self.assertRaisesRegex(
+                CheckpointUncertain, "stream_lease_uncertain"):
+            self.publisher_for(stream_lease=release_failure).publish(self.initial)
+        self.assertEqual(1, self.post_calls)
+        self.assertEqual(1, len(list(self.jpath.iterdir())))
+        # Same-key recovery: the original posted ID, never a second post.
+        confirmed = self.publisher.publish(self.initial)
+        self.assertEqual(self.comments[0].comment_id, confirmed.comment_id)
+        self.assertEqual(1, self.post_calls)
+
+    def test_lease_exit_refusal_before_intent_stays_refused(self):
+        @contextmanager
+        def denied_then_release_failure(value, deadline):
+            try:
+                yield False
+            finally:
+                raise CheckpointRefused("synthetic_lease_release_failure")
+
+        with self.assertRaisesRegex(
+                CheckpointRefused, "synthetic_lease_release_failure") as raised:
+            self.publisher_for(
+                stream_lease=denied_then_release_failure).publish(self.initial)
+        self.assertNotIsInstance(raised.exception, CheckpointUncertain)
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
+
+    def test_lease_exit_refusal_overrides_unknown_post_but_stays_uncertain(self):
+        @contextmanager
+        def release_failure(value, deadline):
+            try:
+                yield True
+            finally:
+                # __exit__ deliberately overrides the body-side uncertain
+                # exception, like a failing real Host lease release.
+                raise CheckpointRefused("synthetic_lease_release_failure")
+
+        self.writer_error = "before"
+        with self.assertRaisesRegex(
+                CheckpointUncertain, "stream_lease_uncertain"):
+            self.publisher_for(stream_lease=release_failure).publish(self.initial)
+        self.assertEqual(1, self.post_calls)
+        self.assertEqual(1, len(list(self.jpath.iterdir())))
+        self.writer_error = False
+        with self.assertRaises(CheckpointUncertain):
+            self.publisher.publish(self.initial)
+        self.assertEqual(1, self.post_calls)
+
+    def test_lease_suppressed_unknown_effect_is_still_uncertain(self):
+        @contextmanager
+        def suppress_body_exception(value, deadline):
+            try:
+                yield True
+            except CheckpointRefused:
+                return  # adversarial __exit__ suppresses CheckpointUncertain
+
+        self.writer_error = "before"
+        with self.assertRaises(CheckpointUncertain):
+            self.publisher_for(
+                stream_lease=suppress_body_exception).publish(self.initial)
+        self.assertEqual(1, self.post_calls)
+        self.assertEqual(1, len(list(self.jpath.iterdir())))
+        self.writer_error = False
+        with self.assertRaises(CheckpointUncertain):
+            self.publisher.publish(self.initial)
+        self.assertEqual(1, self.post_calls)
+
+    def test_lease_suppressed_pre_intent_denial_stays_refused(self):
+        @contextmanager
+        def suppress_pre_intent_denial(value, deadline):
+            try:
+                yield False
+            except CheckpointRefused:
+                return  # adversarial __exit__ suppresses the require failure
+
+        with self.assertRaisesRegex(
+                CheckpointRefused, "checkpoint_stream_pending") as raised:
+            self.publisher_for(
+                stream_lease=suppress_pre_intent_denial).publish(self.initial)
+        self.assertNotIsInstance(raised.exception, CheckpointUncertain)
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
+
+    def test_post_interrupt_and_lease_exit_refusal_cannot_be_safe_refusal(self):
+        @contextmanager
+        def release_failure(value, deadline):
+            try:
+                yield True
+            finally:
+                # Host release overrides the BaseException from _post.
+                raise CheckpointRefused("synthetic_lease_release_failure")
+
+        def post_then_interrupt(pr_number, body, deadline):
+            self.post(pr_number, body, deadline)
+            raise KeyboardInterrupt("synthetic_interrupt_after_effect")
+
+        with self.assertRaisesRegex(
+                CheckpointUncertain, "stream_lease_uncertain"):
+            self.publisher_for(
+                stream_lease=release_failure,
+                post=post_then_interrupt).publish(self.initial)
+        self.assertEqual(1, self.post_calls)
+        self.assertEqual(1, len(list(self.jpath.iterdir())))
+        # Recovery adopts the original ID; never a second comment.
+        confirmed = self.publisher.publish(self.initial)
+        self.assertEqual(self.comments[0].comment_id, confirmed.comment_id)
+        self.assertEqual(1, self.post_calls)
+
 
 if __name__ == "__main__":
     unittest.main()
