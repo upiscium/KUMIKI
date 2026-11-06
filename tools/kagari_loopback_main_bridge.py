@@ -48,10 +48,10 @@ class MainBridge:
     ) -> dict:
         """Validate the existing #291 v2 current-Task observation, not a grant.
 
-        R19 Phase A exposes only a conservative detached status and a
-        positively Host-confirmed NOT_STARTED Ask refusal. An unknown or
-        native-present Session is deliberately NOT offered as a completed
-        Task, a confirmed empty Ask queue, or an Ask reply capability.
+        R19/R21 conservatively expose detached status and only
+        Host-verified read-only pending Asks, never an Ask reply or a Task
+        execution grant. An unverified/unknown Session never becomes an
+        empty Ask queue or a successful Task.
         """
         if type(view) is not dict:
             raise MainBridgeError("V2_MAIN_OBSERVATION_MISMATCH")
@@ -85,6 +85,115 @@ class MainBridge:
                 or view.get("kickoff") not in ("NOT_SENT", "UNKNOWN")):
             raise MainBridgeError("V2_MAIN_OBSERVATION_MISMATCH")
         return view
+
+    def _v2_pending_asks(
+        self, task: str, issue: int, choice: ApprovedTask, view: dict,
+        session: object,
+    ) -> dict:
+        """Expose only #291-bound native pending Requests from one root Session.
+
+        R21 does not reply, launch a Session, or interpret pending work as a
+        Task dispatch/completion verdict. All upstream identity is read from
+        the existing v2 Host observation after current-Task reconciliation.
+        """
+        if type(session) is not dict:
+            raise MainBridgeError("ASK_SESSION_UNCERTAIN")
+        pending = session.get("pending_asks")
+        identity = session.get("task")
+        sid = session.get("session_id")
+        worktree = session.get("worktree")
+        if (view.get("runtime") != "EXISTING_SESSION_OBSERVED"
+                or view.get("kickoff") != "UNKNOWN"
+                or session.get("state") != "PENDING_ASK"
+                or session.get("reason") != "ACTUAL_PENDING_ASK"
+                or session.get("session_state") not in ("busy", "retry", "idle", "UNKNOWN")
+                or type(sid) is not str
+                or re.fullmatch(r"ses_[A-Za-z0-9_-]{8,120}", sid) is None
+                or type(worktree) is not str
+                or worktree != str(self.main.store.root / ".worktrees" / str(issue))
+                or type(identity) is not dict
+                or identity.get("repository") != self.main.store.repository
+                or type(identity.get("issue")) is not int
+                or identity["issue"] != issue
+                or identity.get("session_id") != sid
+                or identity.get("worktree") != worktree
+                or identity.get("contract_sha256") != choice.contract_id
+                or identity.get("contract_revision") != "contract:" + choice.contract_id[:16]
+                or type(pending) is not list or not (1 <= len(pending) <= 32)
+                or type(session.get("pending_count")) is not int
+                or session["pending_count"] != len(pending)):
+            raise MainBridgeError("ASK_SESSION_UNCERTAIN")
+        result = []
+        seen = set()
+        for item in pending:
+            if type(item) is not dict or item.get("kind") not in (
+                    "permission", "question"):
+                raise MainBridgeError("ASK_OBSERVATION_INVALID")
+            kind = item["kind"]
+            rid = item.get("request_id")
+            pattern = (r"per_[A-Za-z0-9_-]{8,120}" if kind == "permission"
+                       else r"que_[A-Za-z0-9_-]{8,120}")
+            bound = item.get("task")
+            upstream = item.get("upstream")
+            if (type(rid) is not str or re.fullmatch(pattern, rid) is None
+                    or rid in seen or type(bound) is not dict
+                    or bound.get("repository") != self.main.store.repository
+                    or type(bound.get("issue")) is not int or bound["issue"] != issue
+                    or bound.get("contract_sha256") != choice.contract_id
+                    or bound.get("session_id") != sid
+                    or bound.get("worktree") != worktree
+                    or bound != identity or type(upstream) is not dict
+                    or upstream.get("id") != rid
+                    or upstream.get("sessionID") != sid):
+                raise MainBridgeError("ASK_BINDING_MISMATCH")
+            # Upstream identity is not sufficient to assert a real Pending
+            # Permission/Question: verify the supported native request body
+            # before showing it to a caller. Unsupported future shapes are
+            # unavailable, not a successful or automatically answered Ask.
+            if kind == "permission":
+                patterns = upstream.get("patterns")
+                permission = upstream.get("permission")
+                metadata = upstream.get("metadata")
+                if (type(permission) is not str or not (1 <= len(permission) <= 160)
+                        or type(patterns) is not list
+                        or not (1 <= len(patterns) <= 64)
+                        or any(type(x) is not str or not (1 <= len(x) <= 2048)
+                               for x in patterns)
+                        or (metadata is not None and type(metadata) is not dict)):
+                    raise MainBridgeError("ASK_OBSERVATION_INVALID")
+            else:
+                questions = upstream.get("questions")
+                if (type(questions) is not list
+                        or not (1 <= len(questions) <= 8)):
+                    raise MainBridgeError("ASK_OBSERVATION_INVALID")
+                for question in questions:
+                    if type(question) is not dict:
+                        raise MainBridgeError("ASK_OBSERVATION_INVALID")
+                    header = question.get("header")
+                    question_text = question.get("question")
+                    options = question.get("options")
+                    if (type(question_text) is not str
+                            or not (1 <= len(question_text) <= 4096)
+                            or type(header) is not str
+                            or not (1 <= len(header) <= 160)
+                            or type(options) is not list
+                            or not (1 <= len(options) <= 32)
+                            or any(type(option) is not dict
+                                   or type(option.get("label")) is not str
+                                   or not (1 <= len(option["label"]) <= 2048)
+                                   or type(option.get("description")) is not str
+                                   or len(option["description"]) > 2048
+                                   for option in options)
+                            or ("multiple" in question
+                                and type(question["multiple"]) is not bool)
+                            or ("custom" in question
+                                and type(question["custom"]) is not bool)):
+                        raise MainBridgeError("ASK_OBSERVATION_INVALID")
+            seen.add(rid)
+            result.append({"kind": kind, "request_id": rid,
+                           "upstream": upstream})
+        return {"task": task, "contract_id": choice.contract_id,
+                "root_session_id": sid, "pending": result}
 
     def status(self, task: str) -> dict:
         """Map factual #291 observations to a conservative transport status.
@@ -158,10 +267,10 @@ class MainBridge:
                     and view.get("runtime") == "NOT_STARTED"
                     and view.get("kickoff") == "NOT_SENT"):
                 raise MainBridgeError("ASK_SESSION_NOT_STARTED")
-            # R5A0 has no authenticated native Session locator; a v2
-            # UNKNOWN or PRESENT locator also cannot establish a confirmed
-            # empty Ask queue or a writable reply path at R19 Phase A.
-            raise MainBridgeError("ASK_SESSION_UNCERTAIN")
+            # R5B0 already re-observed current v2 Task/Lease/Contract
+            # after native reads. R21 only exposes its positive pending
+            # facts; an absent/unknown/empty Session never gets a 200.
+            return self._v2_pending_asks(task, issue, choice, view, session)
         if (type(view) is not dict or view.get("status") != "ok"
                 or view.get("issue") != issue
                 or view.get("repository") != self.main.store.repository
