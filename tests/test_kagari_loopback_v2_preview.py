@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from types import MappingProxyType
+import copy
 import json
 import threading
 import unittest
@@ -195,6 +196,19 @@ class V2SessionPreviewTests(unittest.TestCase):
         self.source = source
         self.before = source.snapshot()
 
+    def _valid_native_asks(self):
+        """Model the required OpenCode 1.18.35 QuestionInfo/Option fields.
+
+        The older #291 R5B0 observation fixture intentionally omits optional
+        display details; R21's positive HTTP view has a stricter validated
+        supported-body subset.
+        """
+        self.source.native_asks()
+        for question in self.source.questions[0]["questions"]:
+            question["question"] = "Continue with this Task?"
+            for option in question["options"]:
+                option["description"] = option["label"] + " choice"
+
     def _probe(self):
         s = self.source
         with gate.hold_verified(s.src.project,s.src.home,s.src.package) as lease:
@@ -243,16 +257,170 @@ class V2SessionPreviewTests(unittest.TestCase):
                         (503,{"error_code":"ASK_SESSION_UNCERTAIN"}))
         s.preserved(self.before)
 
-    def test_existing_native_pending_is_not_implicitly_actionable(self):
+    def test_existing_native_pending_is_readonly_and_task_bound(self):
         self.source.existing_worktree()
         self.before = self.source.snapshot()
         self.source.locator_state="PRESENT"
-        self.source.native_asks()
-        status,asks=self._probe()
-        self.assertEqual(status,(200,{"task":"101","state":"UNKNOWN"}))
-        self.assertEqual(asks,(503,{"error_code":"ASK_SESSION_UNCERTAIN"}))
-        self.assertGreater(len(self.source.http_calls),0)
+        self._valid_native_asks()
+        status, asks = self._probe()
+        self.assertEqual(status, (200, {"task": "101", "state": "UNKNOWN"}))
+        self.assertEqual(200, asks[0])
+        result = asks[1]
+        self.assertEqual("101", result["task"])
+        self.assertEqual(self.source.src.registered.contract_id, result["contract_id"])
+        self.assertEqual(v2_session.SID, result["root_session_id"])
+        self.assertEqual(2, len(result["pending"]))
+        self.assertEqual(
+            {v2_session.PER, v2_session.QUE},
+            {x["request_id"] for x in result["pending"]})
+        self.assertEqual({"permission", "question"},
+                         {x["kind"] for x in result["pending"]})
+        self.assertTrue(all(x["upstream"]["sessionID"] == v2_session.SID
+                            for x in result["pending"]))
+        self.assertGreater(len(self.source.http_calls), 0)
         self.source.preserved(self.before)
+
+    def test_present_native_session_without_pending_is_not_empty_success(self):
+        self.source.existing_worktree()
+        self.before = self.source.snapshot()
+        self.source.locator_state="PRESENT"
+        self.source.native_status="idle"
+        status, asks = self._probe()
+        self.assertEqual(status, (200, {"task": "101", "state": "UNKNOWN"}))
+        self.assertEqual(asks, (503, {"error_code": "ASK_SESSION_UNCERTAIN"}))
+        self.source.preserved(self.before)
+
+    def _spoof_pending(self, transform):
+        s = self.source
+        s.existing_worktree()
+        self.before = s.snapshot()
+        self._valid_native_asks()
+        with gate.hold_verified(s.src.project, s.src.home, s.src.package) as lease:
+            main = s.main({s.issue: s.make_host(lease)})
+            with patch.object(v2_session_module.OpenCode, "request",
+                    new=lambda client, path, method="GET", payload=None:
+                    s.mock_request(client, path, method, payload)):
+                actual = main.observe(s.issue)
+                self.assertEqual("PENDING_ASK",
+                                 actual["session_observation"]["state"])
+                changed = copy.deepcopy(actual)
+                transform(changed["session_observation"])
+                with patch.object(main, "observe", return_value=changed):
+                    with listening(main) as server:
+                        status = request(server, "/tasks/101/status")
+                        asks = request(server, "/tasks/101/asks")
+        self.assertEqual(status, (200, {"task": "101", "state": "UNKNOWN"}))
+        s.preserved(self.before)
+        return asks
+
+    def test_bogus_upstream_session_fails_closed(self):
+        def modify(session):
+            session["pending_asks"][0]["upstream"]["sessionID"]="ses_foreign12345"
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code": "ASK_BINDING_MISMATCH"}))
+
+    def test_foreign_contract_in_bound_ask_fails_closed(self):
+        def modify(session):
+            session["pending_asks"][0]["task"]["contract_sha256"]="f"*64
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code": "ASK_BINDING_MISMATCH"}))
+
+    def test_permission_requires_native_body_not_just_ids(self):
+        def modify(session):
+            upstream=session["pending_asks"][0]["upstream"]
+            upstream.pop("permission",None)
+            upstream.pop("patterns",None)
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_OBSERVATION_INVALID"}))
+
+    def test_permission_rejects_malformed_patterns(self):
+        def modify(session):
+            session["pending_asks"][0]["upstream"]["patterns"]=[False]
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_OBSERVATION_INVALID"}))
+
+    def test_question_requires_nested_question_body(self):
+        def modify(session):
+            session["pending_asks"][1]["upstream"].pop("questions",None)
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_OBSERVATION_INVALID"}))
+
+    def test_question_missing_text_is_not_a_verified_ask(self):
+        def modify(session):
+            session["pending_asks"][1]["upstream"]["questions"][0].pop("question")
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_OBSERVATION_INVALID"}))
+
+    def test_question_wrong_text_type_is_not_a_verified_ask(self):
+        def modify(session):
+            session["pending_asks"][1]["upstream"]["questions"][0]["question"]=False
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_OBSERVATION_INVALID"}))
+
+    def test_question_excessive_text_is_not_a_verified_ask(self):
+        def modify(session):
+            session["pending_asks"][1]["upstream"]["questions"][0]["question"]="x"*5000
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_OBSERVATION_INVALID"}))
+
+    def test_question_missing_option_description_is_not_verified(self):
+        def modify(session):
+            session["pending_asks"][1]["upstream"]["questions"][0]["options"][0].pop("description")
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_OBSERVATION_INVALID"}))
+
+    def test_question_optional_flag_wrong_type_is_not_verified(self):
+        def modify(session):
+            session["pending_asks"][1]["upstream"]["questions"][0]["multiple"]=0
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_OBSERVATION_INVALID"}))
+
+    def test_oversized_extra_upstream_data_is_rejected_by_existing_http_bound(self):
+        def modify(session):
+            session["pending_asks"][0]["upstream"]["metadata"]["padding"]="x"*70000
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_OBSERVATION_TOO_LARGE"}))
+
+    def test_question_rejects_malformed_option_and_flags(self):
+        def modify(session):
+            question=session["pending_asks"][1]["upstream"]["questions"][0]
+            question["options"]=[{"label":None}]
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_OBSERVATION_INVALID"}))
+
+    def test_duplicate_request_identity_fails_closed(self):
+        def modify(session):
+            session["pending_asks"][1]=copy.deepcopy(session["pending_asks"][0])
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code": "ASK_BINDING_MISMATCH"}))
+
+    def test_wrong_pending_count_fails_closed(self):
+        def modify(session):
+            session["pending_count"]=0
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code": "ASK_SESSION_UNCERTAIN"}))
+
+    def test_boolean_issue_in_session_subject_fails_closed(self):
+        def modify(session):
+            session["task"]["issue"]=True
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code": "ASK_SESSION_UNCERTAIN"}))
+
+    def test_consistent_foreign_absolute_worktree_is_still_rejected(self):
+        def modify(session):
+            foreign="/tmp/foreign-registered-worktree"
+            session["worktree"]=foreign
+            session["task"]["worktree"]=foreign
+            for pending in session["pending_asks"]:
+                pending["task"]["worktree"]=foreign
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code":"ASK_SESSION_UNCERTAIN"}))
+
+    def test_foreign_worktree_binding_fails_closed(self):
+        def modify(session):
+            session["pending_asks"][0]["task"]["worktree"]="/tmp/foreign-issue"
+        self.assertEqual(self._spoof_pending(modify),
+                         (503, {"error_code": "ASK_BINDING_MISMATCH"}))
 
 
 if __name__=="__main__":
