@@ -1,5 +1,11 @@
 # KUMIKI #291 R5C0 — opt-in Metadata v2 PR-first initial checkpoint read-only proof
 
+**Historical source note:** the R5C0 provisional `kagari-v2-initial-checkpoint/v1`
+codec described here is superseded by R5C1B0. Current opt-in v2 PR-first
+read-only proof must use `kagari-pr-checkpoint/v2` via #337
+`ExactCheckpointReader`; see `kagari-vnext-main-v2-r5c1b0.md`.
+
+
 **Status:** Uncommitted source-only candidate. No runtime activation, real GitHub
 reads/writes, Product PR, Session/model, Ask reply, release or deployment.
 

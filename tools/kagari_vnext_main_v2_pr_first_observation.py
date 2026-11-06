@@ -1,4 +1,4 @@
-"""#291 R5C0: Host-only v2 PR-first + initial checkpoint read-only proof.
+"""#291 R5C0/R5C1B0: Host-only canonical v2 PR-first read-only proof.
 
 Never creates Product commits/PR/comments/Metadata, runs a Task/Session/model,
 or consumes #194's v1 TaskCollaboration for v2 authority. Host supplies
@@ -7,11 +7,8 @@ A positive proof is an observation, NOT a Task launch grant.
 """
 from __future__ import annotations
 
-import base64
 from collections.abc import Callable
 from dataclasses import dataclass
-import hashlib
-import json
 from pathlib import Path
 import re
 
@@ -26,27 +23,22 @@ else:
     from kagari_vnext_task_binding import (
         worktree_registered, git, ControlError)
 
-# #337 and #194 use canonical top-level Host types. Do not import them again
-# as tools.* and accidentally create distinct nominal dataclass identities.
-from kagari_metadata_v2_host_binding import (
-    ExactLocator, ReadOnlyMetadataV2Host, MetadataV2HostRefused, VERSION)
-from task_collaboration import RepositoryFacts, PullFacts, CommentFacts
-from task_view import decode_snapshot, TaskViewError
-from metadata_codec import encode_object
+# Reuse the one canonical #337 codec/identity types, not a second "v2" parser.
+# These are top-level import identities shared by #337 and #291's Host.
+from kagari_metadata_v2_pr_checkpoint import (
+    V2PRCheckpoint, CommentFacts as V2CheckpointCommentFacts,
+    ConfirmedCheckpoint, ExactCheckpointReader, CheckpointRefused,
+    decode_checkpoint)
+from task_collaboration import RepositoryFacts, PullFacts
 
-
-_MARKER = re.compile(
-    r"<!-- kagari-v2-initial-checkpoint/v1 sha256=([0-9a-f]{64}) -->\Z")
 _SHA40 = re.compile(r"[0-9a-f]{40}\Z")
-_SHA64 = re.compile(r"[0-9a-f]{64}\Z")
-_DOMAIN = b"kagari-v2-initial-checkpoint/v1\n"
-_MAX_BODY = 16_384
-_FIELDS = {
-    "schema_version", "metadata_version", "repository_id", "repository",
-    "issue", "branch_ref", "base_ref", "pr_number", "principal", "subject",
-    "metadata_commit", "record_id", "contract_id", "snapshot_id",
-    "boundary", "key", "report",
-}
+_MAX_COMMENT_BYTES = 8 * 1024 * 1024
+# Only an actual beginning-of-body checkpoint opener is eligible. Ordinary
+# discussion mentioning a format string is NOT a checkpoint candidate.
+_RESERVED_CHECKPOINT_OPENERS = (
+    "<!-- kagari-pr-checkpoint", "<!-- kagari-v2-initial-checkpoint",
+    "<!-- agentcore-task-checkpoint",
+)
 
 
 class V2PrFirstRefused(ValueError):
@@ -60,77 +52,6 @@ class V2PrFirstRefused(ValueError):
 def need(ok: bool, code: str) -> None:
     if not ok:
         raise V2PrFirstRefused(code)
-
-
-def _canonical(value: dict) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-
-
-def _no_dupes(pairs: list[tuple[str, object]]) -> dict:
-    value = {}
-    for name, item in pairs:
-        if name in value:
-            raise V2PrFirstRefused("R5C0_CAPSULE_DUPLICATE_KEY")
-        value[name] = item
-    return value
-
-
-def decode_initial_capsule(body: str) -> dict:
-    """Parse a version-2 checkpoint with closed canonical authenticated bytes.
-
-    The comment author's identity is validated independently against the
-    trusted Host principal; this digest is *integrity*, not authentication.
-    """
-    need(type(body) is str, "R5C0_CAPSULE_INVALID")
-    try:
-        encoded_body = body.encode("utf-8", errors="strict")
-    except UnicodeError:
-        raise V2PrFirstRefused("R5C0_CAPSULE_INVALID") from None
-    need(len(encoded_body) <= _MAX_BODY, "R5C0_CAPSULE_INVALID")
-    lines = body.split("\n")
-    need(len(lines) == 3 and _MARKER.fullmatch(lines[0]) is not None
-         and lines[1] == "Task checkpoint (initial):"
-         and lines[2].startswith("Capsule: "),
-         "R5C0_CAPSULE_INVALID")
-    digest = _MARKER.fullmatch(lines[0]).group(1)
-    encoded = lines[2][len("Capsule: "):]
-    try:
-        raw = base64.b64decode(encoded, validate=True)
-        value = json.loads(raw.decode("ascii"), object_pairs_hook=_no_dupes)
-    except V2PrFirstRefused:
-        raise
-    except (ValueError, UnicodeError, TypeError, RecursionError):
-        raise V2PrFirstRefused("R5C0_CAPSULE_INVALID") from None
-    try:
-        canonical = _canonical(value)
-    except (ValueError, UnicodeError, TypeError, RecursionError):
-        raise V2PrFirstRefused("R5C0_CAPSULE_INVALID") from None
-    need(base64.b64encode(raw).decode("ascii") == encoded
-         and type(value) is dict and value.keys() == _FIELDS
-         and canonical == raw
-         and hashlib.sha256(_DOMAIN + raw).hexdigest() == digest,
-         "R5C0_CAPSULE_INVALID")
-    for field in ("repository", "branch_ref", "base_ref", "subject",
-                  "metadata_commit", "record_id", "contract_id", "snapshot_id",
-                  "boundary", "key", "report"):
-        need(type(value[field]) is str, "R5C0_CAPSULE_INVALID")
-    try:
-        report_bytes = value["report"].encode("utf-8", errors="strict")
-    except UnicodeError:
-        raise V2PrFirstRefused("R5C0_CAPSULE_INVALID") from None
-    need(type(value["schema_version"]) is int and value["schema_version"] == 1
-         and type(value["metadata_version"]) is int and value["metadata_version"] == VERSION
-         and all(type(value[k]) is int and value[k] > 0 for k in
-                 ("repository_id", "issue", "pr_number", "principal"))
-         and bool(_SHA40.fullmatch(value["subject"]))
-         and bool(_SHA40.fullmatch(value["metadata_commit"]))
-         and all(_SHA64.fullmatch(value[k]) is not None
-                 for k in ("record_id", "contract_id", "snapshot_id"))
-         and value["boundary"] == "initial" and value["key"] == "initial"
-         and 0 < len(report_bytes) <= 4096,
-         "R5C0_CAPSULE_INVALID")
-    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,30 +83,31 @@ class PrFirstFacts:
     principal: int
     remote_head: str | None
     pulls: tuple[PullFacts, ...]
-    comments: tuple[CommentFacts, ...]
+    comments: tuple[V2CheckpointCommentFacts, ...]
     complete: bool
 
 
 @dataclass(frozen=True, slots=True)
 class V2PrFirstReadOnlyHost:
     readonly: V2ReadOnlyMainHost
-    history: ReadOnlyMetadataV2Host
+    checkpoint: ExactCheckpointReader
     expected_base_ref: str
     read_facts: Callable[[PrFirstRequest], PrFirstFacts]
 
     def __post_init__(self) -> None:
         rd = self.readonly
         need(type(rd) is V2ReadOnlyMainHost
-             and type(self.history) is ReadOnlyMetadataV2Host
+             and type(self.checkpoint) is ExactCheckpointReader
              and type(self.expected_base_ref) is str
              and self.expected_base_ref.startswith("refs/heads/")
              and self.expected_base_ref != rd.current_reader.registered.branch_ref
              and callable(self.read_facts), "R5C0_HOST_INVALID")
         identity = rd.current_reader.identity
         registered = rd.current_reader.registered
-        need(self.history._identity == identity
-             and self.history._registered == registered,
-             "R5C0_HISTORY_HOST_MISMATCH")
+        need(self.checkpoint.identity == identity
+             and self.checkpoint.registered == registered
+             and self.checkpoint.base_ref == self.expected_base_ref,
+             "R5C1B0_CHECKPOINT_HOST_MISMATCH")
 
     def observe(
         self, *, project: Path, repository: str, issue: int,
@@ -258,12 +180,43 @@ class V2PrFirstReadOnlyHost:
             return response
 
         before = facts()
-        # The read_facts callback must exhaustively enumerate matching PRs
-        # for this exact head branch. Duplicate, moved or foreign candidates
-        # are never silently selected by "first match".
-        need(all(type(p) is PullFacts for p in before.pulls)
-             and all(type(c) is CommentFacts and type(c.body) is str
-                     for c in before.comments),
+        # Validate *every* authenticated inventory entry, before selecting an
+        # author-owned initial checkpoint. An unknown/truncated inventory, a
+        # forged repo ID or duplicate/non-monotonic comment ID is not authority.
+        def validated_comments(response: PrFirstFacts) -> None:
+            total = 0
+            previous = 0
+            for item in response.comments:
+                need(type(item) is V2CheckpointCommentFacts
+                     and type(item.repository_id) is int
+                     and type(item.pr_number) is int
+                     and type(item.comment_id) is int
+                     and type(item.author_id) is int
+                     and type(item.repository) is str
+                     and type(item.kind) is str
+                     and type(item.body) is str
+                     and (item.repository_id, item.repository,
+                          item.pr_number, item.kind)
+                     == (first.repository_id, repository, pr.number, "pr")
+                     and 0 < item.comment_id <= (1 << 63) - 1
+                     and 0 < item.author_id <= (1 << 63) - 1
+                     and item.comment_id > previous,
+                     "R5C1B0_COMMENT_INVENTORY_INVALID")
+                try:
+                    count = len(item.body.encode("utf-8", "strict"))
+                except UnicodeError:
+                    raise V2PrFirstRefused(
+                        "R5C1B0_COMMENT_INVENTORY_INVALID") from None
+                total += count
+                # #337 bounds the complete PR inventory at its Host source,
+                # not all unrelated human comments to the 16 KiB capsule
+                # limit. The canonical decoder separately enforces that
+                # smaller bound on actual owned checkpoint comments.
+                need(total <= _MAX_COMMENT_BYTES,
+                     "R5C1B0_COMMENT_INVENTORY_INVALID")
+                previous = item.comment_id
+
+        need(all(type(p) is PullFacts for p in before.pulls),
              "R5C0_PR_FACTS_MISMATCH")
         relevant = [p for p in before.pulls if
                     p.head_ref == branch_ref[len("refs/heads/"):]]
@@ -277,73 +230,68 @@ class V2PrFirstReadOnlyHost:
              and pr.head_oid == subject and pr.state == "open"
              and pr.draft is True,
              "R5C0_PR_IDENTITY_MISMATCH")
+        need(self.checkpoint.principal == before.principal,
+             "R5C1B0_PRINCIPAL_MISMATCH")
+        validated_comments(before)
 
-        # Closed canonical capsule. v1-only checkpoint comments cannot be
-        # promoted to v2 just because they mention a v2 commit.
-        owned = [c for c in before.comments if
-                 c.author_id == before.principal
-                 and ("kagari-v2-initial-checkpoint/" in c.body
-                      or "agentcore-task-checkpoint/" in c.body)]
+        # The original initial capsule is the only acceptable PR-first proof.
+        # Do not silently adopt #194 v1 or R5C0's provisional v1-labelled
+        # format. Non-checkpoint discussion comments are harmless, including
+        # other authors' comments; a conflicting owned checkpoint is not.
+        owned: list[tuple[V2CheckpointCommentFacts, V2PRCheckpoint]] = []
+        for item in before.comments:
+            if item.author_id != before.principal:
+                continue
+            if not item.body.startswith(_RESERVED_CHECKPOINT_OPENERS):
+                continue
+            need(not item.body.startswith((
+                     "<!-- kagari-v2-initial-checkpoint",
+                     "<!-- agentcore-task-checkpoint")),
+                 "R5C1B0_OBSOLETE_CHECKPOINT")
+            try:
+                capsule = decode_checkpoint(item.body)
+            except CheckpointRefused:
+                raise V2PrFirstRefused("R5C1B0_CANONICAL_INVALID") from None
+            need(capsule.boundary == "initial" and capsule.key == "initial",
+                 "R5C1B0_NONINITIAL_CHECKPOINT")
+            owned.append((item, capsule))
         need(len(owned) == 1, "R5C0_INITIAL_CHECKPOINT_MISSING_OR_DUPLICATE")
-        comment = owned[0]
-        need(comment.repository == repository and comment.kind == "pr"
-             and comment.number == pr.number and type(comment.comment_id) is int
-             and comment.comment_id > 0,
-             "R5C0_CHECKPOINT_COMMENT_MISMATCH")
-        capsule = decode_initial_capsule(comment.body)
-        need((capsule["repository_id"], capsule["repository"], capsule["issue"],
-              capsule["branch_ref"], capsule["base_ref"], capsule["pr_number"],
-              capsule["principal"], capsule["subject"], capsule["record_id"],
-              capsule["contract_id"]) ==
-             (first.repository_id, repository, issue, branch_ref,
-              self.expected_base_ref, pr.number, before.principal,
-              subject, first.record_id, contract_id),
-             "R5C0_CHECKPOINT_BINDING_MISMATCH")
-
-        locator = ExactLocator(
-            VERSION, first.repository_id, repository, issue,
-            capsule["metadata_commit"], "task-view-snapshot",
-            capsule["snapshot_id"], subject)
+        comment, capsule = owned[0]
+        need((capsule.repository_id, capsule.repository, capsule.issue,
+              capsule.branch_ref, capsule.base_ref, capsule.pr_number,
+              capsule.principal, capsule.subject, capsule.record_id,
+              capsule.contract_id)
+             == (first.repository_id, repository, issue, branch_ref,
+                 self.expected_base_ref, pr.number, before.principal,
+                 subject, first.record_id, contract_id),
+             "R5C1B0_CHECKPOINT_BINDING_MISMATCH")
+        # #337's canonical reader obtains the same exact ID independently
+        # from the trusted Host and verifies original Record/Contract/Snapshot
+        # at the *original* metadata commit, including snapshot PR facts and
+        # an unchanged comment-body read before/after Git object traversal.
         try:
-            raw = self.history.read(locator)
-            # Validate closed #144 snapshot schema, not just a stored object
-            # matching the content digest/metadata tree path.
-            oid, snapshot_bytes = encode_object(
-                raw["kind"], raw["repository"], raw["task"],
-                raw["subject"], raw["payload"])
-            need(oid == capsule["snapshot_id"],
-                 "R5C0_SNAPSHOT_BINDING_MISMATCH")
-            snapshot = decode_snapshot(
-                snapshot_bytes, snapshot_id=oid, repository=repository,
-                task=str(issue), subject=subject)
-        except V2PrFirstRefused:
-            raise
-        except (MetadataV2HostRefused, TaskViewError, ValueError, TypeError, KeyError):
-            raise V2PrFirstRefused("R5C0_METADATA_HISTORY_UNAVAILABLE") from None
-        view = snapshot["view"]
-        authority = view["authority"]
-        git_view = view["git"]
-        github_view = view["github"]
-        need(snapshot["boundary"] == "explicit-handoff"
-             and view["branch_ref"] == branch_ref
-             and view["previous_checkpoint"] == {"state": "absent"}
-             and authority["record_id"] == first.record_id
-             and authority["contract_id"] == contract_id
-             and authority["base_revision"] == base_revision
-             and authority["branch_ref"] == branch_ref
-             and authority["disposition"] is None
-             and git_view["head"] == subject
-             and git_view["branch_ref"] == branch_ref
-             and git_view["branch_matches_task"] is True
-             and github_view["state"] == "observed"
-             and github_view["pull_request"] == {
-                 "base_repository": repository, "head_repository": repository,
-                 "number": pr.number, "state": "open", "draft": True,
-                 "base_ref": pr.base_ref, "head_ref": pr.head_ref,
-                 "head_oid": subject,
-             }, "R5C0_SNAPSHOT_BINDING_MISMATCH")
+            confirmed = self.checkpoint.read(pr.number, comment.comment_id)
+        except CheckpointRefused:
+            raise V2PrFirstRefused("R5C1B0_CHECKPOINT_UNVERIFIED") from None
+        except Exception:
+            raise V2PrFirstRefused("R5C1B0_CHECKPOINT_UNAVAILABLE") from None
+        need(type(confirmed) is ConfirmedCheckpoint
+             and confirmed.comment_id == comment.comment_id
+             and confirmed.checkpoint == capsule
+             and type(confirmed.snapshot) is dict,
+             "R5C1B0_COMMENT_READBACK_MISMATCH")
+        # An initial Snapshot is immutable historical data; it is not itself
+        # a fresh Task grant or proof the current Issue remains admitted.
+        view = confirmed.snapshot.get("view")
+        need(type(view) is dict
+             and type(view.get("authority")) is dict
+             and view["authority"].get("disposition") is None,
+             "R5C1B0_SNAPSHOT_TERMINAL")
 
         after = facts()
+        need(all(type(p) is PullFacts for p in after.pulls),
+             "R5C0_PR_FACTS_MISMATCH")
+        validated_comments(after)
         current_after = current()
         authoritative_after = authoritative()
         need(before == after and first == current_after
@@ -366,8 +314,9 @@ class V2PrFirstReadOnlyHost:
                 "contract_id": contract_id, "record_id": first.record_id,
                 "branch_ref": branch_ref, "subject": subject,
                 "pull_request": pr.number, "comment_id": comment.comment_id,
-                "metadata_commit": locator.metadata_commit,
-                "snapshot_id": locator.object_id,
+                "metadata_commit": capsule.metadata_commit,
+                "snapshot_id": capsule.snapshot_id,
+                "checkpoint_schema": "kagari-pr-checkpoint/v2",
             },
             "task_execution_authorized": False,
             "worktree_mutation_authorized": False,
