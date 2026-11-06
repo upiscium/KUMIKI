@@ -309,17 +309,39 @@ class MainV2PrFirstReadOnlyCapabilities:
             raise MainError("R5C0_HOST_INVALID")
 
 
+@dataclass(frozen=True)
+class MainV2ProductPrCapabilities:
+    """Host-only R5C1A publication; no CLI/Session/Metadata writer."""
+
+    read_issue: Callable[[int], dict]
+    publications: dict[int, object]
+
+    def __post_init__(self) -> None:
+        if __package__:
+            from .kagari_vnext_main_v2_pr_first_publication import V2ProductPrFirstHost
+        else:
+            from kagari_vnext_main_v2_pr_first_publication import V2ProductPrFirstHost
+        if (not callable(self.read_issue) or type(self.publications) is not dict
+                or not self.publications
+                or any(type(issue) is not int
+                       or type(host) is not V2ProductPrFirstHost
+                       or host.readonly.selection.issue != issue
+                       for issue, host in self.publications.items())):
+            raise MainError("R5C1A_HOST_INVALID")
+
+
 def build_main(
     plan: dict[str, Any], *,
     host: MainHostCapabilities | MainV2ReadOnlyCapabilities
           | MainV2WorktreeCapabilities | MainV2SessionReadOnlyCapabilities
-          | MainV2PrFirstReadOnlyCapabilities | None = None,
+          | MainV2PrFirstReadOnlyCapabilities
+          | MainV2ProductPrCapabilities | None = None,
 ) -> RepositoryMain:
     plan = _validate_selection(plan, legacy_python=True)
     if host is not None and type(host) not in (
             MainHostCapabilities, MainV2ReadOnlyCapabilities,
             MainV2WorktreeCapabilities, MainV2SessionReadOnlyCapabilities,
-            MainV2PrFirstReadOnlyCapabilities):
+            MainV2PrFirstReadOnlyCapabilities, MainV2ProductPrCapabilities):
         raise MainError("MAIN_HOST_CAPABILITIES_INVALID")
     _exact_dir(Path(plan["project_root"]), "PRIMARY_PROJECT_REQUIRED")
     try:
@@ -372,13 +394,18 @@ def build_main(
             if type(host) is MainV2SessionReadOnlyCapabilities
             else {issue: proof.readonly
                   for issue, proof in host.proofs.items()}
-            if type(host) is MainV2PrFirstReadOnlyCapabilities else None),
+            if type(host) is MainV2PrFirstReadOnlyCapabilities
+            else {issue: pub.readonly
+                  for issue, pub in host.publications.items()}
+            if type(host) is MainV2ProductPrCapabilities else None),
         v2_worktree_for_issue=(
             host.admissions if type(host) is MainV2WorktreeCapabilities else None),
         v2_session_for_issue=(
             host.sessions if type(host) is MainV2SessionReadOnlyCapabilities else None),
         v2_pr_first_for_issue=(
             host.proofs if type(host) is MainV2PrFirstReadOnlyCapabilities else None),
+        v2_product_pr_for_issue=(
+            host.publications if type(host) is MainV2ProductPrCapabilities else None),
     )
 
 
@@ -547,16 +574,27 @@ class MainSupervisor:
         observe_only: bool = False,
         attachment_lease: attachment_gate.AttachmentLease | None = None,
         admission_only: bool = False,
+        publication_only: bool = False,
     ) -> None:
         requested = dict(cleanup_for_issue or {})
         if type(admission_only) is not bool:
             raise MainError("V2_MAIN_ADMISSION_CONFIGURATION_INVALID")
         if admission_only and (
-                observe_only or requested or type(main) is not RepositoryMain
+                publication_only or observe_only or requested or type(main) is not RepositoryMain
                 or not main.v2_worktree_for_issue or attachment_lease is None
                 or any(host.readonly.lease is not attachment_lease
                        for host in main.v2_worktree_for_issue.values())):
             raise MainError("V2_MAIN_ADMISSION_CONFIGURATION_INVALID")
+        if type(publication_only) is not bool:
+            raise MainError("R5C1A_OWNER_CONFIGURATION_INVALID")
+        if publication_only and (
+                observe_only or admission_only or requested
+                or type(main) is not RepositoryMain
+                or not main.v2_product_pr_for_issue
+                or attachment_lease is None
+                or any(host.readonly.lease is not attachment_lease
+                       for host in main.v2_product_pr_for_issue.values())):
+            raise MainError("R5C1A_OWNER_CONFIGURATION_INVALID")
         if (type(observe_only) is not bool
                 or any(n not in main.approved or not callable(f)
                        for n, f in requested.items())):
@@ -566,13 +604,17 @@ class MainSupervisor:
                     type(attachment_lease) is attachment_gate.AttachmentLease
                     or (admission_only and main.v2_worktree_for_issue
                         and attachment_lease is next(iter(
-                            main.v2_worktree_for_issue.values())).readonly.lease)))):
+                            main.v2_worktree_for_issue.values())).readonly.lease)
+                    or (publication_only and main.v2_product_pr_for_issue
+                        and attachment_lease is next(iter(
+                            main.v2_product_pr_for_issue.values())).readonly.lease)))):
             raise MainError("MAIN_ATTACHMENT_BINDING_INVALID")
         self._attachment_lease = attachment_lease
         self.main = main
         self.cleanup_for_issue = requested
         self.observe_only = observe_only
         self.admission_only = admission_only
+        self.publication_only = publication_only
         self._entered = False
         self._file = None
         self._lock_path: Path | None = None
@@ -627,6 +669,7 @@ class MainSupervisor:
         if self._entered:
             raise MainError("MAIN_ALREADY_ACTIVE")
         if (not self.observe_only and not self.admission_only
+                and not self.publication_only
                 and type(self.main) is RepositoryMain
                 and self.main.v2_readonly_for_issue):
             raise MainError("V2_MAIN_EXECUTION_NOT_QUALIFIED")
@@ -725,10 +768,18 @@ class MainSupervisor:
             self._assert_owned(self.main)
             return self.main.admit_v2_worktree(issue)
 
+    def publish_product_pr_first(self, issue: int) -> dict[str, Any]:
+        """Host-only R5C1A effect under the existing repository owner flock."""
+        if not self.publication_only or not self._entered:
+            raise MainError("R5C1A_OWNER_REQUIRED")
+        with self.main._main_owner_guard:
+            self._assert_owned(self.main)
+            return self.main.publish_v2_product_pr_first(issue)
+
     def cycle(self, *, dispatch: bool = True) -> dict[str, Any]:
         if not self._entered:
             raise MainError("MAIN_NOT_ACTIVE")
-        if self.admission_only and dispatch:
+        if (self.admission_only or self.publication_only) and dispatch:
             raise MainError("V2_MAIN_EXECUTION_NOT_QUALIFIED")
         if dispatch and self.observe_only:
             raise MainError("MAIN_OBSERVE_ONLY")
@@ -852,7 +903,8 @@ def main(
     argv: list[str] | None = None, *,
     host: MainHostCapabilities | MainV2ReadOnlyCapabilities
           | MainV2WorktreeCapabilities | MainV2SessionReadOnlyCapabilities
-          | MainV2PrFirstReadOnlyCapabilities | None = None,
+          | MainV2PrFirstReadOnlyCapabilities
+          | MainV2ProductPrCapabilities | None = None,
     attachment: MainAttachmentConfig | None = None,
 ) -> int:
     """Ordinary one-cycle/observe/follow runner, optionally called by a host.
@@ -876,6 +928,8 @@ def main(
         if type(host) is MainV2WorktreeCapabilities:
             # R5A1 is an injected Python Host operation only; no CLI mode.
             raise MainError("V2_MAIN_WORKTREE_HOST_ONLY")
+        if type(host) is MainV2ProductPrCapabilities:
+            raise MainError("R5C1A_HOST_ONLY")
         if (type(host) in (MainV2ReadOnlyCapabilities,
                            MainV2SessionReadOnlyCapabilities,
                            MainV2PrFirstReadOnlyCapabilities)
