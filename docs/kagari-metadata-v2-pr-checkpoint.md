@@ -198,6 +198,21 @@ refusal, source-only 64-entry capacity gate before effect, final PR drift
 during readback and symbolic archive refs.
 Fixture-only ref deletion is test setup, **not a production deletion API**.
 
+**tests/test_kagari_metadata_v2_pr_checkpoint_state_machine.py** adds a
+dependency-free, *bounded transition model* using the same disposable SHA-1
+Git and synthetic Host/RecoveryJournal fixture. It enumerates **25 traces**:
+16 post-result × lease-release combinations (ACK, lost ACK before/after
+posting, post-effect interrupt × normal/refused/interrupted/suppressing lease
+exit); five pre-intent denial/interruption paths; and four second-checkpoint
+outcomes after a confirmed initial checkpoint. An independent expectation
+table checks exact result **type**, durable intent count and byte-for-byte
+journal preservation across retries, visible original comment IDs and body,
+returned checkpoint identity, post attempt count, safe same-key adoption, and
+cross-key blocking while a previous effect remains unknown. Every trace
+asserts no blind second post. This is deterministic bounded state exploration,
+**not** Hypothesis/randomized property generation, an unbounded concurrency
+proof, or verification of real GitHub transaction atomicity.
+
 Remaining independent gates: source review and separate approval to
 Commit/Push/Draft PR; exact-head CI; real disposable GitHub PR/comment
 actor/readback tests and archive Ruleset retention/no-delete/no-non-FF
