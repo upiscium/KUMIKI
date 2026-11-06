@@ -28,7 +28,7 @@ from kagari_metadata_v2_pr_checkpoint import (
     SourceOnlyCheckpointPublisher, decode_checkpoint, render_checkpoint,
 )
 from kagari_vnext_trusted_host import RecoveryJournal
-from metadata_v2 import ARCHIVE_REF, RefState, issue_ref
+from metadata_v2 import ARCHIVE_REF, Limits, RefState, issue_ref
 from metadata_v2_archive import archive_issue
 from task_record import encode_contract, encode_record
 from task_view import encode_snapshot
@@ -190,7 +190,8 @@ class CheckpointV2Test(unittest.TestCase):
                     cleared = False
                     break
                 try:
-                    self.reader.read(value.pr_number, matches[0].comment_id)
+                    self.reader.read(value.pr_number, matches[0].comment_id,
+                                     deadline=deadline)
                 except CheckpointRefused:
                     cleared = False
                     break
@@ -718,7 +719,9 @@ class CheckpointV2Test(unittest.TestCase):
         self.comments.sort(key=lambda c: c.comment_id)
         self.assertEqual([initial.comment_id, backdated_child_id, parent.comment_id],
                          [c.comment_id for c in self.inventory(PR, time.monotonic() + 2)])
-        with self.assertRaisesRegex(CheckpointRefused, "successor_order_invalid"):
+        # The stream-wide chain now rejects the backwards sibling before
+        # the requested successor-specific order check runs.
+        with self.assertRaisesRegex(CheckpointRefused, "stream_fork_or_order_invalid"):
             self.publisher.publish(turn2, previous_comment_id=parent.comment_id)
         self.assertEqual(0, self.post_calls)
         self.assertFalse(list(self.jpath.iterdir()))
@@ -825,6 +828,201 @@ class CheckpointV2Test(unittest.TestCase):
         with self.assertRaisesRegex(CheckpointRefused, "initial_order_invalid"):
             self.publisher.publish(self.initial)
         self.assertEqual(1, self.post_calls)
+
+    def test_pull_facts_require_exact_boolean_and_numeric_types(self):
+        original = self.pr
+        invalid = [
+            dataclasses.replace(original, draft=1),
+            dataclasses.replace(original, draft="true"),
+            dataclasses.replace(original, repository_id=float(REPO_ID)),
+            dataclasses.replace(original, pr_number=float(PR)),
+            dataclasses.replace(original, principal=float(PRINCIPAL)),
+        ]
+        for fact in invalid:
+            with self.subTest(fact=fact), self.assertRaisesRegex(
+                    CheckpointRefused, "pr_not_exact_open_draft"):
+                self.pr = fact
+                self.publisher.publish(self.initial)
+        self.pr = original
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
+
+    def test_forked_owned_comments_refuse_adoption_and_new_extension(self):
+        initial = self.add_comment(self.initial)
+        previous_initial = {
+            "state": "observed", "checkpoint_id": str(initial.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        branch_a = self.add_snapshot(self.initial.metadata_commit,
+                                     boundary="turn-end", previous=previous_initial)
+        branch_b = dataclasses.replace(
+            self.add_snapshot(branch_a.metadata_commit,
+                              boundary="turn-end", previous=previous_initial),
+            key="turn-2",
+        )
+        a = self.add_comment(branch_a)
+        b = self.add_comment(branch_b)
+        self.assertEqual([initial.comment_id, a.comment_id, b.comment_id],
+                         [c.comment_id for c in self.comments])
+        for checkpoint, parent_id in [
+            (self.initial, None),
+            (branch_a, initial.comment_id),
+            (branch_b, initial.comment_id),
+        ]:
+            with self.subTest(key=checkpoint.key), self.assertRaisesRegex(
+                    CheckpointRefused, "stream_fork_or_order_invalid"):
+                self.publisher.publish(checkpoint, previous_comment_id=parent_id)
+        previous_b = {
+            "state": "observed", "checkpoint_id": str(b.comment_id),
+            "subject": branch_b.subject,
+            "metadata_commit": branch_b.metadata_commit,
+            "snapshot_id": branch_b.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        extension = dataclasses.replace(
+            self.add_snapshot(branch_b.metadata_commit,
+                              boundary="turn-end", previous=previous_b),
+            key="turn-3",
+        )
+        with self.assertRaisesRegex(CheckpointRefused, "stream_fork_or_order_invalid"):
+            self.publisher.publish(extension, previous_comment_id=b.comment_id)
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
+
+    def test_valid_linear_three_comment_chain_supports_old_adoption(self):
+        initial = self.publisher.publish(self.initial)
+        previous_initial = {
+            "state": "observed", "checkpoint_id": str(initial.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        first = self.add_snapshot(self.initial.metadata_commit, boundary="turn-end",
+                                  previous=previous_initial)
+        first_comment = self.publisher.publish(first,
+                                               previous_comment_id=initial.comment_id)
+        previous_first = {
+            "state": "observed", "checkpoint_id": str(first_comment.comment_id),
+            "subject": first.subject,
+            "metadata_commit": first.metadata_commit,
+            "snapshot_id": first.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        second = dataclasses.replace(
+            self.add_snapshot(first.metadata_commit, boundary="turn-end",
+                              previous=previous_first), key="turn-2",
+        )
+        second_comment = self.publisher.publish(
+            second, previous_comment_id=first_comment.comment_id)
+        self.assertLess(initial.comment_id, first_comment.comment_id)
+        self.assertLess(first_comment.comment_id, second_comment.comment_id)
+        self.assertEqual(initial, self.publisher.publish(self.initial))
+        self.assertEqual(first_comment, self.publisher.publish(
+            first, previous_comment_id=initial.comment_id))
+        self.assertEqual(second_comment, self.publisher.publish(
+            second, previous_comment_id=first_comment.comment_id))
+        self.assertEqual(3, self.post_calls)
+
+    def test_post_competing_new_key_causes_uncertain_without_repost(self):
+        initial = self.publisher.publish(self.initial)
+        previous = {
+            "state": "observed", "checkpoint_id": str(initial.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        target = self.add_snapshot(self.initial.metadata_commit,
+                                   boundary="turn-end", previous=previous)
+        competing = dataclasses.replace(target, key="turn-2")
+
+        def conflicting_effect(pr_number, body, deadline):
+            self.assertLess(time.monotonic(), deadline)
+            # An uncoordinated same-author client posts a valid sibling
+            # immediately before this publisher's intended comment.
+            self.add_comment(competing)
+            return self.post(pr_number, body, deadline)
+
+        with self.assertRaisesRegex(CheckpointUncertain, "post_outcome_uncertain"):
+            self.publisher_for(post=conflicting_effect).publish(
+                target, previous_comment_id=initial.comment_id)
+        self.assertEqual(2, self.post_calls)  # initial and one intended turn
+        self.assertEqual(2, len(list(self.jpath.iterdir())))
+        with self.assertRaisesRegex(CheckpointRefused, "stream_fork_or_order_invalid"):
+            self.publisher.publish(target, previous_comment_id=initial.comment_id)
+        self.assertEqual(2, self.post_calls)  # no blind replay
+
+    def test_historical_read_propagates_shared_deadline_to_git_and_refs(self):
+        comment = self.add_comment(self.initial)
+        observed_deadlines = []
+
+        def bounded_object(key, maximum, deadline):
+            observed_deadlines.append(deadline)
+            return self.fixture.reader(key, maximum, deadline)
+
+        def bounded_ref(ref, deadline):
+            observed_deadlines.append(deadline)
+            return self.fixture.observe(ref, deadline)
+
+        # Give the inner Metadata validation a longer resource deadline so
+        # the outer 20-second budget must be passed down as the I/O cutoff.
+        reader = ExactCheckpointReader(
+            self.identity, self.registered, base_ref=BASE,
+            principal=PRINCIPAL, reader=bounded_object, observer=bounded_ref,
+            comment_reader=self.observe_comment, limits=Limits(seconds=35),
+        )
+        shared_deadline = time.monotonic() + 20
+        result = reader.read(PR, comment.comment_id, deadline=shared_deadline)
+        self.assertEqual(comment.comment_id, result.comment_id)
+        self.assertTrue(observed_deadlines)
+        self.assertTrue(all(d <= shared_deadline for d in observed_deadlines))
+        self.assertLess(time.monotonic(), shared_deadline)
+
+    def test_historical_read_refuses_expired_or_unbounded_deadline(self):
+        comment = self.add_comment(self.initial)
+        for invalid in [time.monotonic() - 1, float("inf"),
+                        float("nan"), time.monotonic() + 100]:
+            with self.subTest(deadline=invalid), self.assertRaisesRegex(
+                    CheckpointRefused, "deadline_invalid_or_expired"):
+                self.reader.read(PR, comment.comment_id, deadline=invalid)
+            with self.subTest(metadata_deadline=invalid), self.assertRaisesRegex(
+                    CheckpointRefused, "deadline_invalid_or_expired"):
+                self.reader.verify_metadata(self.initial, deadline=invalid)
+        self.assertEqual(0, self.post_calls)
+
+    def test_at_capacity_next_checkpoint_rejected_before_effect(self):
+        initial = self.add_comment(self.initial)
+        # Isolate the *capacity* pre-effect gate: the full-chain validator
+        # has its own integration coverage. These 63 dummy snapshots are not
+        # a real chain, and must never be passed to a production verifier.
+        for i in range(1, 64):
+            dummy = dataclasses.replace(
+                self.initial, boundary="turn-end", key=f"fixture-{i}")
+            self.add_comment(dummy)
+        self.assertEqual(64, len(self.comments))
+        previous = {
+            "state": "observed", "checkpoint_id": str(initial.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        next_turn = dataclasses.replace(
+            self.add_snapshot(self.initial.metadata_commit,
+                              boundary="turn-end", previous=previous),
+            key="new-at-capacity",
+        )
+        publisher = self.publisher_for(
+            grant=lambda *_: self.fail("must not request effect grant"))
+        publisher._verify_owned_stream = lambda *_: None
+        with self.assertRaisesRegex(CheckpointRefused, "stream_capacity_exceeded"):
+            publisher.publish(next_turn, previous_comment_id=initial.comment_id)
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
 
 
 if __name__ == "__main__":

@@ -72,7 +72,9 @@ lease**. No token lookup, network client,
 arbitrary Git command, Metadata ref write or Issue ref deletion is provided.
 
 A candidate PR must be open/draft, with the exact published head, author,
-repository, Task branch and base. The historical Snapshot/Record/Contract
+repository, Task branch and base. All Host-attested `PullFacts` fields must
+have exact expected types (not Python truthy or int/bool-equal substitutes).
+The historical Snapshot/Record/Contract
 must already be retrievable. An initial checkpoint requires an absent
 previous-Snapshot observation and no prior owned v2 checkpoint. When
 adopting an existing initial checkpoint, its authenticated comment ID must
@@ -87,7 +89,19 @@ posts and adoption must traverse the **full authenticated PR comment chain**
 from the explicit predecessor to the initial comment, checking every comment
 ID against its exact pinned Snapshot/subject/commit tuple and requiring
 `previous_checkpoint.commits_after.state = "observed"` at every link.
-The chain is bounded to 64 links with strictly descending GitHub comment IDs.
+**Additionally, every owned v2 checkpoint in the complete inventory** is
+exact-read and checked, in chronological comment-ID order, against the
+immediately preceding owned checkpoint. This enforces a **single linear
+stream**, not merely a valid ancestor chain for the selected checkpoint;
+forks, abandoned siblings, and out-of-order unrelated owned comments block
+both new posting and adoption. The verified stream is capped at 64 owned
+checkpoints: the **65th is refused before grant, journal or comment effect**,
+while existing checkpoints remain eligible for idempotent readback. The
+40-second absolute publication deadline is passed into every exact comment
+and Metadata read. Nested Git-object and ref-observation callbacks receive
+`min(inner_validation_deadline, publication_deadline)`, with pre/post-I/O
+and completion checks. The trusted Host must honor the cutoff **before**
+allocating or blocking; Python alone cannot preempt an uncooperative callback.
 The final checkpoint comment must also have an ID **strictly greater than its
 explicit predecessor**, both when adopting an existing comment and when
 reconciling a newly posted comment. An inverse or equal ID rejects adoption;
@@ -116,7 +130,11 @@ can succeed only through one exact owned comment, original metadata readback
 and stable comment inventory **and PR facts** at the final boundary.
 The post-readback inventory must also retain every previously verified owned
 checkpoint **with identical ID, author, repository and body**, rather than
-accepting a changed but stable post-effect inventory.
+accepting a changed but stable post-effect inventory. It must contain **exactly
+one new owned key**, the intended checkpoint, and the resulting entire
+owned stream must still form the same linear chain. A concurrent same-principal
+checkpoint visible after the effect causes `CheckpointUncertain` and no blind
+repost, even when all prior comments were preserved.
 Conflicting same-key content, duplicate keys, an invalid initial record,
 bad metadata, missing grant, stream-wide unresolved intents, drift and
 unclear effects fail closed.
@@ -139,7 +157,12 @@ explicit predecessor, dangling intermediate comment ID, unknown
 `commits_after` observation, original parent deletion or canonical-body
 rewrite during posting, reverse chronological initial-comment
 adoption, a valid later turn's idempotent initial adoption, post-effect
-initial-order drift, final PR drift during readback and symbolic archive refs.
+initial-order drift, sibling fork detection on existing adoption/new extension,
+post-effect concurrent different-key insertion, strict Host PR fact types
+(including `draft=1`), valid multi-turn linear idempotence, shared absolute
+deadline propagation to Git objects/refs, expired or unbounded deadline
+refusal, source-only 64-entry capacity gate before effect, final PR drift
+during readback and symbolic archive refs.
 Fixture-only ref deletion is test setup, **not a production deletion API**.
 
 Remaining independent gates: source review and separate approval to

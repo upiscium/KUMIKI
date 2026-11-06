@@ -51,6 +51,16 @@ def positive(value: object) -> bool:
     return type(value) is int and 0 < value <= _MAX_ID
 
 
+def _bounded_deadline(value: float | None) -> float:
+    """Retain one absolute <=40s bound across nested historical reads."""
+    now = time.monotonic()
+    if value is None:
+        return now + 40
+    require(type(value) in (int, float) and now < value <= now + 40,
+            "checkpoint_deadline_invalid_or_expired")
+    return value
+
+
 def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -222,13 +232,16 @@ class ExactCheckpointReader:
             raise CheckpointRefused("checkpoint_base_ref_invalid") from error
         require(callable(comment_reader), "checkpoint_comment_reader_required")
         require(positive(principal), "checkpoint_host_principal_invalid")
+        require(type(limits) is Limits and callable(reader) and callable(observer),
+                "checkpoint_metadata_read_capabilities_invalid")
         self.principal = principal
         self.identity = identity
         self.registered = registered
         self.base_ref = base_ref
         self._comment_reader = comment_reader
-        self._metadata = ReadOnlyMetadataV2Host(
-            identity, registered, reader=reader, observer=observer, limits=limits)
+        self._object_reader = reader
+        self._observer = observer
+        self._limits = limits
 
     def _comment(self, pr_number: int, comment_id: int, deadline: float) -> CommentFacts:
         require(positive(pr_number) and positive(comment_id),
@@ -261,24 +274,50 @@ class ExactCheckpointReader:
                     self.principal),
                 "checkpoint_registration_mismatch")
 
-    def verify_metadata(self, value: V2PRCheckpoint) -> dict[str, Any]:
-        """Verify Record/Contract/Evidence/Snapshot graph at the exact OID.
+    def verify_metadata(
+        self, value: V2PRCheckpoint, *, deadline: float | None = None,
+    ) -> dict[str, Any]:
+        """Verify the exact immutable graph with one shared outer deadline.
 
-        The Metadata v2 validator independently checks the complete bounded
-        archive DAG, original Issue ancestry, hashes, and snapshot graph.
+        Each fresh core validation keeps its own *tighter* resource budget.
+        Object and ref I/O receive min(core, outer), never an extended window.
         """
+        deadline = _bounded_deadline(deadline)
         require(type(value) is V2PRCheckpoint, "checkpoint_type_invalid")
         self._match(value, value.pr_number)
+
+        def object_reader(key: str, maximum: int, core_deadline: float):
+            cutoff = min(deadline, core_deadline)
+            require(time.monotonic() < cutoff, "checkpoint_deadline_exceeded")
+            result = self._object_reader(key, maximum, cutoff)
+            require(time.monotonic() < cutoff, "checkpoint_deadline_exceeded")
+            return result
+
+        def observer(ref: str, core_deadline: float):
+            cutoff = min(deadline, core_deadline)
+            require(time.monotonic() < cutoff, "checkpoint_deadline_exceeded")
+            result = self._observer(ref, cutoff)
+            require(time.monotonic() < cutoff, "checkpoint_deadline_exceeded")
+            return result
+
+        metadata = ReadOnlyMetadataV2Host(
+            self.identity, self.registered, reader=object_reader,
+            observer=observer, limits=self._limits)
+
         def locator(kind: str, content_id: str, subject: str) -> ExactLocator:
             return ExactLocator(VERSION, value.repository_id, value.repository,
                                 value.issue, value.metadata_commit, kind,
                                 content_id, subject)
         try:
-            record = self._metadata.read(locator(
+            require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
+            record = metadata.read(locator(
                 "task-record", value.record_id, self.registered.base_revision))
-            contract = self._metadata.read(locator(
+            require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
+            contract = metadata.read(locator(
                 "contract", value.contract_id, self.registered.base_revision))
-            snapshot = self._metadata.read(value.snapshot_locator())
+            require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
+            snapshot = metadata.read(value.snapshot_locator())
+            require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
             v = snapshot["payload"]
             view = v["view"]
             authority = view["authority"]
@@ -323,19 +362,23 @@ class ExactCheckpointReader:
             raise
         except (ValueError, TypeError, IndexError, KeyError, AttributeError) as error:
             raise CheckpointRefused("checkpoint_metadata_unavailable") from error
+        require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
         return v
 
-    def read(self, pr_number: int, comment_id: int) -> ConfirmedCheckpoint:
-        """Never choose a 'latest' comment, Task pointer or archive tip."""
-        deadline = time.monotonic() + 40
+    def read(
+        self, pr_number: int, comment_id: int, *, deadline: float | None = None,
+    ) -> ConfirmedCheckpoint:
+        """Exact historical comment and graph under a caller-shared deadline."""
+        deadline = _bounded_deadline(deadline)
         before = self._comment(pr_number, comment_id, deadline)
         value = decode_checkpoint(before.body)
         require(value.principal == before.author_id,
                 "checkpoint_comment_author_mismatch")
         self._match(value, pr_number)
-        snapshot = self.verify_metadata(value)
+        snapshot = self.verify_metadata(value, deadline=deadline)
         after = self._comment(pr_number, comment_id, deadline)
         require(before == after, "checkpoint_comment_changed")
+        require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
         return ConfirmedCheckpoint(comment_id, value, snapshot)
 
 
@@ -413,6 +456,12 @@ class SourceOnlyCheckpointPublisher:
             raise CheckpointRefused("checkpoint_pr_observation_unavailable") from error
         require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
         require(type(fact) is PullFacts
+                and all(positive(v) for v in
+                        (fact.repository_id, fact.pr_number, fact.principal))
+                and type(fact.draft) is bool
+                and all(type(v) is str for v in
+                        (fact.repository, fact.base_ref, fact.head_ref,
+                         fact.head_oid, fact.state))
                 and (fact.repository_id, fact.repository, fact.pr_number,
                      fact.base_ref, fact.head_ref, fact.head_oid,
                      fact.state, fact.draft, fact.principal)
@@ -475,9 +524,56 @@ class SourceOnlyCheckpointPublisher:
                     "checkpoint_initial_order_invalid")
         return checkpoints
 
+    def _verify_owned_stream(
+        self, value: V2PRCheckpoint, owned: dict[str, CommentFacts],
+        deadline: float,
+    ) -> None:
+        """Prove the *entire* owned stream is one exact chronological chain.
+
+        Checking only the requested checkpoint's ancestors misses two valid
+        siblings that refer to the same predecessor. Historical adoption and
+        new/post-effect publication must refuse that observable fork alike.
+        """
+        require(len(owned) <= 64, "checkpoint_history_depth_limit")
+        if not owned:
+            return
+        ordered = sorted(owned.values(), key=lambda comment: comment.comment_id)
+        require(owned.get("initial") == ordered[0],
+                "checkpoint_stream_initial_invalid")
+        parent: ConfirmedCheckpoint | None = None
+        for comment in ordered:
+            require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
+            confirmed = self._exact.read(
+                value.pr_number, comment.comment_id, deadline=deadline)
+            require(owned.get(confirmed.checkpoint.key) == comment
+                    and comment.body == render_checkpoint(confirmed.checkpoint),
+                    "checkpoint_stream_comment_changed")
+            previous = confirmed.snapshot["view"]["previous_checkpoint"]
+            if parent is None:
+                require(confirmed.checkpoint.boundary == "initial"
+                        and previous == {"state": "absent"},
+                        "checkpoint_stream_initial_invalid")
+            else:
+                require(confirmed.checkpoint.boundary != "initial"
+                        and type(previous) is dict
+                        and previous.get("state") == "observed"
+                        and previous.get("checkpoint_id") == str(parent.comment_id)
+                        and (previous.get("subject"),
+                             previous.get("metadata_commit"),
+                             previous.get("snapshot_id"))
+                        == (parent.checkpoint.subject,
+                            parent.checkpoint.metadata_commit,
+                            parent.checkpoint.snapshot_id),
+                        "checkpoint_stream_fork_or_order_invalid")
+                require(type(previous.get("commits_after")) is dict
+                        and previous["commits_after"].get("state") == "observed",
+                        "checkpoint_previous_observation_unknown")
+            parent = confirmed
+
     def _confirmed(
         self, value: V2PRCheckpoint, candidate: CommentFacts,
         expected_body: str, previous_comment_id: int | None,
+        deadline: float,
     ) -> ConfirmedCheckpoint:
         require(candidate.body == expected_body, "checkpoint_key_conflict")
         # The predecessor chain is verified on its own, but the final
@@ -487,7 +583,8 @@ class SourceOnlyCheckpointPublisher:
                     positive(previous_comment_id)
                     and candidate.comment_id > previous_comment_id),
                 "checkpoint_successor_order_invalid")
-        confirmed = self._exact.read(value.pr_number, candidate.comment_id)
+        confirmed = self._exact.read(
+            value.pr_number, candidate.comment_id, deadline=deadline)
         require(confirmed.checkpoint == value,
                 "checkpoint_readback_mismatch")
         return confirmed
@@ -520,7 +617,8 @@ class SourceOnlyCheckpointPublisher:
             comment = by_id.get(current_id)
             require(comment is not None and comment.author_id == value.principal,
                     "checkpoint_previous_comment_absent")
-            verified = self._exact.read(value.pr_number, current_id)
+            verified = self._exact.read(
+                value.pr_number, current_id, deadline=deadline)
             require(comment.body == render_checkpoint(verified.checkpoint)
                     and owned.get(verified.checkpoint.key) == comment
                     and (verified.checkpoint.subject,
@@ -598,10 +696,11 @@ class SourceOnlyCheckpointPublisher:
         pull_before = self._pull_facts(value, deadline)
         comments_before = self._comments(value, deadline)
         owned = self._owned(value, comments_before)
+        self._verify_owned_stream(value, owned, deadline)
 
         # Both reconciliation and fresh publication must prove the immutable
         # original metadata and caller-specified predecessor relation.
-        snapshot = self._exact.verify_metadata(value)
+        snapshot = self._exact.verify_metadata(value, deadline=deadline)
         previous = snapshot["view"]["previous_checkpoint"]
         if value.boundary == "initial":
             require(previous == {"state": "absent"},
@@ -612,12 +711,15 @@ class SourceOnlyCheckpointPublisher:
 
         if value.key in owned:
             result = self._confirmed(value, owned[value.key], body,
-                                     previous_comment_id)
+                                     previous_comment_id, deadline)
             require(self._comments(value, deadline) == comments_before,
                     "checkpoint_inventory_changed")
             require(self._pull_facts(value, deadline) == pull_before,
                     "checkpoint_pr_changed_during_readback")
             return result
+        # 64 verified checkpoints are permitted for readback, but a 65th
+        # must fail before grant, durable intent or a possible comment effect.
+        require(len(owned) < 64, "checkpoint_stream_capacity_exceeded")
         if saved is not None:
             raise CheckpointUncertain("checkpoint_previous_intent_unconfirmed")
 
@@ -666,10 +768,17 @@ class SourceOnlyCheckpointPublisher:
             require(all(retained.get(comment.comment_id) == comment
                         for comment in owned.values()),
                     "checkpoint_owned_history_changed_after_post")
-            selected = self._owned(value, after).get(value.key)
+            after_owned = self._owned(value, after)
+            # One scoped effect may add exactly its intended key; a competing
+            # new owned key discovered after posting is an uncertain outcome,
+            # even if the existing ancestors are still byte-identical.
+            require(set(after_owned) == set(owned) | {value.key},
+                    "checkpoint_post_competing_owned_comment")
+            self._verify_owned_stream(value, after_owned, deadline)
+            selected = after_owned.get(value.key)
             require(selected is not None, "checkpoint_post_not_observed")
             result = self._confirmed(value, selected, body,
-                                     previous_comment_id)
+                                     previous_comment_id, deadline)
             require(self._comments(value, deadline) == after,
                     "checkpoint_inventory_changed")
             require(self._pull_facts(value, deadline) == pull_before,
