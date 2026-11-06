@@ -128,11 +128,13 @@ comment; otherwise publication is refused. The lease must stay exclusive
 through effect and final readback, including ambiguous effects. A Host
 lease-release failure after confirmed readback, or after a possibly
 persisted intent/effect, is **CheckpointUncertain**, even when the lease
-returns a `CheckpointRefused` error. This also applies if lease release
-**overrides a post-effect `BaseException`** such as `KeyboardInterrupt`,
-which the normal `Exception` handlers do not intercept.
-If the lease's context manager
-**suppresses** a body exception, the publisher explicitly restores that
+returns a `CheckpointRefused` error. This also applies when the lease
+release itself raises a `BaseException` such as `KeyboardInterrupt`
+**after successful post and readback** or a possibly durable intent/effect,
+even though ordinary `Exception` handlers would not intercept it. A
+pre-intent interrupt still propagates without being mislabeled as an effect.
+If the lease's context manager **suppresses** a body exception, the
+publisher explicitly restores that
 refusal or uncertainty; it must never silently return `None`. Only
 genuinely pre-intent rejection remains `CheckpointRefused`.
 A matching current-key prior intent may be reconciled
@@ -144,9 +146,12 @@ not sufficient.
 The Host grant must also return literal True. Re-observe the PR and all
 comments, persist and fsync a create-once intent keyed by repository ID,
 Issue, PR, principal and checkpoint key, and only then invoke the scoped post.
-A matching prior intent is **readback-only**: if still unconfirmed, report
-CheckpointUncertain and do not repost. A lost ACK after a successful post
-can succeed only through one exact owned comment, original metadata readback
+An existing journal intent must match **exact key set, value types and
+values**; Python float/int/bool-equal aliases never count as matching
+persisted identity or schema. A matching prior intent is **readback-only**:
+if still unconfirmed, report CheckpointUncertain and do not repost.
+A lost ACK after a successful post can succeed only through one exact
+owned comment, original metadata readback
 and stable comment inventory **and PR facts** at the final boundary.
 The post-readback inventory must also retain every previously verified owned
 checkpoint **with identical ID, author, repository and body**, rather than
@@ -177,8 +182,10 @@ post-effect readback, harmless format-name mentions in ordinary comments,
 malformed first-line capsule openers, post-success and post-intent lease
 release errors, suppressed unknown-post and pre-intent context-manager errors,
 pre-intent lease refusal, post-effect interrupt overridden by failing
-lease release, lost ACK both before and after post, pending unknown ACK
-under a different key (stream guard), corrupted historical initial, adoption with a wrong
+lease release, release-time interrupt after confirmed readback, pre-intent
+interrupt propagation, strict type and key-set journal reconciliation,
+lost ACK both before and after post, pending unknown ACK under a different
+key (stream guard), corrupted historical initial, adoption with a wrong
 explicit predecessor, dangling intermediate comment ID, unknown
 `commits_after` observation, original parent deletion or canonical-body
 rewrite during posting, reverse chronological initial-comment

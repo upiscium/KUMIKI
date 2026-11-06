@@ -1271,5 +1271,83 @@ class CheckpointV2Test(unittest.TestCase):
         self.assertEqual(1, self.post_calls)
 
 
+    def test_lease_release_interrupt_after_confirmed_post_is_uncertain(self):
+        @contextmanager
+        def interrupted_release(value, deadline):
+            yield True
+            raise KeyboardInterrupt("release interrupted after readback")
+
+        with self.assertRaisesRegex(
+                CheckpointUncertain, "checkpoint_stream_lease_uncertain"):
+            self.publisher_for(
+                stream_lease=interrupted_release).publish(self.initial)
+        self.assertEqual(1, self.post_calls)
+        self.assertEqual(1, len(list(self.jpath.iterdir())))
+        confirmed = self.publisher.publish(self.initial)
+        self.assertEqual(self.comments[0].comment_id, confirmed.comment_id)
+        self.assertEqual(1, self.post_calls)
+
+    def test_post_interrupt_after_effect_without_lease_override_is_uncertain(self):
+        def post_then_interrupt(pr_number, body, deadline):
+            self.post(pr_number, body, deadline)
+            raise KeyboardInterrupt("post interrupted after comment creation")
+
+        with self.assertRaisesRegex(
+                CheckpointUncertain, "checkpoint_stream_lease_uncertain"):
+            self.publisher_for(post=post_then_interrupt).publish(self.initial)
+        self.assertEqual(1, self.post_calls)
+        confirmed = self.publisher.publish(self.initial)
+        self.assertEqual(self.comments[0].comment_id, confirmed.comment_id)
+        self.assertEqual(1, self.post_calls)
+
+    def test_pre_intent_lease_interrupt_is_not_misclassified(self):
+        @contextmanager
+        def interrupted_enter(value, deadline):
+            raise KeyboardInterrupt("before lease acquisition")
+            yield True  # an unreachable yield keeps the generator shape
+
+        with self.assertRaisesRegex(KeyboardInterrupt, "before lease acquisition"):
+            self.publisher_for(
+                stream_lease=interrupted_enter).publish(self.initial)
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
+
+    def test_persisted_intent_requires_exact_key_and_value_types(self):
+        original = self.publisher.publish(self.initial)
+        journal = self.journal
+        changes = (
+            ("float repository ID", lambda item: item.__setitem__(
+                "repository_id", float(REPO_ID))),
+            ("float PR number", lambda item: item.__setitem__(
+                "pr_number", float(PR))),
+            ("float principal", lambda item: item.__setitem__(
+                "principal", float(PRINCIPAL))),
+            ("float schema", lambda item: item.__setitem__("schema", 2.0)),
+            ("bool instead of absent predecessor", lambda item: item.__setitem__(
+                "previous_comment_id", False)),
+            ("unexpected field", lambda item: item.__setitem__("extra", "x")),
+            ("missing field", lambda item: item.pop("body_sha256")),
+        )
+        for name, mutate in changes:
+            class AlteredJournal:
+                def read(self, key):
+                    altered = dict(journal.read(key))
+                    mutate(altered)
+                    return altered
+
+                def create(self, *_):
+                    raise AssertionError("malformed journal must not create")
+
+            with self.subTest(change=name), self.assertRaisesRegex(
+                    CheckpointRefused, "checkpoint_intent_conflict"):
+                self.publisher_for(journal=AlteredJournal()).publish(
+                    self.initial)
+        self.assertEqual(1, self.post_calls)
+        self.assertEqual(1, len(list(self.jpath.iterdir())))
+        confirmed = self.publisher.publish(self.initial)
+        self.assertEqual(original.comment_id, confirmed.comment_id)
+        self.assertEqual(1, self.post_calls)
+
+
 if __name__ == "__main__":
     unittest.main()

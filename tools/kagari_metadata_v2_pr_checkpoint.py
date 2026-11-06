@@ -688,7 +688,7 @@ class SourceOnlyCheckpointPublisher:
             "intent_or_effect": False, "body_started": False,
             "body_completed": False,
         }
-        body_error: CheckpointRefused | None = None
+        body_error: BaseException | None = None
         try:
             lease = self._stream_lease(value, deadline)
             with lease as cleared:
@@ -697,9 +697,9 @@ class SourceOnlyCheckpointPublisher:
                 try:
                     result = self._publish_locked(
                         value, previous_comment_id, deadline, phase)
-                except CheckpointRefused as error:
-                    # Keep the exact exception identity: lease __exit__ can
-                    # replace it with a different CheckpointRefused.
+                except BaseException as error:
+                    # Preserve even KeyboardInterrupt/SystemExit identity:
+                    # lease __exit__ may replace an interrupted effect.
                     body_error = error
                     raise
                 phase["body_completed"] = True
@@ -726,6 +726,14 @@ class SourceOnlyCheckpointPublisher:
         except Exception as error:
             # The lease may fail after an effect. No automatic repost is safe.
             raise CheckpointUncertain("checkpoint_stream_lease_uncertain") from error
+        except BaseException as error:
+            # After a possible intent/effect, even an interrupt raised while
+            # releasing the Host lease must not look like a safely aborted
+            # operation. Preserve genuine pre-intent interrupts.
+            if phase["intent_or_effect"] or phase["body_completed"]:
+                raise CheckpointUncertain(
+                    "checkpoint_stream_lease_uncertain") from error
+            raise
 
     def _publish_locked(
         self, value: V2PRCheckpoint,
@@ -750,7 +758,11 @@ class SourceOnlyCheckpointPublisher:
             saved = self._journal.read(journal_key)
         except Exception as error:
             raise CheckpointRefused("checkpoint_intent_read_unavailable") from error
-        require(saved is None or saved == expected_intent,
+        require(saved is None or (
+                    type(saved) is dict and saved.keys() == expected_intent.keys()
+                    and all(type(saved[key]) is type(expected)
+                            and saved[key] == expected
+                            for key, expected in expected_intent.items())),
                 "checkpoint_intent_conflict")
         # A matching persisted intent may already have produced a comment.
         if saved is not None:
