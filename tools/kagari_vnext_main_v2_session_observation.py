@@ -242,6 +242,24 @@ class V2MainSessionReadOnlyHost:
                 and before["approved_task"] == after["approved_task"]
                 and before["current_record"] == after["current_record"],
                 "V2_SESSION_CURRENT_CHANGED")
+        # Current Record/Git registration cannot establish root Session
+        # stability during native GETs. Re-read the exact Host locator.
+        try:
+            latest_locator = self.read_locator(request)
+        except Exception:
+            raise V2SessionObservationRefused(
+                "V2_SESSION_LOCATOR_UNAVAILABLE") from None
+        require(type(latest_locator) is V2SessionLocator
+                and latest_locator == locator,
+                "V2_SESSION_LOCATOR_CHANGED")
+        # The second Host callback may have raced a legitimate current Task
+        # update. Check the authoritative Record/Issue again after it returns.
+        latest = verified_readonly()
+        require(first == current_now()
+                and after["approved_task"] == latest["approved_task"]
+                and after["current_record"] == latest["current_record"],
+                "V2_SESSION_CURRENT_CHANGED")
+        after = latest
         # The final R5A0 Issue callback/current read runs AFTER its last
         # lease check. Attachment can drift during those otherwise unchanged
         # observations; end this read-only operation under the same live lease.
