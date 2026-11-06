@@ -57,7 +57,11 @@ selection and no write, archive or delete method.
    roots only**, never replacement checkpoint versions.
 
 All object reads and comment inventories must be bounded **at their Host
-I/O source**, including allocations and deadlines. Exact direct refs with
+I/O source**, including allocations and deadlines. Comment body and report
+UTF-8 conversion must fail closed as `CheckpointRefused` for malformed
+Python Unicode (including lone surrogate code points), never leak an encoding
+exception that a pre-effect publisher might misclassify as uncertain.
+Exact direct refs with
 positive absence proof are mandatory. Repeated observations are not atomic
 CAS or server-side protection. SHA-1 Git object format only in this slice;
 metadata content IDs are SHA-256.
@@ -154,8 +158,9 @@ two-parent Archive with multiple Issues, synthetic Issue ref deletion and
 **new bare clone** historical readback, explicit previous checkpoint,
 idempotent publishing, wrong PR head, denied grant, journal conflicts,
 strict exact-comment and inventory identity types (including float-equal
-numeric IDs), lost ACK both before and after post, pending unknown ACK under a different
-key (stream guard), corrupted historical initial, adoption with a wrong
+numeric IDs), malformed Unicode in exact-read, inventory, report and
+post-effect readback, lost ACK both before and after post, pending unknown ACK
+under a different key (stream guard), corrupted historical initial, adoption with a wrong
 explicit predecessor, dangling intermediate comment ID, unknown
 `commits_after` observation, original parent deletion or canonical-body
 rewrite during posting, reverse chronological initial-comment

@@ -170,6 +170,15 @@ class CheckpointV2Test(unittest.TestCase):
         """
         self.assertLess(time.monotonic(), deadline)
         with self.stream_lock:
+            # The synthetic lease is a Host stand-in: invalid text cannot
+            # represent a positively verified original-body receipt.
+            def safe_digest(body):
+                try:
+                    return (hashlib.sha256(body.encode("utf-8")).hexdigest()
+                            if type(body) is str else None)
+                except UnicodeError:
+                    return None
+
             cleared = True
             for path in self.jpath.iterdir():
                 record = json.loads(path.read_text())
@@ -183,8 +192,7 @@ class CheckpointV2Test(unittest.TestCase):
                     comment for comment in self.comments
                     if comment.pr_number == value.pr_number
                     and comment.author_id == value.principal
-                    and hashlib.sha256(comment.body.encode()).hexdigest()
-                    == record["body_sha256"]
+                    and safe_digest(comment.body) == record["body_sha256"]
                 ]
                 if len(matches) != 1:
                     cleared = False
@@ -1061,6 +1069,61 @@ class CheckpointV2Test(unittest.TestCase):
                          self.publisher.publish(self.initial).comment_id)
         self.assertEqual(0, self.post_calls)
         self.assertFalse(list(self.jpath.iterdir()))
+
+    def test_unpaired_surrogate_in_exact_comment_is_refused_not_raw_unicode(self):
+        comment = self.add_comment(self.initial)
+        malformed = dataclasses.replace(
+            comment, body='{"bad": "\ud800"}')
+        with self.assertRaisesRegex(CheckpointRefused, "comment_provenance_invalid"):
+            self.bind(comment_reader=lambda *_: malformed).read(
+                PR, comment.comment_id)
+        with self.assertRaisesRegex(CheckpointRefused, "checkpoint_body_invalid"):
+            decode_checkpoint(malformed.body)
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
+
+    def test_unpaired_surrogate_inventory_is_refused_before_intent_or_post(self):
+        comment = self.add_comment(self.initial)
+        malformed = dataclasses.replace(comment, body="checkpoint \ud800")
+        self.comments[:] = [malformed]
+        with self.assertRaisesRegex(CheckpointRefused, "inventory_identity_invalid"):
+            self.publisher.publish(self.initial)
+        self.assertEqual(0, self.post_calls)
+        self.assertEqual([], list(self.jpath.iterdir()))
+
+    def test_unpaired_surrogate_report_is_rejected_by_capsule_codec(self):
+        with self.assertRaisesRegex(CheckpointRefused, "checkpoint_report_invalid"):
+            dataclasses.replace(self.initial, report="bad \ud800")
+        self.assertEqual(0, self.post_calls)
+
+    def test_unpaired_surrogate_after_effect_is_uncertain_without_repost(self):
+        original = self.publisher.publish(self.initial)
+        previous = {
+            "state": "observed", "checkpoint_id": str(original.comment_id),
+            "subject": self.initial.subject,
+            "metadata_commit": self.initial.metadata_commit,
+            "snapshot_id": self.initial.snapshot_id,
+            "commits_after": {"state": "observed", "count": 0},
+        }
+        turn = self.add_snapshot(self.initial.metadata_commit,
+                                 boundary="turn-end", previous=previous)
+
+        def mutate_parent_after_post(pr_number, body, deadline):
+            result = self.post(pr_number, body, deadline)
+            self.comments[0] = dataclasses.replace(
+                self.comments[0], body="malformed \ud800")
+            return result
+
+        with self.assertRaisesRegex(CheckpointUncertain, "post_outcome_uncertain"):
+            self.publisher_for(post=mutate_parent_after_post).publish(
+                turn, previous_comment_id=original.comment_id)
+        self.assertEqual(2, self.post_calls)
+        self.assertEqual(2, len(list(self.jpath.iterdir())))
+        # The synthetic Host can no longer attest the edited original
+        # body digest, so the stream-wide lease refuses before inventory.
+        with self.assertRaisesRegex(CheckpointRefused, "stream_pending"):
+            self.publisher.publish(turn, previous_comment_id=original.comment_id)
+        self.assertEqual(2, self.post_calls)
 
 
 if __name__ == "__main__":

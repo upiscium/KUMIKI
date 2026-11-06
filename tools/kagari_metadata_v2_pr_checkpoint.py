@@ -51,6 +51,15 @@ def positive(value: object) -> bool:
     return type(value) is int and 0 < value <= _MAX_ID
 
 
+def _utf8(value: object, code: str) -> bytes:
+    """Reject invalid Host/Python Unicode as a bounded refusal, never a raw I/O error."""
+    require(type(value) is str, code)
+    try:
+        return value.encode("utf-8")
+    except UnicodeError as error:
+        raise CheckpointRefused(code) from error
+
+
 def _bounded_deadline(value: float | None) -> float:
     """Retain one absolute <=40s bound across nested historical reads."""
     now = time.monotonic()
@@ -62,8 +71,9 @@ def _bounded_deadline(value: float | None) -> float:
 
 
 def _canonical(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False, allow_nan=False).encode("utf-8")
+    return _utf8(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                            ensure_ascii=False, allow_nan=False),
+                 "checkpoint_canonical_utf8_invalid")
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -124,7 +134,7 @@ class V2PRCheckpoint:
                 and (self.key == "initial") == (self.boundary == "initial"),
                 "checkpoint_key_invalid")
         require(type(self.report) is str and bool(self.report)
-                and len(self.report.encode("utf-8")) <= _MAX_REPORT
+                and len(_utf8(self.report, "checkpoint_report_invalid")) <= _MAX_REPORT
                 and not any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127
                             for c in self.report) and "\r" not in self.report
                 and not self.report.endswith("\n"), "checkpoint_report_invalid")
@@ -151,13 +161,14 @@ def render_checkpoint(value: V2PRCheckpoint) -> str:
     body = (f"<!-- {MARKER} sha256={digest} -->\n"
             f"Task checkpoint ({value.boundary}, v2):\n{value.report}\n"
             f"Capsule: {capsule}")
-    require(len(body.encode("utf-8")) <= _MAX_BODY, "checkpoint_body_limit")
+    require(len(_utf8(body, "checkpoint_body_invalid")) <= _MAX_BODY,
+            "checkpoint_body_limit")
     return body
 
 
 def decode_checkpoint(body: str) -> V2PRCheckpoint:
     """Reject v1, duplicate/noncanonical JSON, extra fields and body edits."""
-    require(type(body) is str and len(body.encode("utf-8")) <= _MAX_BODY,
+    require(len(_utf8(body, "checkpoint_body_invalid")) <= _MAX_BODY,
             "checkpoint_body_invalid")
     lines = body.split("\n")
     require(len(lines) >= 4, "checkpoint_comment_invalid")
@@ -265,8 +276,8 @@ class ExactCheckpointReader:
                 and comment.pr_number == pr_number
                 and comment.comment_id == comment_id
                 and comment.kind == "pr"
-                and len(comment.body.encode("utf-8")) <= _MAX_BODY,
-                "checkpoint_comment_provenance_invalid")
+                and len(_utf8(comment.body, "checkpoint_comment_provenance_invalid"))
+                <= _MAX_BODY, "checkpoint_comment_provenance_invalid")
         return comment
 
     def _match(self, value: V2PRCheckpoint, pr_number: int) -> None:
@@ -503,7 +514,8 @@ class SourceOnlyCheckpointPublisher:
                     == (value.repository_id, value.repository, value.pr_number, "pr")
                     and comment.comment_id > previous_id,
                     "checkpoint_comment_inventory_identity_invalid")
-            total += len(comment.body.encode("utf-8"))
+            total += len(_utf8(comment.body,
+                               "checkpoint_comment_inventory_identity_invalid"))
             require(total <= 8 * 1024 * 1024,
                     "checkpoint_comment_inventory_byte_limit")
             previous_id = comment.comment_id
