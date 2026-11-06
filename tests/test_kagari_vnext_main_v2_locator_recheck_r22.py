@@ -2,13 +2,17 @@
 from __future__ import annotations
 import unittest
 from tests.test_kagari_vnext_main_v2_session_observation import (
-    R5B0SessionReadOnlyTests, V2SessionLocator, SID)
+    V2SessionLocator, SID)
 from tests.test_metadata_v2 import REPOSITORY
 from task_record import encode_record
 from tools.kagari_vnext_main import MainError
 
 class HostLocatorRecheckTests(unittest.TestCase):
     def setUp(self):
+        # Keep the foreign TestCase class out of this module's globals:
+        # CI's complete contract inventory requires each test to have one home.
+        from tests.test_kagari_vnext_main_v2_session_observation import (
+            R5B0SessionReadOnlyTests)
         self.source=R5B0SessionReadOnlyTests("runTest")
         self.addCleanup(self.source.doCleanups)
         self.source.setUp()
