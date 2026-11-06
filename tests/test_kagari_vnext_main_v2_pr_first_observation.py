@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import base64
 import copy
-from dataclasses import replace
+from dataclasses import asdict, replace
 import hashlib
 import json
 from pathlib import Path
@@ -23,11 +23,15 @@ from tools import kagari_vnext_main_v2_pr_first_observation as pr_module
 from tools.kagari_vnext_main import MainError
 from tools.kagari_vnext_main_v2_observation import V2ReadOnlyMainHost
 from tools.kagari_vnext_main_v2_pr_first_observation import (
-    V2PrFirstReadOnlyHost, V2PrFirstRefused, PrFirstFacts, decode_initial_capsule)
+    V2PrFirstReadOnlyHost, V2PrFirstRefused, PrFirstFacts)
 import kagari_vnext_attachment_gate as gate
 from kagari_metadata_v2_host_binding import (
     ReadOnlyMetadataV2Host, ExactLocator, VERSION)
-from task_collaboration import RepositoryFacts, PullFacts, CommentFacts
+from task_collaboration import RepositoryFacts, PullFacts
+from kagari_metadata_v2_pr_checkpoint import (
+    V2PRCheckpoint, CommentFacts, ExactCheckpointReader,
+    CheckpointRefused, decode_checkpoint, render_checkpoint)
+import kagari_metadata_v2_pr_checkpoint as checkpoint_module
 from task_view import encode_snapshot
 from metadata_v2 import ARCHIVE_REF, issue_ref
 from metadata_v2_archive import archive_issue
@@ -83,12 +87,8 @@ def view_snapshot(src, subject, *, issue=101, record=None, contract=None,
 
 
 def capsule_body(payload):
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"),
-                     ensure_ascii=True).encode("ascii")
-    digest = hashlib.sha256(pr_module._DOMAIN + raw).hexdigest()
-    return (f"<!-- kagari-v2-initial-checkpoint/v1 sha256={digest} -->\n"
-            "Task checkpoint (initial):\n"
-            "Capsule: " + base64.b64encode(raw).decode("ascii"))
+    # The producer and verifier are the exact #337 canonical v2 codec.
+    return render_checkpoint(V2PRCheckpoint.from_mapping(payload))
 
 
 class R5C0PrFirstTests(unittest.TestCase):
@@ -115,6 +115,8 @@ class R5C0PrFirstTests(unittest.TestCase):
         self.metadata_commit = None
         self.snapshot_id = None
         self.fact_reads = []
+        self.exact_reads = []
+        self.exact_callback = None
         self.repo_facts = RepositoryFacts(REPOSITORY, BASE_REF, src.identity.repository_id)
         self.pull = self.pr_facts(src.registered)
         self.comments = ()
@@ -159,8 +161,20 @@ class R5C0PrFirstTests(unittest.TestCase):
             (self.pull,) if self.pull is not None else (),
             tuple(self.comments), self.complete)
 
+    def read_exact_comment(self, pr_number, comment_id, deadline):
+        self.assertLess(time.monotonic(), deadline)
+        self.exact_reads.append((pr_number, comment_id))
+        if self.exact_callback is not None:
+            return self.exact_callback(pr_number, comment_id, deadline)
+        matches = [item for item in self.comments if
+                   item.pr_number == pr_number and item.comment_id == comment_id]
+        if len(matches) != 1:
+            raise LookupError("missing or duplicate exact comment ID")
+        return matches[0]
+
     def host(self, lease, *, registered=None, approved=None, read_facts=None,
-             observer=None, reader=None, expected_base_ref=BASE_REF):
+             observer=None, reader=None, expected_base_ref=BASE_REF,
+             principal=PRINCIPAL, exact_reader=None):
         src = self.src
         registered = registered or src.registered
         approved = approved or src.approved
@@ -170,11 +184,13 @@ class R5C0PrFirstTests(unittest.TestCase):
                 registered=registered, approved=approved, observer=observer),
             lease, lambda req: self.legacy_clear,
             lambda req: self.allow_read)
-        history = ReadOnlyMetadataV2Host(
-            src.identity, registered, reader=reader or src.fixture.reader,
-            observer=observer or src.fixture.observe)
+        checkpoint = exact_reader or ExactCheckpointReader(
+            src.identity, registered, base_ref=expected_base_ref,
+            principal=principal, reader=reader or src.fixture.reader,
+            observer=observer or src.fixture.observe,
+            comment_reader=self.read_exact_comment)
         return V2PrFirstReadOnlyHost(
-            rd, history, expected_base_ref, read_facts or self.read_facts)
+            rd, checkpoint, expected_base_ref, read_facts or self.read_facts)
 
     def setup_published_checkpoint(self):
         src = self.src
@@ -192,7 +208,7 @@ class R5C0PrFirstTests(unittest.TestCase):
     def comment(self, *, payload=None, number=PR, author=PRINCIPAL, cid=701):
         if payload is None:
             payload = {
-                "schema_version": 1, "metadata_version": 2,
+                "version": 2,
                 "repository_id": self.src.identity.repository_id,
                 "repository": REPOSITORY, "issue": 101,
                 "branch_ref": self.src.registered.branch_ref,
@@ -207,7 +223,8 @@ class R5C0PrFirstTests(unittest.TestCase):
                 "report": "Initial frozen Task handoff",
             }
         return CommentFacts(
-            REPOSITORY, "pr", number, cid, author, capsule_body(payload))
+            self.src.identity.repository_id, REPOSITORY, number,
+            cid, author, capsule_body(payload))
 
     def main(self, lease, *, extra_hosts=None):
         hosts = extra_hosts or {101: self.host(lease)}
@@ -264,6 +281,9 @@ class R5C0PrFirstTests(unittest.TestCase):
                      "github_write_authorized", "session_started", "prompt_sent"):
             self.assertIs(result[flag], False)
         self.assertEqual(2, len(self.fact_reads))
+        self.assertEqual([(PR, 701), (PR, 701)], self.exact_reads)
+        self.assertEqual("kagari-pr-checkpoint/v2",
+                         result["pr_first"]["checkpoint_schema"])
         self.preserved(before)
 
     def test_supervisor_keeps_main_blocked_and_never_dispatches(self):
@@ -353,37 +373,44 @@ class R5C0PrFirstTests(unittest.TestCase):
         self.refused("R5C0_INITIAL_CHECKPOINT_MISSING_OR_DUPLICATE")
         self.comments = (replace(old[0], author_id=99),)
         self.refused("R5C0_INITIAL_CHECKPOINT_MISSING_OR_DUPLICATE")
-        self.comments = (replace(old[0], body=old[0].body.replace(
-            "kagari-v2-initial-checkpoint/v1", "agentcore-task-checkpoint/v1")),)
-        self.refused("R5C0_CAPSULE_INVALID")
+        for obsolete in ("agentcore-task-checkpoint/v1",
+                         "kagari-v2-initial-checkpoint/v1"):
+            self.comments = (replace(old[0], body=old[0].body.replace(
+                "kagari-pr-checkpoint/v2", obsolete)),)
+            self.refused("R5C1B0_OBSOLETE_CHECKPOINT")
         self.comments = old
 
     def test_wrong_comment_principal_number_and_binding_refuse(self):
         self.setup_published_checkpoint()
         old = self.comments
-        for change in ({"number": 99}, {"repository": "foreign/repo"},
-                       {"kind": "issue"}, {"comment_id": 0}):
+        for change in ({"pr_number": 99}, {"repository": "foreign/repo"},
+                       {"repository_id": 9999}, {"kind": "issue"},
+                       {"comment_id": 0}, {"comment_id": True},
+                       {"author_id": False}):
             with self.subTest(change=change):
                 self.comments = (replace(old[0], **change),)
                 try:
-                    self.refused("R5C0_CHECKPOINT_COMMENT_MISMATCH")
+                    self.refused("R5C1B0_COMMENT_INVENTORY_INVALID")
                 finally:
                     self.comments = old
         for key, v in (
             ("principal", 992), ("record_id", "1"*64),
             ("contract_id", "2"*64), ("subject", "b"*40),
-            ("base_ref", "refs/heads/other"), ("metadata_version", 1),
-            ("issue", 202), ("pr_number", 52)
+            ("base_ref", "refs/heads/other"), ("issue", 202),
+            ("pr_number", 52)
         ):
             with self.subTest(key=key):
-                p = decode_initial_capsule(old[0].body)
-                p[key] = v
-                self.comments = (self.comment(payload=p),)
+                payload = asdict(decode_checkpoint(old[0].body))
+                payload[key] = v
+                self.comments = (self.comment(payload=payload),)
                 try:
-                    self.refused("R5C0_CAPSULE_INVALID" if key == "metadata_version"
-                                 else "R5C0_CHECKPOINT_BINDING_MISMATCH")
+                    self.refused("R5C1B0_CHECKPOINT_BINDING_MISMATCH")
                 finally:
                     self.comments = old
+        payload = asdict(decode_checkpoint(old[0].body))
+        payload["version"] = 1
+        with self.assertRaises(CheckpointRefused):
+            capsule_body(payload)
 
     def test_unreachable_wrong_or_missing_metadata_commit_and_snapshot_refuse(self):
         self.setup_published_checkpoint()
@@ -392,11 +419,11 @@ class R5C0PrFirstTests(unittest.TestCase):
             ("metadata_commit", "b"*40),
             ("snapshot_id", "c"*64)
         ):
-            p = decode_initial_capsule(old[0].body)
+            p = asdict(decode_checkpoint(old[0].body))
             p[key] = val
             self.comments = (self.comment(payload=p),)
             try:
-                self.refused("R5C0_METADATA_HISTORY_UNAVAILABLE")
+                self.refused("R5C1B0_CHECKPOINT_UNVERIFIED")
             finally:
                 self.comments = old
 
@@ -407,10 +434,10 @@ class R5C0PrFirstTests(unittest.TestCase):
         sid, raw = view_snapshot(src, self.subject, metadata_tip=parent,
                                  boundary="turn-end")
         wrong_commit = src.fixture.store().publish_issue("101", [raw])
-        p = decode_initial_capsule(self.comments[0].body)
+        p = asdict(decode_checkpoint(self.comments[0].body))
         p["snapshot_id"], p["metadata_commit"] = sid, wrong_commit
         self.comments = (self.comment(payload=p),)
-        self.refused("R5C0_SNAPSHOT_BINDING_MISMATCH")
+        self.refused("R5C1B0_CHECKPOINT_UNVERIFIED")
 
     def test_product_dirty_or_worktree_registration_missing_refuses(self):
         self.setup_published_checkpoint()
@@ -447,7 +474,7 @@ class R5C0PrFirstTests(unittest.TestCase):
         self.callback = lose_ref
         # Historical checkpoint is no longer reachable when its only active
         # Issue ref disappears. Refusal precedes final current-Task recheck.
-        self.refused("R5C0_METADATA_HISTORY_UNAVAILABLE")
+        self.refused("R5C1B0_CHECKPOINT_UNVERIFIED")
 
     def test_pr_facts_changed_during_second_host_read_refuses(self):
         self.setup_published_checkpoint()
@@ -469,19 +496,22 @@ class R5C0PrFirstTests(unittest.TestCase):
 
     def test_capsule_rejects_duplicate_json_key_and_noncanonical_digest(self):
         self.setup_published_checkpoint()
-        p = decode_initial_capsule(self.comments[0].body)
-        content = json.dumps(p, sort_keys=True, separators=(",", ":")).encode()
-        # Insert duplicate JSON field, while resigning the digest to prove
-        # duplicate field refusal is not merely checksum mismatch.
+        p = asdict(decode_checkpoint(self.comments[0].body))
+        content = json.dumps(p, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=False).encode("utf-8")
         changed = content[:-1] + b',"issue":101}'
-        digest = hashlib.sha256(pr_module._DOMAIN + changed).hexdigest()
-        bad = (f"<!-- kagari-v2-initial-checkpoint/v1 sha256={digest} -->\n"
-               "Task checkpoint (initial):\nCapsule: " +
-               base64.b64encode(changed).decode())
-        with self.assertRaisesRegex(V2PrFirstRefused, "DUPLICATE"):
-            decode_initial_capsule(bad)
-        with self.assertRaises(V2PrFirstRefused):
-            decode_initial_capsule(self.comments[0].body + "garbage")
+        digest = hashlib.sha256(checkpoint_module._DOMAIN + changed).hexdigest()
+        bad = (f"<!-- kagari-pr-checkpoint/v2 sha256={digest} -->\n"
+               "Task checkpoint (initial, v2):\nInitial frozen Task handoff\n"
+               "Capsule: " + base64.b64encode(changed).decode())
+        with self.assertRaises(CheckpointRefused):
+            decode_checkpoint(bad)
+        with self.assertRaises(CheckpointRefused):
+            decode_checkpoint(self.comments[0].body + "garbage")
+        old = self.comments
+        self.comments = (replace(old[0], body=bad),)
+        self.refused("R5C1B0_CANONICAL_INVALID")
+        self.comments = old
 
     def test_nonliteral_host_selection_refuses_v1_fallback(self):
         with gate.hold_verified(self.src.project, self.src.home,
@@ -546,22 +576,141 @@ class R5C0PrFirstTests(unittest.TestCase):
         self.setup_published_checkpoint()
         original = self.comments
         raw = b'{"report":' + b'[' * 1100 + b'0' + b']' * 1100 + b'}'
-        digest = hashlib.sha256(pr_module._DOMAIN + raw).hexdigest()
+        digest = hashlib.sha256(checkpoint_module._DOMAIN + raw).hexdigest()
         nested = (
-            f"<!-- kagari-v2-initial-checkpoint/v1 sha256={digest} -->\n"
-            "Task checkpoint (initial):\n"
+            f"<!-- kagari-pr-checkpoint/v2 sha256={digest} -->\n"
+            "Task checkpoint (initial, v2):\nInitial frozen Task handoff\n"
             "Capsule: " + base64.b64encode(raw).decode("ascii"))
-        for bad in (nested, original[0].body + "\ud800"):
+        for bad, expected in (
+            (nested, "R5C1B0_CANONICAL_INVALID"),
+            (original[0].body + "\ud800", "R5C1B0_COMMENT_INVENTORY_INVALID"),
+        ):
             with self.subTest(kind="malformed-body"):
                 self.comments = (replace(original[0], body=bad),)
-                self.refused("R5C0_CAPSULE_INVALID")
-        payload = decode_initial_capsule(original[0].body)
+                self.refused(expected)
+        payload = asdict(decode_checkpoint(original[0].body))
         payload["report"] = "\ud800"
-        self.comments = (self.comment(payload=payload),)
-        self.refused("R5C0_CAPSULE_INVALID")
+        with self.assertRaises(CheckpointRefused):
+            capsule_body(payload)
         self.comments = (replace(original[0], body=None),)
-        self.refused("R5C0_PR_FACTS_MISMATCH")
+        self.refused("R5C1B0_COMMENT_INVENTORY_INVALID")
         self.comments = original
+
+    def test_unrelated_valid_comments_do_not_replace_initial_proof(self):
+        self.setup_published_checkpoint()
+        original = self.comments[0]
+        unrelated = CommentFacts(
+            self.src.identity.repository_id, REPOSITORY, PR, 702,
+            PRINCIPAL, "Unrelated regular PR discussion.")
+        foreign = replace(original, comment_id=703, author_id=9933)
+        self.comments = (original, unrelated, foreign)
+        result = self.observe()
+        self.assertEqual("PROVED", result["pr_first"]["proof"])
+        self.assertEqual(701, result["pr_first"]["comment_id"])
+        self.assertEqual([(PR, 701), (PR, 701)], self.exact_reads)
+
+    def test_ordinary_comment_quoting_marker_names_is_not_checkpoint(self):
+        self.setup_published_checkpoint()
+        ordinary = CommentFacts(
+            self.src.identity.repository_id, REPOSITORY, PR, 702, PRINCIPAL,
+            "Documentation references kagari-pr-checkpoint/v2 and "
+            "agentcore-task-checkpoint/v1 without posting a capsule.")
+        self.comments = (self.comments[0], ordinary)
+        self.assertEqual("PROVED", self.observe()["pr_first"]["proof"])
+
+    def test_long_ordinary_comment_is_not_canonical_capsule_limit(self):
+        self.setup_published_checkpoint()
+        ordinary = CommentFacts(
+            self.src.identity.repository_id, REPOSITORY, PR, 702, PRINCIPAL,
+            "A legitimate PR design discussion: " + "x" * (16 * 1024 + 5))
+        self.comments = (self.comments[0], ordinary)
+        self.assertEqual("PROVED", self.observe()["pr_first"]["proof"])
+
+    def test_malformed_canonical_opener_refuses_even_with_valid_initial(self):
+        self.setup_published_checkpoint()
+        invalid = CommentFacts(
+            self.src.identity.repository_id, REPOSITORY, PR, 702, PRINCIPAL,
+            "<!-- kagari-pr-checkpoint/v2 sha256=not-a-hash -->")
+        self.comments = (self.comments[0], invalid)
+        self.refused("R5C1B0_CANONICAL_INVALID")
+
+    def test_trusted_exact_reader_principal_and_binding_are_independent(self):
+        self.setup_published_checkpoint()
+        with gate.hold_verified(self.src.project, self.src.home,
+                                self.src.package) as lease:
+            host = self.host(lease, principal=PRINCIPAL + 1)
+            main = self.main(lease, extra_hosts={101: host})
+            with self.assertRaisesRegex(MainError, "R5C1B0_PRINCIPAL_MISMATCH"):
+                main.observe(101)
+            foreign = ExactCheckpointReader(
+                self.src.identity, self.src.registered,
+                base_ref="refs/heads/foreign", principal=PRINCIPAL,
+                reader=self.src.fixture.reader, observer=self.src.fixture.observe,
+                comment_reader=self.read_exact_comment)
+            with self.assertRaisesRegex(
+                    V2PrFirstRefused, "R5C1B0_CHECKPOINT_HOST_MISMATCH"):
+                self.host(lease, exact_reader=foreign)
+
+    def test_exact_comment_readback_cannot_substitute_other_valid_report(self):
+        self.setup_published_checkpoint()
+        original = self.comments[0]
+        altered = replace(decode_checkpoint(original.body),
+                          report="A distinct valid canonical report")
+        def unrelated_exact(pr_number, comment_id, deadline):
+            return replace(original, body=render_checkpoint(altered))
+        self.exact_callback = unrelated_exact
+        self.refused("R5C1B0_COMMENT_READBACK_MISMATCH")
+        self.assertEqual([(PR, 701), (PR, 701)], self.exact_reads)
+
+    def test_exact_comment_changed_mid_history_read_blocks_proof(self):
+        self.setup_published_checkpoint()
+        original = self.comments[0]
+        altered = replace(decode_checkpoint(original.body),
+                          report="Edited during original-commit traversal")
+        calls = [0]
+        def changed_exact(pr_number, comment_id, deadline):
+            calls[0] += 1
+            return (original if calls[0] == 1
+                    else replace(original, body=render_checkpoint(altered)))
+        self.exact_callback = changed_exact
+        self.refused("R5C1B0_CHECKPOINT_UNVERIFIED")
+        self.assertGreaterEqual(calls[0], 2)
+
+    def test_wrong_exact_comment_or_unavailable_host_fails_closed(self):
+        self.setup_published_checkpoint()
+        original = self.comments[0]
+        self.exact_callback = lambda *_: replace(original, repository_id=999999)
+        self.refused("R5C1B0_CHECKPOINT_UNVERIFIED")
+        def missing(*_):
+            raise OSError("no authenticated exact comment read")
+        self.exact_callback = missing
+        self.refused("R5C1B0_CHECKPOINT_UNVERIFIED")
+
+    def test_initial_proof_rejects_noninitial_owned_v2_capsule(self):
+        self.setup_published_checkpoint()
+        original = self.comments[0]
+        noninitial = replace(decode_checkpoint(original.body),
+                             boundary="turn-end", key="turn-1")
+        self.comments = (replace(original, body=render_checkpoint(noninitial)),)
+        self.refused("R5C1B0_NONINITIAL_CHECKPOINT")
+        self.comments = (original, replace(original, comment_id=702,
+                         body=render_checkpoint(noninitial)))
+        self.refused("R5C1B0_NONINITIAL_CHECKPOINT")
+
+    def test_inventory_duplicate_out_of_order_and_oversized_refuse(self):
+        self.setup_published_checkpoint()
+        original = self.comments[0]
+        cases = (
+            (original, replace(original, comment_id=701)),
+            (replace(original, comment_id=701), replace(original, comment_id=700)),
+            (original, CommentFacts(
+                self.src.identity.repository_id, REPOSITORY, PR, 702,
+                PRINCIPAL, "x" * (8 * 1024 * 1024 + 1))),
+        )
+        for inventory in cases:
+            with self.subTest(comment_count=len(inventory)):
+                self.comments = inventory
+                self.refused("R5C1B0_COMMENT_INVENTORY_INVALID")
 
     def test_real_disposable_submodule_ignore_all_does_not_hide_dirt(self):
         """Real Git submodule with ignore=all; R5C0 must check nested state."""
