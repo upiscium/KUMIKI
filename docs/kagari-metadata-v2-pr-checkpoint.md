@@ -95,6 +95,10 @@ posts and adoption must traverse the **full authenticated PR comment chain**
 from the explicit predecessor to the initial comment, checking every comment
 ID against its exact pinned Snapshot/subject/commit tuple and requiring
 `previous_checkpoint.commits_after.state = "observed"` at every link.
+Only an authenticated author's comment **starting with** the literal
+`<!-- kagari-pr-checkpoint/v2` capsule opener is treated as an owned
+checkpoint candidate; malformed first-line openers fail closed, while a
+normal PR comment that merely **mentions** the format name is ignored.
 **Additionally, every owned v2 checkpoint in the complete inventory** is
 exact-read and checked, in chronological comment-ID order, against the
 immediately preceding owned checkpoint. This enforces a **single linear
@@ -121,8 +125,20 @@ Before even reading an intent, the Host's stream lease must serialize the
 checkpoint-intent journal across all keys**, and return literal True only
 when every other key is positively reconciled with a verified original PR
 comment; otherwise publication is refused. The lease must stay exclusive
-through effect and final readback, including ambiguous effects. A matching
-current-key prior intent may be reconciled but never replayed. The Host
+through effect and final readback, including ambiguous effects. A Host
+lease-release failure after confirmed readback, or after a possibly
+persisted intent/effect, is **CheckpointUncertain**, even when the lease
+returns a `CheckpointRefused` error. This also applies when the lease
+release itself raises a `BaseException` such as `KeyboardInterrupt`
+**after successful post and readback** or a possibly durable intent/effect,
+even though ordinary `Exception` handlers would not intercept it. A
+pre-intent interrupt still propagates without being mislabeled as an effect.
+If the lease's context manager **suppresses** a body exception, the
+publisher explicitly restores that
+refusal or uncertainty; it must never silently return `None`. Only
+genuinely pre-intent rejection remains `CheckpointRefused`.
+A matching current-key prior intent may be reconciled
+but never replayed. The Host
 must authenticate and bound this cross-key scan itself; a simple in-memory
 lock, single-key check, or advisory boolean without durable inventory is
 not sufficient.
@@ -130,9 +146,12 @@ not sufficient.
 The Host grant must also return literal True. Re-observe the PR and all
 comments, persist and fsync a create-once intent keyed by repository ID,
 Issue, PR, principal and checkpoint key, and only then invoke the scoped post.
-A matching prior intent is **readback-only**: if still unconfirmed, report
-CheckpointUncertain and do not repost. A lost ACK after a successful post
-can succeed only through one exact owned comment, original metadata readback
+An existing journal intent must match **exact key set, value types and
+values**; Python float/int/bool-equal aliases never count as matching
+persisted identity or schema. A matching prior intent is **readback-only**:
+if still unconfirmed, report CheckpointUncertain and do not repost.
+A lost ACK after a successful post can succeed only through one exact
+owned comment, original metadata readback
 and stable comment inventory **and PR facts** at the final boundary.
 The post-readback inventory must also retain every previously verified owned
 checkpoint **with identical ID, author, repository and body**, rather than
@@ -159,8 +178,14 @@ two-parent Archive with multiple Issues, synthetic Issue ref deletion and
 idempotent publishing, wrong PR head, denied grant, journal conflicts,
 strict exact-comment and inventory identity types (including float-equal
 numeric IDs), malformed Unicode in exact-read, inventory, report and
-post-effect readback, lost ACK both before and after post, pending unknown ACK
-under a different key (stream guard), corrupted historical initial, adoption with a wrong
+post-effect readback, harmless format-name mentions in ordinary comments,
+malformed first-line capsule openers, post-success and post-intent lease
+release errors, suppressed unknown-post and pre-intent context-manager errors,
+pre-intent lease refusal, post-effect interrupt overridden by failing
+lease release, release-time interrupt after confirmed readback, pre-intent
+interrupt propagation, strict type and key-set journal reconciliation,
+lost ACK both before and after post, pending unknown ACK under a different
+key (stream guard), corrupted historical initial, adoption with a wrong
 explicit predecessor, dangling intermediate comment ID, unknown
 `commits_after` observation, original parent deletion or canonical-body
 rewrite during posting, reverse chronological initial-comment

@@ -525,7 +525,11 @@ class SourceOnlyCheckpointPublisher:
                comments: tuple[CommentFacts, ...]) -> dict[str, CommentFacts]:
         checkpoints: dict[str, CommentFacts] = {}
         for comment in comments:
-            if comment.author_id != value.principal or MARKER not in comment.body:
+            # An ordinary review comment may *mention* the format name.
+            # Only a first-line capsule opener is an owned v2 candidate;
+            # malformed candidates with that opener still fail closed.
+            if (comment.author_id != value.principal
+                    or not comment.body.startswith(f"<!-- {MARKER}")):
                 continue
             parsed = decode_checkpoint(comment.body)
             require((parsed.repository_id, parsed.repository, parsed.issue,
@@ -680,20 +684,61 @@ class SourceOnlyCheckpointPublisher:
         self._exact._match(value, value.pr_number)
         deadline = time.monotonic() + 40
         require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
+        phase = {
+            "intent_or_effect": False, "body_started": False,
+            "body_completed": False,
+        }
+        body_error: BaseException | None = None
         try:
             lease = self._stream_lease(value, deadline)
             with lease as cleared:
                 require(cleared is True, "checkpoint_stream_pending")
-                return self._publish_locked(value, previous_comment_id, deadline)
-        except CheckpointRefused:
+                phase["body_started"] = True
+                try:
+                    result = self._publish_locked(
+                        value, previous_comment_id, deadline, phase)
+                except BaseException as error:
+                    # Preserve even KeyboardInterrupt/SystemExit identity:
+                    # lease __exit__ may replace an interrupted effect.
+                    body_error = error
+                    raise
+                phase["body_completed"] = True
+                return result
+            # A Host __exit__ may suppress an exception thrown by the body.
+            # Never implicitly return None or lose an unknown post outcome.
+            if body_error is not None:
+                raise body_error
+            if not phase["body_started"]:
+                raise CheckpointRefused("checkpoint_stream_pending")
+            raise CheckpointUncertain("checkpoint_stream_lease_uncertain")
+        except CheckpointRefused as error:
+            # A successful body followed by failing release, or a lease exit
+            # that overrides an error after an intent/effect may exist, is
+            # uncertain. Do not relabel an ordinary source refusal merely
+            # because an older matching intent is present.
+            if isinstance(error, CheckpointUncertain):
+                raise
+            if phase["body_completed"] or (
+                    phase["intent_or_effect"] and error is not body_error):
+                raise CheckpointUncertain(
+                    "checkpoint_stream_lease_uncertain") from error
             raise
         except Exception as error:
             # The lease may fail after an effect. No automatic repost is safe.
             raise CheckpointUncertain("checkpoint_stream_lease_uncertain") from error
+        except BaseException as error:
+            # After a possible intent/effect, even an interrupt raised while
+            # releasing the Host lease must not look like a safely aborted
+            # operation. Preserve genuine pre-intent interrupts.
+            if phase["intent_or_effect"] or phase["body_completed"]:
+                raise CheckpointUncertain(
+                    "checkpoint_stream_lease_uncertain") from error
+            raise
 
     def _publish_locked(
         self, value: V2PRCheckpoint,
         previous_comment_id: int | None, deadline: float,
+        phase: dict[str, bool],
     ) -> ConfirmedCheckpoint:
         body = render_checkpoint(value)
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -713,8 +758,15 @@ class SourceOnlyCheckpointPublisher:
             saved = self._journal.read(journal_key)
         except Exception as error:
             raise CheckpointRefused("checkpoint_intent_read_unavailable") from error
-        require(saved is None or saved == expected_intent,
+        require(saved is None or (
+                    type(saved) is dict and saved.keys() == expected_intent.keys()
+                    and all(type(saved[key]) is type(expected)
+                            and saved[key] == expected
+                            for key, expected in expected_intent.items())),
                 "checkpoint_intent_conflict")
+        # A matching persisted intent may already have produced a comment.
+        if saved is not None:
+            phase["intent_or_effect"] = True
         pull_before = self._pull_facts(value, deadline)
         comments_before = self._comments(value, deadline)
         owned = self._owned(value, comments_before)
@@ -764,6 +816,8 @@ class SourceOnlyCheckpointPublisher:
 
         # Must be fsynced before a possible external post; stream lease guards
         # all earlier keys' pending effects for the entire critical section.
+        # Be conservative even when create-once's outcome is unknown.
+        phase["intent_or_effect"] = True
         try:
             self._journal.create(journal_key, expected_intent)
         except Exception as error:
