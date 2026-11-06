@@ -1024,6 +1024,44 @@ class CheckpointV2Test(unittest.TestCase):
         self.assertEqual(0, self.post_calls)
         self.assertEqual([], list(self.jpath.iterdir()))
 
+    def test_comment_facts_exact_read_rejects_numeric_type_equivalence(self):
+        source = self.add_comment(self.initial)
+        invalid = [
+            dataclasses.replace(source, repository_id=float(REPO_ID)),
+            dataclasses.replace(source, pr_number=float(PR)),
+            dataclasses.replace(source, comment_id=float(source.comment_id)),
+            dataclasses.replace(source, author_id=float(PRINCIPAL)),
+            dataclasses.replace(source, repository=42),
+            dataclasses.replace(source, kind=True),
+        ]
+        for fact in invalid:
+            with self.subTest(fact=fact), self.assertRaisesRegex(
+                    CheckpointRefused, "comment_provenance_invalid"):
+                reader = self.bind(comment_reader=lambda *_: fact)
+                reader.read(PR, source.comment_id)
+        self.assertEqual(0, self.post_calls)
+
+    def test_comment_inventory_rejects_noncanonical_identity_types_before_effect(self):
+        source = self.add_comment(self.initial)
+        invalid = [
+            dataclasses.replace(source, repository_id=float(REPO_ID)),
+            dataclasses.replace(source, pr_number=float(PR)),
+            dataclasses.replace(source, comment_id=float(source.comment_id)),
+            dataclasses.replace(source, author_id=float(PRINCIPAL)),
+            dataclasses.replace(source, repository=42),
+            dataclasses.replace(source, kind=True),
+        ]
+        for fact in invalid:
+            self.comments[:] = [fact]
+            with self.subTest(fact=fact), self.assertRaisesRegex(
+                    CheckpointRefused, "inventory_identity_invalid"):
+                self.publisher.publish(self.initial)
+        self.comments[:] = [source]
+        self.assertEqual(source.comment_id,
+                         self.publisher.publish(self.initial).comment_id)
+        self.assertEqual(0, self.post_calls)
+        self.assertFalse(list(self.jpath.iterdir()))
+
 
 if __name__ == "__main__":
     unittest.main()

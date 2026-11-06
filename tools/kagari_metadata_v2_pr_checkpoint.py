@@ -253,12 +253,18 @@ class ExactCheckpointReader:
             raise CheckpointRefused("checkpoint_comment_read_unavailable") from error
         require(time.monotonic() < deadline, "checkpoint_deadline_exceeded")
         require(type(comment) is CommentFacts
+                and positive(comment.repository_id)
+                and positive(comment.pr_number)
+                and positive(comment.comment_id)
+                and positive(comment.author_id)
+                and type(comment.repository) is str
+                and type(comment.kind) is str
+                and type(comment.body) is str
                 and comment.repository_id == self.identity.repository_id
                 and comment.repository == self.identity.repository
                 and comment.pr_number == pr_number
                 and comment.comment_id == comment_id
-                and positive(comment.author_id) and comment.kind == "pr"
-                and type(comment.body) is str
+                and comment.kind == "pr"
                 and len(comment.body.encode("utf-8")) <= _MAX_BODY,
                 "checkpoint_comment_provenance_invalid")
         return comment
@@ -485,13 +491,17 @@ class SourceOnlyCheckpointPublisher:
         previous_id = 0
         for comment in comments:
             require(type(comment) is CommentFacts
+                    and positive(comment.repository_id)
+                    and positive(comment.pr_number)
+                    and positive(comment.comment_id)
+                    and positive(comment.author_id)
+                    and type(comment.repository) is str
+                    and type(comment.kind) is str
+                    and type(comment.body) is str
                     and (comment.repository_id, comment.repository,
                          comment.pr_number, comment.kind)
                     == (value.repository_id, value.repository, value.pr_number, "pr")
-                    and positive(comment.comment_id)
-                    and comment.comment_id > previous_id
-                    and positive(comment.author_id)
-                    and type(comment.body) is str,
+                    and comment.comment_id > previous_id,
                     "checkpoint_comment_inventory_identity_invalid")
             total += len(comment.body.encode("utf-8"))
             require(total <= 8 * 1024 * 1024,

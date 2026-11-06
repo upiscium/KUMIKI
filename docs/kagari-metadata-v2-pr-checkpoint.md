@@ -35,8 +35,10 @@ The **ExactCheckpointReader.read(pr_number, comment_id)** API has no latest
 selection and no write, archive or delete method.
 
 1. Fetch the exact positive PR comment ID. Verify the authenticated numeric
-   repository, PR, author, **Host-attested expected principal**, comment type
-   and bounded body before decoding.
+   repository, PR, comment and author IDs using **strict positive integer
+   types**, not Python int/float or bool equality. Check exact string types
+   for repository, comment kind and bounded body. The **Host-attested expected
+   principal** is independent of capsule claims, before decoding.
 2. Decode only v2; reject v1, noncanonical base64/JSON, duplicate/extra keys,
    mismatched digest, altered display report and foreign namespace.
 3. Bind the capsule to a Host-attested historical Issue registration and
@@ -151,7 +153,8 @@ type denial, exact PR comment IDs/provenance, later Record revisions,
 two-parent Archive with multiple Issues, synthetic Issue ref deletion and
 **new bare clone** historical readback, explicit previous checkpoint,
 idempotent publishing, wrong PR head, denied grant, journal conflicts,
-lost ACK both before and after post, pending unknown ACK under a different
+strict exact-comment and inventory identity types (including float-equal
+numeric IDs), lost ACK both before and after post, pending unknown ACK under a different
 key (stream guard), corrupted historical initial, adoption with a wrong
 explicit predecessor, dangling intermediate comment ID, unknown
 `commits_after` observation, original parent deletion or canonical-body
