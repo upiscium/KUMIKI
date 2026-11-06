@@ -132,20 +132,17 @@ def _trusted_context(
         raise _invalid("explicit nonempty trusted model allowlist required")
 
 
-def load_model_binding(
-    path: Path,
+def parse_model_binding_bytes(
+    raw: bytes,
     *,
     expected_project_head: str,
     expected_task_spec_sha256: str,
     allowed_models: frozenset[ModelSelection],
 ) -> FrozenModelBinding:
-    """Validate a bounded JSON sidecar against separately trusted Task context.
-
-    An exact approved selection is necessary but is NOT sufficient for consent.
-    The caller must independently bind this snapshot to later Human/Native Asks.
-    """
+    """Validate raw JSON selection bytes without filesystem or provider effects."""
     _trusted_context(expected_project_head, expected_task_spec_sha256, allowed_models)
-    raw = _read_sidecar(path)
+    if type(raw) is not bytes or not 0 < len(raw) <= MAX_BYTES:
+        raise _invalid("invalid sidecar bytes/size")
     try:
         data = json.loads(
             raw.decode("utf-8"), object_pairs_hook=_strict_object,
@@ -186,6 +183,25 @@ def load_model_binding(
     return FrozenModelBinding(
         data["project_head"], data["task_spec_sha256"],
         model, ROLES, _hash(raw), _hash(canonical)
+    )
+
+
+def load_model_binding(
+    path: Path,
+    *,
+    expected_project_head: str,
+    expected_task_spec_sha256: str,
+    allowed_models: frozenset[ModelSelection],
+) -> FrozenModelBinding:
+    """Validate a bounded sidecar against separately trusted Task context.
+    File input remains the original R1 interface and safety boundary.
+    """
+    _trusted_context(expected_project_head, expected_task_spec_sha256, allowed_models)
+    raw = _read_sidecar(path)
+    return parse_model_binding_bytes(
+        raw, expected_project_head=expected_project_head,
+        expected_task_spec_sha256=expected_task_spec_sha256,
+        allowed_models=allowed_models,
     )
 
 
