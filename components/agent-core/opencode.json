@@ -3,6 +3,7 @@
   "default_agent": "build",
   "subagent_depth": 2,
   "permission": {
+    "safe_git_inspect": "deny",
     "read": {
       "*": "allow",
       "*.env": "deny",
