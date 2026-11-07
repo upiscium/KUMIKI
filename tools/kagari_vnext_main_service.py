@@ -330,18 +330,40 @@ class MainV2ProductPrCapabilities:
             raise MainError("R5C1A_HOST_INVALID")
 
 
+@dataclass(frozen=True)
+class MainV2InitialCheckpointCapabilities:
+    """Explicit R5C1B1 Host-only initial publisher, never a plan/CLI grant."""
+
+    read_issue: Callable[[int], dict]
+    publications: dict[int, object]
+
+    def __post_init__(self) -> None:
+        if __package__:
+            from .kagari_vnext_main_v2_initial_checkpoint import V2InitialCheckpointHost
+        else:
+            from kagari_vnext_main_v2_initial_checkpoint import V2InitialCheckpointHost
+        if (not callable(self.read_issue) or type(self.publications) is not dict
+                or not self.publications
+                or any(type(issue) is not int
+                       or type(host) is not V2InitialCheckpointHost
+                       or host.readonly.selection.issue != issue
+                       for issue, host in self.publications.items())):
+            raise MainError("R5C1B1_HOST_INVALID")
+
+
 def build_main(
     plan: dict[str, Any], *,
     host: MainHostCapabilities | MainV2ReadOnlyCapabilities
           | MainV2WorktreeCapabilities | MainV2SessionReadOnlyCapabilities
           | MainV2PrFirstReadOnlyCapabilities
-          | MainV2ProductPrCapabilities | None = None,
+          | MainV2ProductPrCapabilities | MainV2InitialCheckpointCapabilities | None = None,
 ) -> RepositoryMain:
     plan = _validate_selection(plan, legacy_python=True)
     if host is not None and type(host) not in (
             MainHostCapabilities, MainV2ReadOnlyCapabilities,
             MainV2WorktreeCapabilities, MainV2SessionReadOnlyCapabilities,
-            MainV2PrFirstReadOnlyCapabilities, MainV2ProductPrCapabilities):
+            MainV2PrFirstReadOnlyCapabilities, MainV2ProductPrCapabilities,
+            MainV2InitialCheckpointCapabilities):
         raise MainError("MAIN_HOST_CAPABILITIES_INVALID")
     _exact_dir(Path(plan["project_root"]), "PRIMARY_PROJECT_REQUIRED")
     try:
@@ -397,7 +419,8 @@ def build_main(
             if type(host) is MainV2PrFirstReadOnlyCapabilities
             else {issue: pub.readonly
                   for issue, pub in host.publications.items()}
-            if type(host) is MainV2ProductPrCapabilities else None),
+            if type(host) in (MainV2ProductPrCapabilities,
+                             MainV2InitialCheckpointCapabilities) else None),
         v2_worktree_for_issue=(
             host.admissions if type(host) is MainV2WorktreeCapabilities else None),
         v2_session_for_issue=(
@@ -406,6 +429,8 @@ def build_main(
             host.proofs if type(host) is MainV2PrFirstReadOnlyCapabilities else None),
         v2_product_pr_for_issue=(
             host.publications if type(host) is MainV2ProductPrCapabilities else None),
+        v2_initial_checkpoint_for_issue=(
+            host.publications if type(host) is MainV2InitialCheckpointCapabilities else None),
     )
 
 
@@ -587,13 +612,15 @@ class MainSupervisor:
             raise MainError("V2_MAIN_ADMISSION_CONFIGURATION_INVALID")
         if type(publication_only) is not bool:
             raise MainError("R5C1A_OWNER_CONFIGURATION_INVALID")
+        publications = ((main.v2_product_pr_for_issue or main.v2_initial_checkpoint_for_issue)
+                        if type(main) is RepositoryMain else {})
         if publication_only and (
                 observe_only or admission_only or requested
                 or type(main) is not RepositoryMain
-                or not main.v2_product_pr_for_issue
+                or not publications
                 or attachment_lease is None
                 or any(host.readonly.lease is not attachment_lease
-                       for host in main.v2_product_pr_for_issue.values())):
+                       for host in publications.values())):
             raise MainError("R5C1A_OWNER_CONFIGURATION_INVALID")
         if (type(observe_only) is not bool
                 or any(n not in main.approved or not callable(f)
@@ -605,9 +632,9 @@ class MainSupervisor:
                     or (admission_only and main.v2_worktree_for_issue
                         and attachment_lease is next(iter(
                             main.v2_worktree_for_issue.values())).readonly.lease)
-                    or (publication_only and main.v2_product_pr_for_issue
+                    or (publication_only and publications
                         and attachment_lease is next(iter(
-                            main.v2_product_pr_for_issue.values())).readonly.lease)))):
+                            publications.values())).readonly.lease)))):
             raise MainError("MAIN_ATTACHMENT_BINDING_INVALID")
         self._attachment_lease = attachment_lease
         self.main = main
@@ -620,6 +647,12 @@ class MainSupervisor:
         self._lock_path: Path | None = None
         self._owner_pid: int | None = None
         self._owner_repository: str | None = None
+        # Prevent same-thread callback reentry from unlocking the canonical
+        # repository flock during a #291 initial metadata/comment effect.
+        self._initial_publish_active = 0
+        self._initial_publish_issue: int | None = None
+        self._initial_publish_host: object | None = None
+        self._initial_publish_entered = False
 
     def _assert_owned(self, main: RepositoryMain) -> None:
         """Prove this exact Main still holds the canonical host flock.
@@ -756,6 +789,27 @@ class MainSupervisor:
                     self._file = None
         if type(self.main) is RepositoryMain:
             with self.main._main_owner_guard:
+                if self._initial_publish_active:
+                    # The field may survive an asynchronous interrupt in the
+                    # publishing frame's *own finally*. Reject a callback's
+                    # reentrant exit while that frame is truly still on this
+                    # thread's stack, but recover a stale flag after unwind.
+                    frame = sys._getframe()
+                    try:
+                        while frame is not None:
+                            if (frame.f_code is
+                                    RepositoryMain.publish_v2_initial_checkpoint.__code__
+                                    and frame.f_locals.get("self") is self.main):
+                                raise MainError("R5C1B1_PUBLICATION_ACTIVE")
+                            frame = frame.f_back
+                    finally:
+                        del frame
+                    # No live publication frame remains on the releasing
+                    # thread, and the RLock excludes any other effect here.
+                    self._initial_publish_active = 0
+                    self._initial_publish_entered = False
+                    self._initial_publish_issue = None
+                    self._initial_publish_host = None
                 release()
         else:
             release()
@@ -775,6 +829,14 @@ class MainSupervisor:
         with self.main._main_owner_guard:
             self._assert_owned(self.main)
             return self.main.publish_v2_product_pr_first(issue)
+
+    def publish_initial_checkpoint(self, issue: int) -> dict[str, Any]:
+        """Publication-only Python lane; no cycle, Task, Session or Ask effects."""
+        if not self.publication_only or not self._entered:
+            raise MainError("R5C1B1_OWNER_REQUIRED")
+        with self.main._main_owner_guard:
+            self._assert_owned(self.main)
+            return self.main.publish_v2_initial_checkpoint(issue)
 
     def cycle(self, *, dispatch: bool = True) -> dict[str, Any]:
         if not self._entered:
@@ -904,7 +966,7 @@ def main(
     host: MainHostCapabilities | MainV2ReadOnlyCapabilities
           | MainV2WorktreeCapabilities | MainV2SessionReadOnlyCapabilities
           | MainV2PrFirstReadOnlyCapabilities
-          | MainV2ProductPrCapabilities | None = None,
+          | MainV2ProductPrCapabilities | MainV2InitialCheckpointCapabilities | None = None,
     attachment: MainAttachmentConfig | None = None,
 ) -> int:
     """Ordinary one-cycle/observe/follow runner, optionally called by a host.
@@ -912,6 +974,11 @@ def main(
     ``host`` is Python-only dependency injection; CLI/config inputs cannot
     select a provider or turn observed Issue/PR facts into authorization.
     """
+    # Refuse even an injected R5C1B1 Host before loading a CLI plan or building
+    # transports. Only build_main + MainSupervisor's Python lane can use it.
+    if type(host) is MainV2InitialCheckpointCapabilities:
+        print(json.dumps({"status": "error", "error_code": "R5C1B1_HOST_ONLY"}))
+        return 2
     parser = argparse.ArgumentParser(description="KAGARI local repository Main runner")
     parser.add_argument("--config", type=Path, required=True,
                         help="Trusted, explicitly approved Issue list; not Task authority")
