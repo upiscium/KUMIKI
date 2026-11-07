@@ -254,6 +254,19 @@ class OrdinaryGitTransportTest(unittest.TestCase):
         )
         self.assertEqual(obj1["payload"]["branch_ref"], "refs/heads/product-101")
         self.assertEqual(obj2["payload"]["branch_ref"], "refs/heads/product-202")
+        # The locator must also recover exact immutable Contracts through
+        # each original historical Issue commit, not merely validate them
+        # indirectly while traversing the Archive DAG.
+        for commit, record, task in ((c1, obj1, "101"), (c2, obj2, "202")):
+            contract_id = record["payload"]["contract_id"]
+            contract = reader.read_object(
+                commit, "contract", contract_id, task=task, subject=SUBJECT,
+            )
+            self.assertEqual(
+                contract["payload"],
+                {"schema_version": 1, "title": f"Synthetic {task}",
+                 "body": f"Independent fixture for {task}"},
+            )
         self.assertEqual(j2, fx.remote_oid(ARCHIVE_REF))
         self.assertEqual(fx.main_oid, fx.remote_oid("refs/heads/main"))
 
