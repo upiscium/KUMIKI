@@ -309,12 +309,15 @@ malicious in-process mutation are not guarantees of this MVI.
 
 `tests.test_kagari_vnext_main_v2_d1a_recovery` exercises the actual
 source-only coordinator against disposable #337 bare-Git/fake-GitHub
-fixtures. It tests **two separate self-SIGKILL process deaths**, one after
-the metadata commit effect and one after an original comment POST effect,
-followed by a **fresh interpreter** and the same original durable plan.
-It checks one metadata write, one comment post and one view capture across
-the full sequence. The fake remote comment is deliberately saved before
-SIGKILL to represent a durable external POST. The fixture alone uses
+fixtures. With D2-P0, it tests **three separate self-SIGKILL
+process deaths**: after metadata commit, after original comment POST
+**without a durable Host ACK**, and after a durable Host ACK but before
+the worker reports success. A **fresh interpreter** uses the same
+original durable plan. The no-ACK case must BLOCK even though the
+comment is visible; the other two cases recover their qualified
+original claim/ACK without duplicate metadata writes or comments.
+The fake remote comment is deliberately saved before SIGKILL to model
+remote durability, not to certify real GitHub causality. The fixture alone uses
 `Limits(seconds=60)` to bound slow synthetic Git traversal; this does not
 change any production limit or 90-second coordinator deadline.
 
@@ -338,3 +341,77 @@ and publication regressions. An inert source Merge, if separately approved,
 does not authorize workers, Metadata refs, Task launch, deployment or
 Release. Keep Issue #291 and #337 Open; PR Ready/Merge is a different
 Human gate.
+
+
+## R4A — D2-P0 ACK-only Host provenance validator (source-only)
+
+R4A implements the Human-approved **D2-P0 strict ACK-only contract** for
+the opt-in Initial Checkpoint Coordinator. Its default is **fail-closed**:
+an unconfigured Host provenance gateway raises
+`R5C1B1_D2_PROVENANCE_HOST_REQUIRED` **before any new #140 plan,
+Metadata ref write, Host claim or GitHub comment POST**. This is still
+source-only: no production Host implementation, credential-bearing transport,
+stream-fence or provenance trust root is installed or activated.
+
+The narrow `kagari_vnext_main_v2_provenance.py` module holds a closed
+original-operation scope and validates Host-provided claim and POST ACK
+facts. It does **not** authenticate arbitrary Python objects itself.
+Only a separately qualified trusted Host may supply a gateway; an object,
+a callback or a Boolean labeled `exclusive_egress=True` is **not** an
+authenticated Host attestation outside that trust boundary. Source-only
+tests inject a clearly marked **disposable fake Host**, so their positive
+results are synthetic validation, not evidence of live GitHub provenance.
+
+The R4A opt-in flow is:
+
+1. Recheck the exact #140 operation, Issue/Contract/PR and original
+   immutable Snapshot. Construct an `OriginalOperation` with the
+   canonical original plan's SHA-256 and stable repository ID, Issue,
+   operation ID, PR and checkpoint-subject bindings.
+2. Before creating a new plan, ask the Host to check the stream and
+   Issue lifecycle eligibility **read-only**. After the original plan is
+   fsynced, require the Host to establish or verify the exact original
+   claim. A missing, wrong or unqualified claim stops **before any new
+   Metadata effect**; a replay must not invent a replacement claim.
+3. Continue using the canonical #337 Metadata writer, exact initial
+   PR checkpoint publisher and R5C1B0 reader without modifying their
+   generic codecs or idempotent adoption semantics. For this #291 lane,
+   the POST callback is specifically the Host gateway's credential-bearing
+   egress rather than the generic publisher callback.
+4. Even after #337 independently confirms the exact comment, require
+   the Host's **durable original-operation POST ACK**, with issuer,
+   epoch, attempt ID, request body digest, target PR and exact comment
+   ID. An ACK must come from the actual Host send path and match
+   independent authenticated comment/Metadata readback. The #337
+   `ConfirmedCheckpoint` is not itself a creator-bound POST ACK.
+5. If ACK is missing, mismatched, from an unexpected epoch/issuer,
+   or its source cannot be authenticated, return `UNCERTAIN`/BLOCKED,
+   never `CONFIRMED`, even when the comment text, actor and intent
+   are identical. Never automatically resend an ambiguous POST.
+
+D2-P0 deliberately tightens the earlier D1A disposable test: **SIGKILL
+after comment POST but before durable Host ACK must BLOCK**, whereas a
+valid ACK persisted before worker-result loss may be verified by a new
+worker without a second POST or Snapshot. Full sender exclusivity,
+legacy/edited/deleted comment completeness, credential custody, epoch
+lineage and old worker/fork/IO quiescence remain **separate live Host
+qualification gates**, not properties of source-only fake proof records.
+Do not activate this lane without them.
+
+`tests.kagari_d2_p0_fake_host` persists ephemeral fake claim/ACK facts
+in the disposable test root only. It is intentionally not a production
+store, credential provider, authenticated RPC transport or rollback-proof
+ledger. The published v1 runtime, generic #337 behavior, Task/Session/
+Ask launch and actual GitHub/Metadata effects remain unchanged by R4A.
+A separately authorized Host and release gate are required for any live
+use.
+
+
+R4A's Host-provenance witness includes an explicit **qualified ACK-issuance
+epoch lineage**: a successor at epoch 2 may check an original authentic
+ACK durably issued in then-valid epoch 1 only if the trusted Host positively
+attests that epoch-1 issuance and the old worker is quiescent. A new ACK
+issued after revocation or an unknown lineage is rejected. Type-sensitive
+canonical JSON comparisons distinguish an integer repository ID of `1`
+from the boolean `true`; Python dataclass equality alone is insufficient.
+The fake Host's lineage is not a real credential revocation mechanism.

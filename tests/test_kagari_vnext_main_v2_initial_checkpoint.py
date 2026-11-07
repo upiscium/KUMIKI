@@ -55,6 +55,9 @@ class _Harness:
         self.allow_metadata = self.allow_comment = True
         self.allow_read = self.legacy_clear = True
         self.metadata_mode = "ok"
+        self.provenance_mode = "ok"
+        self.provenance_ack_mutation = None
+        self.d2 = None
         self.view_change = None
         self.lock_home = src.root / "main-owner"
         self.jpath = src.root / "initial-plan"
@@ -207,9 +210,17 @@ class _Harness:
             journal=RecoveryJournal(src.jpath), authorize=self.metadata_grant,
             writer=self.write_metadata)
         checkpoint = self.api.publisher_for(grant=self.comment_grant, post=self.post)
+        # This is a SYNTHETIC fake egress/claim, never a live Host. R4A's
+        # production default is no provenance -> block before any effect.
+        from tests.kagari_d2_p0_fake_host import DisposableD2Host
+        self.d2 = DisposableD2Host(self)
+        self.d2.mode = self.provenance_mode
+        self.d2.ack_mutation = self.provenance_ack_mutation
+        gateway = (None if self.provenance_mode == "disabled"
+                   else self.d2.gateway())
         return coordinator.V2InitialCheckpointHost(
             proof, metadata, checkpoint, self.read_product, self.read_view,
-            RecoveryJournal(self.jpath), self.operation_id, self.report)
+            RecoveryJournal(self.jpath), self.operation_id, self.report, gateway)
 
     def main(self, lease, host=None):
         return service.build_main(copy.deepcopy(self.plan), host=service.MainV2InitialCheckpointCapabilities(
@@ -561,11 +572,18 @@ class InitialCheckpointTest(unittest.TestCase):
         self.assertEqual(journals, self.h.journal_bytes())
         self.assertEqual({"writes": 1, "posts": 0, "views": 1}, self.h.stats)
 
-    def test_comment_lost_ack_after_effect_reconciles_same_comment(self):
+    def test_comment_lost_ack_after_effect_blocks_without_d2_host_ack(self):
+        # D2-P0 is stricter than generic #337: an observed matching
+        # comment is not creator-bound ACK evidence, even after restart.
         self.h.api.writer_error = "after"
-        result = self.h.run()
+        with self.assertRaises(coordinator.InitialCheckpointUncertain) as caught:
+            self.h.run()
+        self.assertEqual("D2P0_DURABLE_ACK_REQUIRED", caught.exception.code)
         journals = self.h.journal_bytes()
-        self.assertEqual(result, self.h.run())
+        self.h.api.writer_error = False
+        with self.assertRaises(coordinator.InitialCheckpointUncertain) as caught:
+            self.h.run()
+        self.assertEqual("D2P0_DURABLE_ACK_REQUIRED", caught.exception.code)
         self.assertEqual(journals, self.h.journal_bytes())
         self.assertEqual({"writes": 1, "posts": 1, "views": 1}, self.h.stats)
 

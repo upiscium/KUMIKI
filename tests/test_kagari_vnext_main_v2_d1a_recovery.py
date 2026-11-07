@@ -65,11 +65,13 @@ else:
                               initialize=False)
     def stop():
         if mode == "after_comment":
-            # Emulate a committed remote GitHub POST before ACK loss.
+            # Fake GitHub effect is durable, but the Host did not receive or
+            # persist the credential-bearing transport ACK.
             h.save_remote()
         os.kill(os.getpid(), signal.SIGKILL)
     h.hooks[{"after_metadata": "metadata_effect",
-             "after_comment": "comment_effect"}[mode]] = stop
+             "after_comment": "comment_effect",
+             "after_ack": "provenance_ack"}[mode]] = stop
     h.run()
     raise AssertionError("expected self SIGKILL at original effect")
 """
@@ -105,7 +107,7 @@ class D1AOriginalIntentRecoveryTest(unittest.TestCase):
         original_b64 = plan["snapshot_b64"]
         self.assertNotEqual(self.src.first, self.src.observe(issue_ref("101")))
         remote = json.loads((self.src.root / "fake-remote.json").read_text())
-        expected_posts = 1 if mode == "after_comment" else 0
+        expected_posts = 1 if mode in {"after_comment", "after_ack"} else 0
         self.assertEqual({"writes": 1, "posts": expected_posts, "views": 1},
                          remote["stats"])
         if mode == "after_comment":
@@ -113,6 +115,17 @@ class D1AOriginalIntentRecoveryTest(unittest.TestCase):
         # The next process obtains a fresh Main owner. It must read only the
         # saved plan, not capture another view or allocate a second candidate.
         resumed = self._child("recover", context)
+        if mode == "after_comment":
+            # D2-P0 deliberately changes the old D1A expectation:
+            # exact matching comment is NOT original-operation provenance.
+            self.assertNotEqual(0, resumed.returncode)
+            self.assertIn("D2P0_DURABLE_ACK_REQUIRED", resumed.stderr)
+            final = json.loads((self.src.root / "fake-remote.json").read_text())
+            self.assertEqual({"writes": 1, "posts": 1, "views": 1},
+                             final["stats"])
+            self.assertEqual(original_id, self.h.saved_plan()["snapshot_id"])
+            self.assertEqual(original_b64, self.h.saved_plan()["snapshot_b64"])
+            return
         self.assertEqual(0, resumed.returncode, resumed.stderr[-2400:])
         receipt = json.loads(resumed.stdout)
         self.assertEqual("CONFIRMED", receipt["initial_checkpoint"])
@@ -133,8 +146,11 @@ class D1AOriginalIntentRecoveryTest(unittest.TestCase):
     def test_sigkill_after_metadata_effect_recovers_original_only(self):
         self._prove_original_recovery("after_metadata")
 
-    def test_sigkill_after_comment_effect_confirms_without_repost(self):
+    def test_sigkill_after_comment_post_without_host_ack_blocks(self):
         self._prove_original_recovery("after_comment")
+
+    def test_sigkill_after_durable_host_ack_confirms_original_without_repost(self):
+        self._prove_original_recovery("after_ack")
 
     def test_durable_plan_without_candidate_receipt_blocks_fresh_worker(self):
         # A completed original plan is not enough to authorize allocating

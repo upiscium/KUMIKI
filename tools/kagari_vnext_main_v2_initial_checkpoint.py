@@ -40,6 +40,9 @@ from kagari_metadata_v2_pr_checkpoint import (
     render_checkpoint, positive)
 from kagari_metadata_v2_task_admission import CurrentTask
 from kagari_vnext_trusted_host import RecoveryJournal
+from kagari_vnext_main_v2_provenance import (
+    D2P0HostGateway, D2P0Rejected, OriginalOperation,
+    check_claim, check_ack)
 from task_collaboration import RepositoryFacts, PullFacts
 from task_view import encode_snapshot, decode_snapshot
 
@@ -125,6 +128,7 @@ class V2InitialCheckpointHost:
     journal: RecoveryJournal
     operation_id: str
     report: str
+    provenance: D2P0HostGateway | None = None
 
     @property
     def readonly(self):
@@ -228,8 +232,15 @@ class V2InitialCheckpointHost:
             # The outer Main route owns cleanup in its finally. Keeping this
             # flag until outer exit blocks nested same-Issue helper calls.
             main_owner._initial_publish_entered = True
-        pending = False
+        # D2-P0 default is deliberately non-effectful: the source-only
+        # caller cannot manufacture a credential-bearing Host trust root.
+        # This opt-in gateway must be separately qualified before activation.
+        pending = True  # journal not yet read: no claim of UNCHANGED
         try:
+            if type(self.provenance) is not D2P0HostGateway:
+                raise InitialCheckpointUncertain(
+                    "R5C1B1_D2_PROVENANCE_HOST_REQUIRED")
+            gateway = self.provenance
             self.__post_init__()
             rd = self.readonly
             cur = rd.current_reader
@@ -479,10 +490,33 @@ class V2InitialCheckpointHost:
                 need(len(_json(proposal)) <= 16384, "R5C1B1_PLAN_SIZE_DEFERRED")
                 proposal = json.loads(_json(proposal))  # detach/normalize journal JSON arrays
                 need(facts(absent=True) == (product, observed), "R5C1B1_PREFLIGHT_CHANGED")
+            # All Host verification below is source-only contract checking:
+            # only a real credential-bearing Host may assert these witnesses.
+            # Do not issue any new Metadata write, Host claim or checkpoint
+            # POST if its authorization/stream ownership is not positive.
+            scope = OriginalOperation.from_plan(
+                repository_id=reg.repository_id, repository=repository,
+                issue=issue, operation_id=self.operation_id,
+                contract_id=contract_id, pr_number=pr.number,
+                principal=exact.principal, subject=subject,
+                snapshot_id=snapshot_id,
+                plan=saved if recovering else proposal)
+            try:
+                entry_claim = check_claim(scope, gateway.assert_entry(scope))
+            except D2P0Rejected as error:
+                raise InitialCheckpointUncertain(error.code) from error
+            if saved is None:
                 pending = True  # create may fail AFTER fsync
                 self.journal.create(key, proposal)
                 saved = proposal
                 need(self.journal.read(key) == proposal, "R5C1B1_PLAN_READBACK_FAILED")
+            try:
+                held_claim = check_claim(
+                    scope, gateway.establish_claim(scope, recovering))
+                if held_claim != entry_claim:
+                    raise D2P0Rejected("D2P0_HOST_EPOCH_CHANGED")
+            except D2P0Rejected as error:
+                raise InitialCheckpointUncertain(error.code) from error
             facts()
             op = IssueWrite(self.operation_id, original.archive_tip, original.metadata_tip, (raw,))
 
@@ -567,16 +601,32 @@ class V2InitialCheckpointHost:
                 comment_reader=budget(checked_read(exact._comment_reader)), limits=exact._limits)
             # Canonical #337 alone owns stream intent, body rendering, exact
             # readback and lost-ACK handling. No custom comment retry loop.
+            def d2_host_post(number, body, cutoff):
+                need(number == desired.pr_number and
+                     body == render_checkpoint(desired),
+                     "R5C1B1_D2_POST_BODY_MISMATCH")
+                # Only the Host-controlled credential-bearing egress may
+                # perform this effect; never directly expose cp._post here.
+                return gateway.post(scope, desired, number, body, cutoff)
+
             bounded_checkpoint = SourceOnlyCheckpointPublisher(
                 bounded_exact, pull_reader=budget(checked_read(pull_read)),
                 inventory=budget(checked_read(inventory)),
                 authorize=budget(guarded(cp._authorize, absent=True)),
-                post_comment=budget(guarded(cp._post, absent=True)),
+                post_comment=budget(guarded(d2_host_post, absent=True)),
                 journal=cp._journal,
                 stream_lease=lambda value, cutoff: cp._stream_lease(value, min(cutoff, deadline)))
             confirmed = bounded_checkpoint.publish(desired, previous_comment_id=None)
             need(type(confirmed) is ConfirmedCheckpoint and confirmed.checkpoint == desired
                  and confirmed.snapshot == snapshot, "R5C1B1_CHECKPOINT_UNCONFIRMED")
+            # Generic #337 can adopt an identical comment without ever
+            # issuing POST. It also discards POST's return value. Therefore
+            # read exact durable Host ACK independently for BOTH branches.
+            try:
+                check_ack(scope, held_claim, desired, confirmed.comment_id,
+                          gateway.read_ack(scope, desired, confirmed.comment_id))
+            except D2P0Rejected as error:
+                raise InitialCheckpointUncertain(error.code) from error
             facts()
             final = self.proof.observe(**args)
             facts()
