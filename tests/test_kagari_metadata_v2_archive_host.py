@@ -412,6 +412,62 @@ class ArchiveHostTest(unittest.TestCase):
         self.assertEqual(original, recovered.archive_commit)
         self.assertEqual(1, len(self.writes))
 
+    def test_ordinary_keyboard_interrupt_on_release_after_write_is_uncertain(self):
+        op = self.op(policy=None)
+        @contextmanager
+        def release_interrupts(operation):
+            with self.hold(operation) as lock:
+                yield lock
+            raise KeyboardInterrupt("synthetic release interrupted after write")
+
+        with self.assertRaisesRegex(ArchiveUncertain,
+                                    "archive_context_interrupted_after_intent"):
+            self.archive(op, hold=release_interrupts)
+        published = self.observation(ARCHIVE_REF)
+        self.assertNotEqual(self.fixture.genesis, published)
+        self.assertEqual(1, len(self.writes))
+        saved = self.journal().read(_key(RID, self.approved.issue,
+                                         op.expected_archive, op.expected_issue))
+        self.assertEqual((3, "ordinary-git-branch"),
+                         (saved["version"], saved["branch_mode"]))
+        recovered = self.archive(op)
+        self.assertEqual("RECOVERED", recovered.state)
+        self.assertEqual(published, recovered.archive_commit)
+        self.assertEqual(1, len(self.writes))
+
+    def test_ordinary_system_exit_on_release_after_write_is_uncertain(self):
+        op = self.op(policy=None)
+        @contextmanager
+        def release_exits(operation):
+            with self.hold(operation) as lock:
+                yield lock
+            raise SystemExit("synthetic release requested process exit")
+
+        with self.assertRaisesRegex(ArchiveUncertain,
+                                    "archive_context_interrupted_after_intent"):
+            self.archive(op, hold=release_exits)
+        self.assertEqual(1, len(self.writes))
+        self.assertNotEqual(self.fixture.genesis, self.observation(ARCHIVE_REF))
+        recovered = self.archive(op)
+        self.assertEqual("RECOVERED", recovered.state)
+        self.assertEqual(1, len(self.writes))
+
+    def test_interrupt_before_intent_propagates_without_journal_or_write(self):
+        op = self.op(policy=None)
+        self.prior_clear = False
+        class InterruptedExit:
+            def __enter__(self):
+                return ArchiveQuiescenceLease(lambda attempt: attempt == op)
+            def __exit__(self, exc_type, exc, tb):
+                # This must run even if the body already raised ArchiveRefused.
+                raise KeyboardInterrupt("synthetic preintent interruption")
+
+        with self.assertRaisesRegex(KeyboardInterrupt, "preintent interruption"):
+            self.archive(op, hold=lambda _: InterruptedExit())
+        self.assertEqual([], self.writes)
+        self.assertEqual([], list(self.jpath.iterdir()))
+        self.assertEqual(self.fixture.genesis, self.observation(ARCHIVE_REF))
+
     def test_ordinary_context_suppression_after_intent_is_uncertain(self):
         op = self.op(policy=None)
         class SuppressingExit:

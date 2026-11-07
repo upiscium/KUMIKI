@@ -708,3 +708,11 @@ class ArchiveHost:
                 raise ArchiveUncertain("archive_context_exit_unknown_after_intent") from error
             # Missing/unavailable Host context/lock is never a permit.
             raise ArchiveRefused("archive_host_quiescence_unavailable") from error
+        except BaseException as error:
+            # KeyboardInterrupt/SystemExit raised by a Host context __exit__
+            # after the original intent can mask an already applied Git
+            # effect. Keep the journal-owned UNKNOWN outcome explicit.
+            # Before an intent may exist, preserve normal interrupt semantics.
+            if effect_phase_entered:
+                raise ArchiveUncertain("archive_context_interrupted_after_intent") from error
+            raise
