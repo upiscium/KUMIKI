@@ -7,9 +7,10 @@ from metadata_v2 import (
 )
 
 
-# Host authorization is separately verified live Task terminality + no writers,
-# bound to this exact Update and a server retention policy identifier. A Record
-# disposition or JSON assertion is deliberately NOT accepted as proof.
+# Host authorization is separately verified live Task terminality + no
+# KUMIKI-controlled writers, bound to this exact Update. A Record disposition
+# or JSON assertion is deliberately NOT accepted as proof. Legacy policy
+# labels are accepted for old journals; no GitHub Ruleset is required.
 TerminalVerifier = Callable[[Update, float], bool]
 
 
@@ -20,14 +21,17 @@ def archive_issue(store: MetadataV2, task: str, *, retention_policy: str | None 
 
     Trusted writer rechecks verifier provenance and all Update preconditions
     atomically with its mutation; callback execution here is not a lock.
-    Missing capability/policy refuses before any construction or Host effects.
-    Even confirmed archive publication NEVER authorizes production deletion.
+    Missing trusted terminal verifier/writer refuses before any Host effect.
+    The optional legacy retention-policy label is not external protection.
+    Confirmed archive publication alone NEVER authorizes Issue deletion.
     """
     ref = issue_ref(task)
-    if (type(retention_policy) is not str or not retention_policy.strip()
-            or len(retention_policy) > 512 or not callable(verify_terminal)
-            or not callable(archive_writer)):
-        raise InvalidMetadata("archive requires retention policy, terminal verifier and trusted writer")
+    if (retention_policy is not None
+            and (type(retention_policy) is not str or not retention_policy.strip()
+                 or len(retention_policy) > 512)):
+        raise InvalidMetadata("archive legacy policy identifier invalid")
+    if not callable(verify_terminal) or not callable(archive_writer):
+        raise InvalidMetadata("archive requires terminal verifier and trusted writer")
     v = store.validation()
     archive_oid = v.observe(store.observer, ARCHIVE_REF)
     issue_oid = v.observe(store.observer, ref)

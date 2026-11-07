@@ -202,6 +202,73 @@ class ArchiveHostTest(unittest.TestCase):
         self.assertEqual(1, len(list(self.jpath.iterdir())))
         self.assertEqual(0, self.holds)
 
+    def test_ordinary_archive_v3_receipt_with_no_ruleset(self):
+        # The field defaults to None for the normal-branch contract; do
+        # not invent a placeholder Ruleset ID to pass an admission check.
+        op = self.op(policy=None)
+        outcome = self.archive(op)
+        self.assertEqual("PUBLISHED", outcome.state)
+        self.assertIsNone(self.writes[0].retention_policy)
+        saved = self.journal().read(_key(RID, self.approved.issue,
+                                         op.expected_archive, op.expected_issue))
+        self.assertEqual((3, "ordinary-git-branch"),
+                         (saved["version"], saved["branch_mode"]))
+        self.assertNotIn("policy", saved)
+        self.assertEqual((op.expected_archive, op.expected_issue),
+                         self.fixture.store().validation().archive(
+                             outcome.archive_commit).parents)
+        self.assertEqual(op.expected_issue, self.observation(issue_ref("101")))
+
+    def test_ordinary_archive_unknown_ack_recovers_original_candidate(self):
+        op = self.op(policy=None)
+        def applied_and_ack_lost(update, bundle, deadline):
+            self.write(update, bundle, deadline)
+            raise TimeoutError("lost ack")
+        with self.assertRaises(ArchiveUncertain):
+            self.archive(op, writer=applied_and_ack_lost)
+        original = self.observation(ARCHIVE_REF)
+        saved = self.journal().read(_key(RID, self.approved.issue,
+                                         op.expected_archive, op.expected_issue))
+        self.assertEqual(3, saved["version"])
+        self.assertEqual("ordinary-git-branch", saved["branch_mode"])
+        recovered = self.archive(op)
+        self.assertEqual("RECOVERED", recovered.state)
+        self.assertEqual(original, recovered.archive_commit)
+        self.assertEqual(1, len(self.writes))
+
+    def test_unresolved_legacy_attempt_cannot_be_reclassified_as_ordinary(self):
+        legacy_op = self.op()
+        def no_ack(update, bundle, deadline):
+            raise TimeoutError("lost before effect")
+        with self.assertRaises(ArchiveUncertain):
+            self.archive(legacy_op, writer=no_ack)
+        saved = self.journal().read(_key(RID, self.approved.issue,
+                                         legacy_op.expected_archive,
+                                         legacy_op.expected_issue))
+        self.assertEqual((2, "fixture-retention-only"),
+                         (saved["version"], saved["policy"]))
+        with self.assertRaisesRegex(ArchiveRefused, "schema_or_mode_mismatch"):
+            self.archive(self.op(policy=None))
+        self.assertEqual([], self.writes)
+        self.assertEqual(self.fixture.genesis, self.observation(ARCHIVE_REF))
+
+    def test_unresolved_ordinary_attempt_cannot_be_reclassified_as_legacy(self):
+        ordinary_op = self.op(policy=None)
+        def no_ack(update, bundle, deadline):
+            raise TimeoutError("lost before effect")
+        with self.assertRaises(ArchiveUncertain):
+            self.archive(ordinary_op, writer=no_ack)
+        with self.assertRaisesRegex(ArchiveRefused, "schema_or_mode_mismatch"):
+            self.archive(self.op(policy="fixture-retention-only"))
+        self.assertEqual([], self.writes)
+        self.assertEqual(self.fixture.genesis, self.observation(ARCHIVE_REF))
+
+    def test_invalid_legacy_operation_policy_still_rejected(self):
+        for invalid in ("", "  ", False, 0, [], "x" * 513):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ArchiveRefused, "legacy_policy"):
+                    self.op(policy=invalid)
+
     def test_two_separate_issues_archive_and_exact_old_oid_fresh_clone(self):
         first_request = self.op()
         first = self.archive(first_request)
@@ -325,6 +392,84 @@ class ArchiveHostTest(unittest.TestCase):
                     setattr(self, field, old)
                 self.assertEqual([], self.writes)
                 self.assertFalse(list(self.jpath.iterdir()))
+
+    def test_ordinary_context_release_failure_after_write_is_uncertain(self):
+        op = self.op(policy=None)
+        @contextmanager
+        def release_fails(operation):
+            with self.hold(operation) as lock:
+                yield lock
+            raise RuntimeError("quiescence release failed after effect")
+
+        with self.assertRaisesRegex(ArchiveUncertain,
+                                    "archive_context_exit_unknown_after_intent"):
+            self.archive(op, hold=release_fails)
+        original = self.observation(ARCHIVE_REF)
+        self.assertNotEqual(self.fixture.genesis, original)
+        self.assertEqual(1, len(self.writes))
+        recovered = self.archive(op)
+        self.assertEqual("RECOVERED", recovered.state)
+        self.assertEqual(original, recovered.archive_commit)
+        self.assertEqual(1, len(self.writes))
+
+    def test_ordinary_context_suppression_after_intent_is_uncertain(self):
+        op = self.op(policy=None)
+        class SuppressingExit:
+            def __enter__(self):
+                return ArchiveQuiescenceLease(lambda attempt: attempt == op)
+            def __exit__(self, exc_type, exc, tb):
+                return True
+
+        calls = []
+        def unknown_writer(update, bundle, deadline):
+            calls.append(bundle.commit)
+            raise TimeoutError("ACK was lost before any ref effect")
+
+        with self.assertRaisesRegex(ArchiveUncertain,
+                                    "archive_context_suppressed_after_intent"):
+            self.archive(op, hold=lambda _: SuppressingExit(),
+                         writer=unknown_writer)
+        self.assertEqual(1, len(calls))
+        self.assertEqual([], self.writes)
+        saved = self.journal().read(_key(RID, self.approved.issue,
+                                         op.expected_archive, op.expected_issue))
+        self.assertEqual(3, saved["version"])
+        # The exact saved candidate does not exist remotely, so recovery
+        # remains UNKNOWN. No new attempt is issued.
+        with self.assertRaises(ArchiveUncertain):
+            self.archive(op)
+        self.assertEqual(1, len(calls))
+
+    def test_context_suppression_before_intent_refuses_without_journal(self):
+        op = self.op(policy=None)
+        self.prior_clear = False
+        class SuppressingExit:
+            def __enter__(self):
+                return ArchiveQuiescenceLease(lambda attempt: attempt == op)
+            def __exit__(self, exc_type, exc, tb):
+                return True
+        with self.assertRaisesRegex(ArchiveRefused,
+                                    "archive_context_suppressed_before_intent"):
+            self.archive(op, hold=lambda _: SuppressingExit())
+        self.assertEqual([], self.writes)
+        self.assertEqual([], list(self.jpath.iterdir()))
+
+    def test_journal_numeric_fields_must_have_exact_types(self):
+        op = self.op(policy=None)
+        self.archive(op)
+        key = _key(RID, self.approved.issue, op.expected_archive, op.expected_issue)
+        saved = self.journal().read(key)
+        before = len(self.writes)
+        for name, wrong in (("schema", True), ("version", 3.0),
+                            ("repository_id", float(RID)),
+                            ("issue", float(self.approved.issue))):
+            with self.subTest(name=name):
+                tampered = {**saved, name: wrong}
+                with patch.object(RecoveryJournal, "read", return_value=tampered):
+                    with self.assertRaisesRegex(ArchiveRefused,
+                                                "archive_journal_scalar_types_invalid"):
+                        self.archive(op)
+        self.assertEqual(before, len(self.writes))
 
     def test_lost_ack_after_archive_effect_recovers_original_j(self):
         op = self.op()

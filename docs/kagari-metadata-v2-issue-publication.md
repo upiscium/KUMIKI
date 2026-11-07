@@ -1,5 +1,7 @@
 # KAGARI Metadata v2 — Phase 2C1 Host Issue Writer (source-only)
 
+> **2026-11-07 #337 compatibility notice:** Archive and Issue Metadata branches are ordinary Git branches. Older Ruleset, dedicated App, protected-Archive and server-side-retention requirements below are historical, not active prerequisites for KUMIKI operation or acceptance. See [the ordinary-branch contract](kagari-metadata-v2-ordinary-branch.md). Keep internal KUMIKI permission, terminality and readback controls.
+
 Status: additive, explicit Host-only API; **not packaged, installed, activated,
 deployed, attached to Main, or backed by real GitHub CAS**. Existing v1
 `MetadataStore`, `kagari-control`, GA v0.1.0, Tasks, Product Git and

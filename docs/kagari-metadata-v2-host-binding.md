@@ -1,5 +1,7 @@
 # KUMIKI #337 Phase 2A — versioned read-only Metadata v2 Host binding
 
+> **2026-11-07 #337 compatibility notice:** Archive and Issue Metadata branches are ordinary Git branches. Older Ruleset, dedicated App, protected-Archive and server-side-retention requirements below are historical, not active prerequisites for KUMIKI operation or acceptance. See [the ordinary-branch contract](kagari-metadata-v2-ordinary-branch.md). Keep internal KUMIKI permission, terminality and readback controls.
+
 **Status:** source-only candidate; not installed, activated, published, or
 configured as a production adapter. Phase 2B/2C/2D and real GitHub Phase 3
 remain separate Human gates. Phase 1 source landed through PR #341.
