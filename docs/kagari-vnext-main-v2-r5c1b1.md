@@ -224,3 +224,117 @@ semantics. The original plan and #337 journals remain unchanged, and the
 MainSupervisor stale-flag recovery may release the flock after the
 publishing method frame has unwound. This is an in-process source contract,
 not a claim of perfect arbitrary asynchronous-signal atomicity.
+
+
+## D1A approved contract — bounded process-boundary recovery (R3 source-only)
+
+D1A Option A is the Human-approved **contract** for the initial Metadata v2
+Checkpoint publication lane of #291. It does not install or qualify a
+production publication worker and does not authorize live effects. The
+in-process guards above remain useful for the specific tested callback and
+finalization boundaries, but **do not** establish atomic teardown or typed
+`UNCERTAIN` at every asynchronous Python signal instruction.
+
+### Results and authority
+
+| Observation | Required handling |
+| --- | --- |
+| Exact metadata candidate, original Snapshot and canonical PR comment all independently confirmed | `initial_checkpoint=CONFIRMED`; still `V2_MAIN_BLOCKED_LIVE`; Task/model/Session/Ask flags remain false |
+| Proven pre-effect in-band refusal | `UNCHANGED` only with positive proof that no durable boundary was entered |
+| In-band failure after possibly persisted #140/#337 intent | Preserve original plan and receipts; typed `UNCERTAIN` where implemented; no automatic new candidate or repost |
+| Publication worker died, outer shutdown interrupted, its **worker-result ACK** was lost, or raw `KeyboardInterrupt`/`BaseException` escaped | **Operator-level `UNKNOWN_ABORTED`**, not a new persisted enum or transferable permission; stop all writes on that owner |
+| Individual #337 Metadata write or GitHub comment **effect-API ACK** is unknown while the worker remains alive | Preserve the original candidate/comment receipt and report in-band `UNCERTAIN` when supported; exact remote readback is required before any new effect |
+| Missing/partial/unreadable original journal, missing required candidate receipt, unverifiable ref/comment, owner/lease/PR drift or old worker not proven stopped | **BLOCKED**, not inferred `UNCHANGED`; never blind retry |
+
+The publication worker's result ACK is distinct from the Metadata/PR effect
+API ACK. Either can be unknown independently; neither permits interpreting
+absence of a response as `UNCHANGED`. Operator-level `UNKNOWN_ABORTED`
+applies when the outer worker result or its lifetime is uncertain, including
+after an effect-API failure that prevents a reliable worker result.
+
+A caller who cannot see an ACK cannot infer that a write did not happen. A
+crash after `RecoveryJournal.create` starts may leave an incomplete file:
+`O_EXCL` and fsync do not mean a partially written record is safe to
+overwrite. The #140 journal refuses malformed/partial records. A persisted
+original plan with **no canonical #337 candidate receipt** is also BLOCKED;
+the coordinator must not manufacture a second candidate to continue. A
+valid candidate receipt alone does not prove that the corresponding ref
+was updated: require the exact original commit and object/tree readback.
+
+A confirmed metadata candidate but no prior comment intent is a different
+stage from an unknown POST ACK. The exact initial comment may be posted
+only under an original-operation grant, authenticated complete inventory,
+and a valid exclusive stream lease. When the original comment intent
+exists and the POST acknowledgement is unknown, reconcile its exact
+comment ID or block; **do not submit a new comment**.
+
+### Host-only lifecycle gate — NYI for live use
+
+The source-only coordinator and its existing `MainSupervisor` do **not**
+implement a process supervisor, a signal router, a child/FD tracker, an
+automatic teardown service, or a global transaction engine. A separately
+qualified trusted Host must:
+
+1. Launch one exact Issue/Contract/AttachmentLease-bound publication worker
+   with bounded credentials, callbacks, operation identity and deadline.
+   Never pass the writer capability to a Task or arbitrary CLI caller.
+2. Quarantine the operation on interrupted shutdown, raw exception, timeout
+   or missing ACK. Do not reuse the partially unwound Python Supervisor,
+   dispatch another publication or auto-answer an Ask.
+3. Prove the old effect-capable worker, all descendants, inherited file
+   descriptions and pending I/O are quiescent before a new Host has effect
+   authority. If unproven, **BLOCKED**. No lock-file deletion, forced unlock,
+   stale-PID shortcut or unsupported lock takeover is allowed. This
+   requirement applies even if a new local flock can be acquired:
+   `flock` proves neither death of a fork descendant nor termination of a
+   remote GitHub mutation.
+4. In a fresh verified context, **read first**: bind repository ID, exact
+   Issue/Task/Record/Contract, Product head/Draft PR, AttachmentLease,
+   original plan, #337 metadata receipt and comment intent, and authenticated
+   complete remote PR/comment/ref evidence. Recover only the **original**
+   immutable candidate and comment; each permitted effect still requires
+   a fresh effect-time grant, direct-ref CAS and stream lease.
+5. Keep the v1/GA runtime, ongoing Task/Session and ChatGPT/RDC caller
+   independence intact. **Loss of the caller's observation connection
+   is not a crashed worker** and must not terminate admitted Task work.
+
+The Host must separately qualify authoritative server-side dual-ref CAS,
+archive Rulesets/retention, complete authenticated GitHub observations,
+cross-writer checkpoint stream exclusion, worker/descendant teardown and
+one-Issue live E2E before activation. This source-only PR does not prove
+those properties. Arbitrary repeated SIGINT, compromised same-UID code and
+malicious in-process mutation are not guarantees of this MVI.
+
+### Executable disposable evidence, not live Host qualification
+
+`tests.test_kagari_vnext_main_v2_d1a_recovery` exercises the actual
+source-only coordinator against disposable #337 bare-Git/fake-GitHub
+fixtures. It tests **two separate self-SIGKILL process deaths**, one after
+the metadata commit effect and one after an original comment POST effect,
+followed by a **fresh interpreter** and the same original durable plan.
+It checks one metadata write, one comment post and one view capture across
+the full sequence. The fake remote comment is deliberately saved before
+SIGKILL to represent a durable external POST. The fixture alone uses
+`Limits(seconds=60)` to bound slow synthetic Git traversal; this does not
+change any production limit or 90-second coordinator deadline.
+
+The same test module checks partial original journal fail-closed semantics
+and fork-inherited `flock` ownership. These only demonstrate local
+process/OS behavior; they do not create or certify the missing trusted
+Host supervisor. A fork survivor is an explicit **BLOCKED** situation
+until old descendants/FDs and remote effects are accounted for. Distinguish
+test-pass evidence from an activated Host policy.
+
+Run with an authorized disposable environment:
+
+```text
+python -m unittest -v tests.test_kagari_vnext_main_v2_d1a_recovery
+python -m unittest -q tests.test_kagari_vnext_main_v2_initial_checkpoint
+```
+
+After source-only qualification, independently review the exact source PR
+HEAD and run the #337 IssuePublisher, PR Checkpoint, PR-first observation
+and publication regressions. An inert source Merge, if separately approved,
+does not authorize workers, Metadata refs, Task launch, deployment or
+Release. Keep Issue #291 and #337 Open; PR Ready/Merge is a different
+Human gate.
