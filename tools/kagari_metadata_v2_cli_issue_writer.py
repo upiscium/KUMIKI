@@ -175,37 +175,61 @@ class GhIssueCASWriter:
     Contract/Task and installs three independent Host callbacks below.
     """
     def __init__(self,host:GhReadOnlyHost,objects:GhMetadataObjects,
-                 *,effect:Effect|None=None,authorize:Authorize|None=None,
+                 *,expected_actor_id:int, effect:Effect|None=None,
+                 authorize:Authorize|None=None,
                  original_intent:OriginalIntent|None=None)->None:
         require(type(host) is GhReadOnlyHost
                 and type(objects) is GhMetadataObjects
-                and objects.host is host,
+                and objects.host is host
+                and type(expected_actor_id) is int and expected_actor_id>0,
                 "cli_writer_host_invalid")
+        # The trusted Host supplies this immutable admitted principal,
+        # never a fresh ambient gh login or mutable host._identity cache.
         self.host,self.objects=host,objects
+        self._expected_actor_id=expected_actor_id
         self._effect_runner=effect
         self._authorize=authorize
         self._original_intent=original_intent
 
-    def _guard(self,update:Update,deadline:float,actor_id:int)->None:
+    def _guard(self,update:Update,deadline:float)->None:
         current=self.host.preflight(deadline)
-        require(current.actor_id==actor_id,"cli_writer_actor_changed")
-        require(self._authorize is not None and self._original_intent is not None
-                and self._authorize(update,deadline) is True
-                and self._original_intent(update,deadline) is True
-                and time.monotonic()<deadline,
+        require(current.actor_id==self._expected_actor_id,
+                "cli_writer_actor_changed")
+        require(self._authorize is not None and self._original_intent is not None,
                 "cli_writer_original_intent_or_grant_required")
+        try:
+            granted=self._authorize(update,deadline) is True
+            original=self._original_intent(update,deadline) is True
+        except Exception as error:
+            raise CliWriterRefused("cli_writer_host_authority_unavailable") from error
+        require(granted and original and time.monotonic()<deadline,
+                "cli_writer_original_intent_or_grant_required")
+        # A Host callback may yield to another local CLI actor. Re-read the
+        # admitted identity after callbacks as well as before them.
+        require(self.host.preflight(deadline).actor_id==self._expected_actor_id,
+                "cli_writer_actor_changed")
         require(self.host.observe(ARCHIVE_REF,deadline)==update.expected_archive
                 and self.host.observe(update.ref,deadline)==update.expected_issue,
                 "cli_writer_expected_refs_changed")
 
-    def _post(self,endpoint:str,payload:dict,deadline:float,*,graphql:bool=False)->dict:
-        require(time.monotonic()<deadline and callable(self._effect_runner),
-                "cli_writer_effect_capability_missing")
+    def _post(self,endpoint:str,payload:dict,deadline:float,
+              effects_started:list[bool],*,graphql:bool=False)->dict:
+        # A pre-call deadline refusal is certain only before the *first*
+        # effect. Once any object POST is attempted, preserve original
+        # durable intent and report UNKNOWN even if the next POST did not run.
+        if not (time.monotonic()<deadline and callable(self._effect_runner)):
+            if effects_started[0]:
+                raise CliWriterUncertain("cli_writer_staged_effect_uncertain")
+            raise CliWriterRefused("cli_writer_effect_capability_missing")
         data=json.dumps(payload,sort_keys=True,separators=(",",":")).encode("ascii")
-        require(len(data)<=_EFFECT_LIMIT,"cli_writer_effect_payload_limit")
+        if len(data)>_EFFECT_LIMIT:
+            if effects_started[0]:
+                raise CliWriterUncertain("cli_writer_staged_effect_uncertain")
+            raise CliWriterRefused("cli_writer_effect_payload_limit")
         argv=(["gh","api","graphql","--input","-"] if graphql
               else ["gh","api","-X","POST",endpoint,"--input","-"])
         try:
+            effects_started[0]=True
             rc,raw=self._effect_runner(argv,data,min(20.,deadline-time.monotonic()))
             response=_json(raw)
         except Exception as e:
@@ -237,17 +261,18 @@ class GhIssueCASWriter:
                 callable(self._original_intent),
                 "cli_writer_uninstalled")
         tree_oid,message,files=_parse_bundle(update,bundle)
-        need(self.host._identity is not None,"cli_preflight_required")
-        actor=self.host._identity.actor_id
-        self._guard(update,deadline,actor)
-        # All actions from here on can have a remote effect. A partial/unknown
-        # object POST must leave original #140 IssuePublisher intent in place.
+        # First effect guard uses the immutable Host-authorized actor, not
+        # an identity silently refreshed by gh auth in another operation.
+        self._guard(update,deadline)
+        # Invocation-local effect marker; never carry UNKNOWN into another
+        # authorized call. The #140 fsynced intent remains the recovery SoT.
+        effects_started=[False]
         uploaded=set()
         for path,(key,data) in sorted(files.items()):
             if key in uploaded:continue
             out=self._post("repos/"+self.host.repository+"/git/blobs",{
                 "content":base64.b64encode(data).decode("ascii"),"encoding":"base64"},
-                deadline)
+                deadline,effects_started)
             if out.get("sha")!=key:
                 raise CliWriterUncertain("cli_writer_blob_mismatch")
             try:
@@ -260,7 +285,7 @@ class GhIssueCASWriter:
         entries=[{"path":p,"mode":"100644","type":"blob","sha":oid}
                  for p,(oid,_) in sorted(files.items())]
         tree=self._post("repos/"+self.host.repository+"/git/trees",
-                        {"tree":entries},deadline)
+                        {"tree":entries},deadline,effects_started)
         if tree.get("sha")!=tree_oid:
             raise CliWriterUncertain("cli_writer_tree_mismatch")
         try:
@@ -274,7 +299,7 @@ class GhIssueCASWriter:
             "tree":tree_oid,
             "parents":[update.expected_issue or update.genesis],
             "message":message,
-            "author":_ACTOR,"committer":_ACTOR},deadline)
+            "author":_ACTOR,"committer":_ACTOR},deadline,effects_started)
         if commit.get("sha")!=update.candidate:
             raise CliWriterUncertain("cli_writer_commit_mismatch")
         try:
@@ -287,7 +312,7 @@ class GhIssueCASWriter:
         # Archive is an expected-old no-op guard; only this Issue ref moves.
         # This is a GitHub-specific transport, not a general Git guarantee.
         try:
-            self._guard(update,deadline,actor)
+            self._guard(update,deadline)
         except Exception as e:
             raise CliWriterUncertain("cli_writer_pre_cas_authority_changed") from e
         mutation={
@@ -307,7 +332,7 @@ class GhIssueCASWriter:
                 ],
             }},
         }
-        outcome=self._post("graphql",mutation,deadline,graphql=True)
+        outcome=self._post("graphql",mutation,deadline,effects_started,graphql=True)
         if (type(outcome.get("data")) is not dict or
                 type(outcome["data"].get("updateRefs")) is not dict or
                 outcome["data"]["updateRefs"].get("clientMutationId") !=
@@ -315,7 +340,7 @@ class GhIssueCASWriter:
             raise CliWriterUncertain("cli_writer_cas_ack_unknown")
         try:
             current=self.host.preflight(deadline)
-            need(current.actor_id==actor and
+            need(current.actor_id==self._expected_actor_id and
                  self.host.observe(ARCHIVE_REF,deadline)==update.expected_archive
                  and self.host.observe(update.ref,deadline)==update.candidate,
                  "cli_writer_post_cas_ref_mismatch")

@@ -12,6 +12,8 @@ import sys
 import time
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/"tools"),str(ROOT/"components/agent-core-v4")]
 from metadata_v2 import Update,ARCHIVE_REF,Bundle,construct
@@ -21,6 +23,7 @@ from kagari_metadata_v2_cli_objects import GhMetadataObjects
 from kagari_metadata_v2_cli_issue_writer import (
     GhIssueCASWriter,CliWriterRefused,CliWriterUncertain
 )
+import kagari_metadata_v2_cli_issue_writer as writer_module
 from tests.test_kagari_metadata_v2_cli_objects import FakeGit,REPO,G
 
 ISSUE="refs/heads/kagari-metadata/7"
@@ -112,7 +115,7 @@ class WriterTests(unittest.TestCase):
         self.fake=FakeEffect()
         self.host=GhReadOnlyHost(REPO,12,"R_node",runner=self.fake)
         self.deadline=time.monotonic()+15
-        self.host.preflight(self.deadline)
+        self.approved_actor_id=self.host.preflight(self.deadline).actor_id
         self.objects=GhMetadataObjects(self.host)
         self.update=Update(REPO,G,"7",ISSUE,G,None,self.fake.bundle.commit)
         self.grants=0
@@ -127,7 +130,7 @@ class WriterTests(unittest.TestCase):
         return self.orig
     def writer(self,effect=True):
         return GhIssueCASWriter(
-            self.host,self.objects,
+            self.host,self.objects,expected_actor_id=self.approved_actor_id,
             effect=self.fake.run_effect if effect else None,
             authorize=self.authorize,original_intent=self.intent)
     def test_positive_exact_two_ref_cas_expected_old(self):
@@ -164,6 +167,132 @@ class WriterTests(unittest.TestCase):
                 with self.assertRaises(CliWriterRefused):
                     self.writer()(self.update,bundle,self.deadline)
         self.assertEqual(self.fake.calls_post,[])
+
+    def test_writer_actor_must_be_explicit_host_bound_positive_integer(self):
+        for bad in (None,True,0,-1,"1",1.0):
+            with self.subTest(bad=bad):
+                with self.assertRaises(CliWriterRefused):
+                    GhIssueCASWriter(
+                        self.host,self.objects,expected_actor_id=bad,
+                        effect=self.fake.run_effect,
+                        authorize=self.authorize,original_intent=self.intent)
+        self.assertEqual(self.fake.calls_post,[])
+
+    def test_actor_switch_between_admission_and_first_effect_refuses_without_post(self):
+        self.fake.by_endpoint["user"]["id"]=self.approved_actor_id+1
+        # An intervening gh preflight must NOT silently repin the writer.
+        self.host.preflight(self.deadline)
+        with self.assertRaisesRegex(CliWriterRefused,"cli_writer_actor_changed"):
+            self.writer()(self.update,self.fake.bundle,self.deadline)
+        self.assertEqual(self.fake.calls_post,[])
+
+    def test_actor_switch_between_calls_does_not_reauthorize_same_writer(self):
+        writer=self.writer()
+        self.assertIs(writer(self.update,self.fake.bundle,self.deadline),True)
+        original_effect_count=len(self.fake.calls_post)
+        self.fake.by_endpoint["user"]["id"]=self.approved_actor_id+1
+        with self.assertRaisesRegex(CliWriterRefused,"cli_writer_actor_changed"):
+            writer(self.update,self.fake.bundle,self.deadline)
+        self.assertEqual(len(self.fake.calls_post),original_effect_count)
+
+    def test_actor_switch_inside_authorization_callback_refuses_before_post(self):
+        def change_actor_after_grant(*args):
+            self.fake.by_endpoint["user"]["id"]=self.approved_actor_id+1
+            return True
+        writer=GhIssueCASWriter(
+            self.host,self.objects,expected_actor_id=self.approved_actor_id,
+            effect=self.fake.run_effect,
+            authorize=change_actor_after_grant,original_intent=self.intent)
+        with self.assertRaisesRegex(CliWriterRefused,"cli_writer_actor_changed"):
+            writer(self.update,self.fake.bundle,self.deadline)
+        self.assertEqual(self.fake.calls_post,[])
+
+    def test_actor_switch_after_upload_prevents_cas_without_retry(self):
+        actual=self.fake.run_effect
+        def switching_effect(argv,payload,timeout):
+            out=actual(argv,payload,timeout)
+            if argv[:4]==["gh","api","-X","POST"] and argv[4].endswith("/commits"):
+                self.fake.by_endpoint["user"]["id"]=self.approved_actor_id+1
+            return out
+        writer=GhIssueCASWriter(
+            self.host,self.objects,expected_actor_id=self.approved_actor_id,
+            effect=switching_effect,
+            authorize=self.authorize,original_intent=self.intent)
+        with self.assertRaisesRegex(CliWriterUncertain,"cli_writer_pre_cas_authority_changed"):
+            writer(self.update,self.fake.bundle,self.deadline)
+        self.assertTrue(self.fake.calls_post)
+        self.assertFalse(any(x[0][2]=="graphql" for x in self.fake.calls_post))
+        self.assertNotIn(IREAD,self.fake.by_endpoint)
+
+    def test_actor_switch_after_cas_is_uncertain_not_success(self):
+        actual=self.fake.run_effect
+        def switching_effect(argv,payload,timeout):
+            out=actual(argv,payload,timeout)
+            if argv[:3]==["gh","api","graphql"]:
+                self.fake.by_endpoint["user"]["id"]=self.approved_actor_id+1
+            return out
+        writer=GhIssueCASWriter(
+            self.host,self.objects,expected_actor_id=self.approved_actor_id,
+            effect=switching_effect,
+            authorize=self.authorize,original_intent=self.intent)
+        with self.assertRaisesRegex(CliWriterUncertain,"cli_writer_post_cas_readback_unknown"):
+            writer(self.update,self.fake.bundle,self.deadline)
+        self.assertEqual(self.host.observe(ISSUE,self.deadline),self.fake.bundle.commit)
+
+    def test_callback_error_before_effect_yields_typed_refusal(self):
+        for failing in ("grant","intent"):
+            with self.subTest(failing=failing):
+                def fail(*args):
+                    raise RuntimeError("synthetic Host callback unavailable")
+                writer=GhIssueCASWriter(
+                    self.host,self.objects,expected_actor_id=self.approved_actor_id,
+                    effect=self.fake.run_effect,
+                    authorize=fail if failing=="grant" else self.authorize,
+                    original_intent=fail if failing=="intent" else self.intent)
+                with self.assertRaisesRegex(CliWriterRefused,"cli_writer_host_authority_unavailable"):
+                    writer(self.update,self.fake.bundle,self.deadline)
+                self.assertEqual(self.fake.calls_post,[])
+
+    def test_callback_error_after_upload_is_uncertain_not_refused(self):
+        for failing in ("grant","intent"):
+            with self.subTest(failing=failing):
+                fake=FakeEffect()
+                host=GhReadOnlyHost(REPO,12,"R_node",runner=fake)
+                expected_actor_id=host.preflight(self.deadline).actor_id
+                objs=GhMetadataObjects(host)
+                counts={"grant":0,"intent":0}
+                def callback(kind):
+                    def invoked(*args):
+                        counts[kind]+=1
+                        if kind==failing and counts[kind]>=2:
+                            raise RuntimeError("synthetic later callback error")
+                        return True
+                    return invoked
+                writer=GhIssueCASWriter(
+                    host,objs,expected_actor_id=expected_actor_id,
+                    effect=fake.run_effect,
+                    authorize=callback("grant"),original_intent=callback("intent"))
+                with self.assertRaisesRegex(CliWriterUncertain,"cli_writer_pre_cas_authority_changed"):
+                    writer(self.update,fake.bundle,self.deadline)
+                self.assertEqual(len(fake.calls_post),5)
+                self.assertNotIn(IREAD,fake.by_endpoint)
+
+    def test_main_head_advancing_independently_does_not_revoke_issue_grant(self):
+        # Main is the Product default branch. A concurrent unrelated merge
+        # must not change the registered Task base or invalidate a valid
+        # Issue-scoped Metadata CAS.
+        actual=self.fake.run_effect
+        def merge_main_after_first_blob(argv,payload,timeout):
+            out=actual(argv,payload,timeout)
+            if argv[:4]==["gh","api","-X","POST"] and argv[4].endswith("/blobs"):
+                self.fake.by_endpoint[f"repos/{REPO}/git/ref/heads/main"]["object"]["sha"]="6"*40
+            return out
+        writer=GhIssueCASWriter(
+            self.host,self.objects,expected_actor_id=self.approved_actor_id,
+            effect=merge_main_after_first_blob,
+            authorize=self.authorize,original_intent=self.intent)
+        self.assertIs(writer(self.update,self.fake.bundle,self.deadline),True)
+        self.assertEqual(self.host.observe(ISSUE,self.deadline),self.fake.bundle.commit)
 
     def test_missing_effect_runner_blocks_before_any_remote_post(self):
         with self.assertRaisesRegex(CliWriterRefused,"cli_writer_uninstalled"):
@@ -292,7 +421,9 @@ class WriterTests(unittest.TestCase):
             nonlocal count
             count+=1
             return count==1
-        w=GhIssueCASWriter(self.host,self.objects,effect=self.fake.run_effect,
+        w=GhIssueCASWriter(self.host,self.objects,
+                            expected_actor_id=self.approved_actor_id,
+                            effect=self.fake.run_effect,
                             authorize=grant,original_intent=self.intent)
         with self.assertRaises(CliWriterUncertain):
             w(self.update,self.fake.bundle,self.deadline)
@@ -302,5 +433,47 @@ class WriterTests(unittest.TestCase):
         with self.assertRaises(CliWriterRefused):
             self.writer()(self.update,self.fake.bundle,time.monotonic()-1)
         self.assertEqual(self.fake.calls_post,[])
+
+    def test_effect_deadline_refusal_type_depends_on_prior_effect(self):
+        writer=self.writer()
+        expired=time.monotonic()-1
+        endpoint=f"repos/{REPO}/git/blobs"
+        payload={"content":"YQ==","encoding":"base64"}
+        with self.assertRaisesRegex(CliWriterRefused,
+                                    "cli_writer_effect_capability_missing"):
+            writer._post(endpoint,payload,expired,[False])
+        with self.assertRaisesRegex(CliWriterUncertain,
+                                    "cli_writer_staged_effect_uncertain"):
+            writer._post(endpoint,payload,expired,[True])
+        self.assertEqual(self.fake.calls_post,[])
+
+    def test_deadline_expires_after_first_blob_readback_reports_uncertain(self):
+        writer=self.writer()
+        expired=[False]
+        real_clock=time.monotonic
+        original_reader=GhMetadataObjects.__call__
+        first_upload_deadline=real_clock()+15
+        def fake_writer_clock():
+            return first_upload_deadline+1 if expired[0] else real_clock()
+        def expire_after_first_blob_readback(reader,key,maximum,deadline):
+            value=original_reader(reader,key,maximum,deadline)
+            if value[0]=="blob" and not expired[0]:
+                expired[0]=True
+            return value
+        # Patch only the writer module clock. GhReadOnlyHost and object
+        # reader retain the ordinary clock while the synthetic deadline
+        # deterministically expires between successful staged effects.
+        with patch.object(writer_module,"time",
+                          SimpleNamespace(monotonic=fake_writer_clock)):
+            with patch.object(GhMetadataObjects,"__call__",
+                              expire_after_first_blob_readback):
+                with self.assertRaisesRegex(
+                        CliWriterUncertain,"cli_writer_staged_effect_uncertain"):
+                    writer(self.update,self.fake.bundle,first_upload_deadline)
+        self.assertTrue(expired[0])
+        self.assertEqual(len(self.fake.calls_post),1)
+        self.assertEqual(self.fake.calls_post[0][0][4],
+                         f"repos/{REPO}/git/blobs")
+        self.assertNotIn(IREAD,self.fake.by_endpoint)
 
 if __name__=="__main__":unittest.main()

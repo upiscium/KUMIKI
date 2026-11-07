@@ -38,11 +38,14 @@ bounded GitHub REST Blob/Commit/Tree responses, and verifies their
 
 `tools/kagari_metadata_v2_cli_issue_writer.py` implements the existing
 `metadata_v2.Writer(Update,Bundle,deadline)->bool` shape:
-- Constructor requires the identical R29 read Host and R30 ObjectReader.
-  The `effect` transport, `authorize` grant and `original_intent`
-  verification callbacks have **NO DEFAULT**. Without all three supplied by
-  trusted Main/Host it fails before any remote POST. They are not Python
-  constructor credentials or permissions transferable to a model.
+- Constructor requires the identical R29 read Host and R30 ObjectReader,
+  plus an **explicit immutable positive numeric `expected_actor_id` bound
+  by the trusted Main/Host at admission**. It must not be acquired afresh
+  from `host._identity` after a later `gh auth` switch. The `effect`
+  transport, `authorize` grant and `original_intent` verification
+  callbacks have **NO DEFAULT**. Without all three supplied by trusted
+  Main/Host it fails before any remote POST. The principal binding and
+  callbacks are operation authority, not credentials transferable to a model.
 - #337 IssuePublisher must already have fsynced the *original* #140 intent,
   admitted the exact approved Issue/Contract/Worktree/Attachment, and held
   one repository Main owner and any required writer exclusivity. Its outer
@@ -57,8 +60,15 @@ bounded GitHub REST Blob/Commit/Tree responses, and verifies their
   Flatten deterministic SHA-validated Git trees and upload exact Blob,
   Tree and Commit objects through injected Host effect runner with the
   existing `gh` user; verify each expected Git SHA/remote readback.
-- Recheck actor, repository, existing Main HEAD and exact Issue/Archive
-  direct refs and independent Host grant **again after object upload**.
+- Recheck the original Host-admitted **numeric CLI actor**, exact repository
+  identity, Issue/Archive direct refs, and independent Host grant/intent
+  **again after object upload**. Fail closed on an unexpected actor switch;
+  after any upload, unknown state is classified as `CliWriterUncertain`.
+  The #291 Main/registered Task's immutable `base_revision`, current
+  Contract/Worktree/Attachment and effect-time approval are separately
+  revalidated by the trusted Publisher/Host callbacks. The *current default
+  branch `main` tip is not pinned by this Writer*: unrelated Issue/PR merges
+  may advance it without invalidating a still-authorized Task operation.
   Then submit **one** GraphQL `updateRefs` mutation with two atomic updates:
   (1) move exactly the selected Issue ref from expected-old C or all-zero
   expected-absent to candidate, **force=false**;
@@ -201,3 +211,64 @@ R31 and R32 cross-Issue adversarial tests. Exact latest final review
 must be repeated, because a review of the earlier candidate cannot
 authorize publishing modified bytes. Live GitHub ref writes remain
 unauthorized and NOT_RUN.
+
+## R34 — exact-published-head PR #383 Correctness correction (source-only)
+
+PR #383 HEAD `ef099a0c0965bbde7bfd80a82627f9eef7832c1c`
+passed exact GitHub CI 16/16 checks but independent PR-mode
+Correctness returned CHANGES REQUIRED (one P1, two P2). This R34
+correction is **isolated local source only**, not a GitHub publication.
+
+- **Host-bound principal:** `GhIssueCASWriter(..., expected_actor_id=...)`
+  now requires a positive non-boolean numeric identity supplied by the
+  trusted Main/Host during admission. It is *never* silently derived
+  from an updated ambient `gh` login. Both before and after Host
+  callbacks, before the first Blob effect, before CAS after object
+  upload, and during post-CAS readback the actor must match the
+  original admitted value. This is normal CLI login reuse, **not**
+  a GitHub App or additional credential management system.
+- **Task base vs current `main`:** `registered.base_revision` is
+  the immutable Issue/Contract/Worktree subject of the upstream
+  #291/#337 trusted admission. Ordinary unrelated Merge Commit
+  advancement of `refs/heads/main` does *not* revoke an otherwise
+  current Issue-scoped Metadata operation. The Writer rechecks
+  exact Issue/Archive refs and Host grant/intent, **not** an
+  unrelated default-branch tip. The old R30 statement claiming
+  a raw Main HEAD stability check was incorrect and is withdrawn.
+- **Failure classification:** A trusted `authorize` or
+  `original_intent` callback raising an ordinary Exception before
+  any upload now becomes `CliWriterRefused`. If it happens *after*
+  object transfer, the existing upper guard converts that unknown
+  state to `CliWriterUncertain`. No blind rerun, new nonce,
+  write bypass, credential export, or success on ambiguous ACK.
+- **Negative tests:** CLI actor switch before first effect, between
+  calls, during grant, after uploads, or after CAS; callback failure
+  before and after upload; invalid expected actor; independent
+  `main` advancement while Issue/Contract/grant remain valid.
+
+Independent review of the exact R34 bytes and separate Human
+authorization are still needed before a correction Commit/Push to
+the existing Draft PR #383. No Ready/Merge, Archive deletion,
+real GitHub CAS, model Task/Ask or activation is authorized.
+
+### R34 staged-upload deadline classification — independent Security P2
+
+The first R34 Security source review found an additional P2: the
+internal `_post` pre-call deadline/capability/size checks could raise
+`CliWriterRefused` for a second or later POST despite prior GitHub
+object upload effects already having entered the transport.
+
+Each `Writer.__call__` now owns an invocation-local `effects_started`
+marker. It is set immediately before the first effect runner call,
+and never carried into a different operation. A pre-call failure
+before the first effect remains a typed `CliWriterRefused`, while
+any later deadline/capability/size pre-call failure becomes
+`CliWriterUncertain`. The original fsynced intent remains the
+sole recovery authority; this change does not retry, roll back or
+mint a different candidate.
+
+Deterministic regression checks both direct pre-call classifications
+and injects deadline expiration **after the first successful Blob
+POST and GET readback**, before the next Blob POST. The result must be
+`CliWriterUncertain`, with exactly one synthetic effect call and
+no CAS mutation. This does not attest actual GitHub lost-ACK behavior.
