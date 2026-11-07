@@ -20,6 +20,7 @@ from kagari_metadata_v2_cli_readonly import (
     GhReadOnlyHost,CliReadRefused,_json,need
 )
 from kagari_metadata_v2_cli_objects import GhMetadataObjects
+from kagari_metadata_v2_cli_session import GhCliSession
 import metadata_codec as codec
 from metadata_v2 import (
     ARCHIVE_REF,Bundle,Update,InvalidMetadata,git_id,issue_ref
@@ -175,7 +176,7 @@ class GhIssueCASWriter:
     Contract/Task and installs three independent Host callbacks below.
     """
     def __init__(self,host:GhReadOnlyHost,objects:GhMetadataObjects,
-                 *,expected_actor_id:int, effect:Effect|None=None,
+                 *,expected_actor_id:int, session:GhCliSession|None=None,
                  authorize:Authorize|None=None,
                  original_intent:OriginalIntent|None=None)->None:
         require(type(host) is GhReadOnlyHost
@@ -183,16 +184,28 @@ class GhIssueCASWriter:
                 and objects.host is host
                 and type(expected_actor_id) is int and expected_actor_id>0,
                 "cli_writer_host_invalid")
-        # The trusted Host supplies this immutable admitted principal,
-        # never a fresh ambient gh login or mutable host._identity cache.
+        # Never accept an independent effect runner: reads and writes must
+        # use one Host-owned captured credential. Ambient gh auth switch
+        # cannot rebind the exact transport identity between observations.
+        if session is not None:
+            require(type(session) is GhCliSession
+                    and host._session is session
+                    and getattr(host._runner,"__self__",None) is session
+                    and session.repo==host.repository
+                    and session.actor_id==expected_actor_id,
+                    "cli_writer_session_mismatch")
         self.host,self.objects=host,objects
         self._expected_actor_id=expected_actor_id
-        self._effect_runner=effect
+        self._session=session
+        self._effect_runner=session.effect if session is not None else None
         self._authorize=authorize
         self._original_intent=original_intent
 
     def _guard(self,update:Update,deadline:float)->None:
-        current=self.host.preflight(deadline)
+        try:
+            current=self.host.preflight(deadline)
+        except CliReadRefused as error:
+            raise CliWriterRefused("cli_writer_bound_identity_unavailable") from error
         require(current.actor_id==self._expected_actor_id,
                 "cli_writer_actor_changed")
         require(self._authorize is not None and self._original_intent is not None,
@@ -206,7 +219,11 @@ class GhIssueCASWriter:
                 "cli_writer_original_intent_or_grant_required")
         # A Host callback may yield to another local CLI actor. Re-read the
         # admitted identity after callbacks as well as before them.
-        require(self.host.preflight(deadline).actor_id==self._expected_actor_id,
+        try:
+            after_callbacks=self.host.preflight(deadline)
+        except CliReadRefused as error:
+            raise CliWriterRefused("cli_writer_bound_identity_unavailable") from error
+        require(after_callbacks.actor_id==self._expected_actor_id,
                 "cli_writer_actor_changed")
         require(self.host.observe(ARCHIVE_REF,deadline)==update.expected_archive
                 and self.host.observe(update.ref,deadline)==update.expected_issue,

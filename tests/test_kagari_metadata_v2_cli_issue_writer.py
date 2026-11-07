@@ -20,6 +20,7 @@ from metadata_v2 import Update,ARCHIVE_REF,Bundle,construct
 import metadata_codec as codec
 from kagari_metadata_v2_cli_readonly import GhReadOnlyHost
 from kagari_metadata_v2_cli_objects import GhMetadataObjects
+from kagari_metadata_v2_cli_session import GhCliSession,GhSessionRefused
 from kagari_metadata_v2_cli_issue_writer import (
     GhIssueCASWriter,CliWriterRefused,CliWriterUncertain
 )
@@ -37,6 +38,17 @@ class FakeEffect(FakeGit):
         self.calls_post=[]
         self.reject_cas=False
         self.fail_blob_ack=False
+        # One simulated existing CLI login captured as GH_TOKEN. Ambient
+        # gh auth switches only change *future* captures, not this session.
+        self.ambient_actor=1
+        self.actor_override=None
+        self.bound_tokens={1:"synthetic-cli-token-for-actor-A",
+                           2:"synthetic-cli-token-for-actor-B"}
+        self.token_actors={v:k for k,v in self.bound_tokens.items()}
+        self.effect_actors=[]
+        self.effect_hook=None
+        self.switch_after_ref_read=False
+        self.ambient_switch_during_effect=False
         # Stateful remote fixture: Git objects do NOT exist until the
         # corresponding GitHub POST has occurred. A response/readback
         # cannot succeed by borrowing prepopulated FakeGit objects.
@@ -48,6 +60,35 @@ class FakeEffect(FakeGit):
             self.pending_readback[endpoint]=self.by_endpoint.pop(endpoint)
         self.by_endpoint[ARCHIVE]={
             "ref":ARCHIVE_REF,"object":{"type":"commit","sha":G}}
+    def spawn(self,argv,body,timeout,env):
+        assert argv[0]=="/fake/gh"
+        command=["gh",*argv[1:]]
+        if command==["gh","auth","token","--hostname","github.com"]:
+            return 0,(self.bound_tokens[self.ambient_actor]+"\n").encode()
+        token=env.get("GH_TOKEN")
+        assert token in self.token_actors, "no credential or wrong bound session"
+        actual=self.token_actors[token]
+        if command[:4]==["gh","api","-X","GET"]:
+            if command[4]=="user":
+                actor=actual if self.actor_override is None else self.actor_override
+                return 0,json.dumps({"login":"test-user","id":actor}).encode()
+            result=FakeGit.__call__(self,command,timeout)
+            if self.switch_after_ref_read and command[4]==(
+                    f"repos/{REPO}/git/ref/heads/kagari-metadata/7"):
+                self.ambient_actor=2  # switch after observed A, before effect
+            return result
+        self.effect_actors.append(actual)
+        if self.ambient_switch_during_effect:
+            self.ambient_actor=1 if self.ambient_actor==2 else 2
+        if self.effect_hook is not None:
+            return self.effect_hook(command,body,timeout)
+        return self.run_effect(command,body,timeout)
+
+    def session(self,deadline,*,admitted_actor_id=1):
+        return GhCliSession.capture(
+            REPO,admitted_actor_id,deadline,
+            gh_binary="/fake/gh",invoke=self.spawn)
+
     def run_effect(self,argv,body,timeout):
         self.calls_post.append((argv,body,timeout))
         parsed=json.loads(body)
@@ -113,8 +154,9 @@ class FakeEffect(FakeGit):
 class WriterTests(unittest.TestCase):
     def setUp(self):
         self.fake=FakeEffect()
-        self.host=GhReadOnlyHost(REPO,12,"R_node",runner=self.fake)
         self.deadline=time.monotonic()+15
+        self.session=self.fake.session(self.deadline)
+        self.host=GhReadOnlyHost(REPO,12,"R_node",session=self.session)
         self.approved_actor_id=self.host.preflight(self.deadline).actor_id
         self.objects=GhMetadataObjects(self.host)
         self.update=Update(REPO,G,"7",ISSUE,G,None,self.fake.bundle.commit)
@@ -131,7 +173,7 @@ class WriterTests(unittest.TestCase):
     def writer(self,effect=True):
         return GhIssueCASWriter(
             self.host,self.objects,expected_actor_id=self.approved_actor_id,
-            effect=self.fake.run_effect if effect else None,
+            session=self.session if effect else None,
             authorize=self.authorize,original_intent=self.intent)
     def test_positive_exact_two_ref_cas_expected_old(self):
         self.assertTrue(all(key not in self.fake.by_endpoint
@@ -174,36 +216,87 @@ class WriterTests(unittest.TestCase):
                 with self.assertRaises(CliWriterRefused):
                     GhIssueCASWriter(
                         self.host,self.objects,expected_actor_id=bad,
-                        effect=self.fake.run_effect,
+                        session=self.session,
                         authorize=self.authorize,original_intent=self.intent)
         self.assertEqual(self.fake.calls_post,[])
 
-    def test_actor_switch_between_admission_and_first_effect_refuses_without_post(self):
-        self.fake.by_endpoint["user"]["id"]=self.approved_actor_id+1
-        # An intervening gh preflight must NOT silently repin the writer.
-        self.host.preflight(self.deadline)
-        with self.assertRaisesRegex(CliWriterRefused,"cli_writer_actor_changed"):
+    def test_bound_credential_actor_mismatch_before_first_effect_refuses(self):
+        # Distinct from an ambient gh auth switch: the *bound* token's
+        # user endpoint now reports a foreign principal, so fail closed.
+        self.fake.actor_override=self.approved_actor_id+1
+        with self.assertRaisesRegex(CliWriterRefused,
+                                    "cli_writer_bound_identity_unavailable"):
             self.writer()(self.update,self.fake.bundle,self.deadline)
         self.assertEqual(self.fake.calls_post,[])
 
-    def test_actor_switch_between_calls_does_not_reauthorize_same_writer(self):
+    def test_bound_credential_mismatch_between_calls_does_not_reauthorize(self):
         writer=self.writer()
         self.assertIs(writer(self.update,self.fake.bundle,self.deadline),True)
         original_effect_count=len(self.fake.calls_post)
-        self.fake.by_endpoint["user"]["id"]=self.approved_actor_id+1
-        with self.assertRaisesRegex(CliWriterRefused,"cli_writer_actor_changed"):
+        self.fake.actor_override=self.approved_actor_id+1
+        with self.assertRaisesRegex(CliWriterRefused,
+                                    "cli_writer_bound_identity_unavailable"):
             writer(self.update,self.fake.bundle,self.deadline)
         self.assertEqual(len(self.fake.calls_post),original_effect_count)
 
-    def test_actor_switch_inside_authorization_callback_refuses_before_post(self):
-        def change_actor_after_grant(*args):
-            self.fake.by_endpoint["user"]["id"]=self.approved_actor_id+1
+    def test_r35_ambient_A_B_A_switch_does_not_change_effect_principal(self):
+        # Source-only reproduction of the R34 Security P2:
+        # the ambient selected gh account switches after the last GET,
+        # and during effects, but every actual effect uses captured token A.
+        self.fake.switch_after_ref_read=True
+        self.fake.ambient_switch_during_effect=True
+        self.assertTrue(self.writer()(self.update,self.fake.bundle,self.deadline))
+        self.assertEqual(len(self.fake.effect_actors),6)
+        self.assertEqual(set(self.fake.effect_actors),{1})
+        self.assertEqual(self.host._identity.actor_id,1)
+        self.assertEqual(self.host.observe(ISSUE,self.deadline),
+                         self.fake.bundle.commit)
+
+    def test_r35_ambient_switch_before_first_effect_stays_actor_A(self):
+        self.fake.ambient_actor=2
+        self.assertTrue(self.writer()(self.update,self.fake.bundle,self.deadline))
+        self.assertEqual(set(self.fake.effect_actors),{1})
+
+    def test_r35_ambient_switch_in_host_grant_stays_actor_A(self):
+        def switch_ambient(*args):
+            self.fake.ambient_actor=2
+            return True
+        writer=GhIssueCASWriter(
+            self.host,self.objects,expected_actor_id=1,session=self.session,
+            authorize=switch_ambient,original_intent=self.intent)
+        self.assertTrue(writer(self.update,self.fake.bundle,self.deadline))
+        self.assertEqual(set(self.fake.effect_actors),{1})
+
+    def test_r35_capture_other_cli_actor_cannot_rebind_admitted_host(self):
+        self.fake.ambient_actor=2
+        with self.assertRaisesRegex(GhSessionRefused,"cli_session_actor_mismatch"):
+            self.fake.session(self.deadline,admitted_actor_id=1)
+        other=self.fake.session(self.deadline,admitted_actor_id=2)
+        with self.assertRaisesRegex(CliWriterRefused,"cli_writer_session_mismatch"):
+            GhIssueCASWriter(
+                self.host,self.objects,expected_actor_id=1,session=other,
+                authorize=self.authorize,original_intent=self.intent)
+        self.assertEqual(self.fake.calls_post,[])
+
+    def test_r35_bound_session_close_blocks_effect(self):
+        self.session.close()
+        with self.assertRaisesRegex(CliWriterRefused,
+                                    "cli_writer_bound_identity_unavailable"):
+            self.writer()(self.update,self.fake.bundle,self.deadline)
+        self.assertEqual(self.fake.calls_post,[])
+        self.assertNotIn(self.fake.bound_tokens[1],repr(self.session))
+
+    def test_bound_credential_actor_mismatch_during_grant_refuses_no_post(self):
+        def change_reported_actor_after_grant(*args):
+            self.fake.actor_override=self.approved_actor_id+1
             return True
         writer=GhIssueCASWriter(
             self.host,self.objects,expected_actor_id=self.approved_actor_id,
-            effect=self.fake.run_effect,
-            authorize=change_actor_after_grant,original_intent=self.intent)
-        with self.assertRaisesRegex(CliWriterRefused,"cli_writer_actor_changed"):
+            session=self.session,
+            authorize=change_reported_actor_after_grant,
+            original_intent=self.intent)
+        with self.assertRaisesRegex(CliWriterRefused,
+                                    "cli_writer_bound_identity_unavailable"):
             writer(self.update,self.fake.bundle,self.deadline)
         self.assertEqual(self.fake.calls_post,[])
 
@@ -212,11 +305,12 @@ class WriterTests(unittest.TestCase):
         def switching_effect(argv,payload,timeout):
             out=actual(argv,payload,timeout)
             if argv[:4]==["gh","api","-X","POST"] and argv[4].endswith("/commits"):
-                self.fake.by_endpoint["user"]["id"]=self.approved_actor_id+1
+                self.fake.actor_override=self.approved_actor_id+1
             return out
+        self.fake.effect_hook=switching_effect
         writer=GhIssueCASWriter(
             self.host,self.objects,expected_actor_id=self.approved_actor_id,
-            effect=switching_effect,
+            session=self.session,
             authorize=self.authorize,original_intent=self.intent)
         with self.assertRaisesRegex(CliWriterUncertain,"cli_writer_pre_cas_authority_changed"):
             writer(self.update,self.fake.bundle,self.deadline)
@@ -229,11 +323,12 @@ class WriterTests(unittest.TestCase):
         def switching_effect(argv,payload,timeout):
             out=actual(argv,payload,timeout)
             if argv[:3]==["gh","api","graphql"]:
-                self.fake.by_endpoint["user"]["id"]=self.approved_actor_id+1
+                self.fake.actor_override=self.approved_actor_id+1
             return out
+        self.fake.effect_hook=switching_effect
         writer=GhIssueCASWriter(
             self.host,self.objects,expected_actor_id=self.approved_actor_id,
-            effect=switching_effect,
+            session=self.session,
             authorize=self.authorize,original_intent=self.intent)
         with self.assertRaisesRegex(CliWriterUncertain,"cli_writer_post_cas_readback_unknown"):
             writer(self.update,self.fake.bundle,self.deadline)
@@ -246,7 +341,7 @@ class WriterTests(unittest.TestCase):
                     raise RuntimeError("synthetic Host callback unavailable")
                 writer=GhIssueCASWriter(
                     self.host,self.objects,expected_actor_id=self.approved_actor_id,
-                    effect=self.fake.run_effect,
+                    session=self.session,
                     authorize=fail if failing=="grant" else self.authorize,
                     original_intent=fail if failing=="intent" else self.intent)
                 with self.assertRaisesRegex(CliWriterRefused,"cli_writer_host_authority_unavailable"):
@@ -257,7 +352,8 @@ class WriterTests(unittest.TestCase):
         for failing in ("grant","intent"):
             with self.subTest(failing=failing):
                 fake=FakeEffect()
-                host=GhReadOnlyHost(REPO,12,"R_node",runner=fake)
+                session=fake.session(self.deadline)
+                host=GhReadOnlyHost(REPO,12,"R_node",session=session)
                 expected_actor_id=host.preflight(self.deadline).actor_id
                 objs=GhMetadataObjects(host)
                 counts={"grant":0,"intent":0}
@@ -270,7 +366,7 @@ class WriterTests(unittest.TestCase):
                     return invoked
                 writer=GhIssueCASWriter(
                     host,objs,expected_actor_id=expected_actor_id,
-                    effect=fake.run_effect,
+                    session=session,
                     authorize=callback("grant"),original_intent=callback("intent"))
                 with self.assertRaisesRegex(CliWriterUncertain,"cli_writer_pre_cas_authority_changed"):
                     writer(self.update,fake.bundle,self.deadline)
@@ -287,9 +383,10 @@ class WriterTests(unittest.TestCase):
             if argv[:4]==["gh","api","-X","POST"] and argv[4].endswith("/blobs"):
                 self.fake.by_endpoint[f"repos/{REPO}/git/ref/heads/main"]["object"]["sha"]="6"*40
             return out
+        self.fake.effect_hook=merge_main_after_first_blob
         writer=GhIssueCASWriter(
             self.host,self.objects,expected_actor_id=self.approved_actor_id,
-            effect=merge_main_after_first_blob,
+            session=self.session,
             authorize=self.authorize,original_intent=self.intent)
         self.assertIs(writer(self.update,self.fake.bundle,self.deadline),True)
         self.assertEqual(self.host.observe(ISSUE,self.deadline),self.fake.bundle.commit)
@@ -423,7 +520,7 @@ class WriterTests(unittest.TestCase):
             return count==1
         w=GhIssueCASWriter(self.host,self.objects,
                             expected_actor_id=self.approved_actor_id,
-                            effect=self.fake.run_effect,
+                            session=self.session,
                             authorize=grant,original_intent=self.intent)
         with self.assertRaises(CliWriterUncertain):
             w(self.update,self.fake.bundle,self.deadline)

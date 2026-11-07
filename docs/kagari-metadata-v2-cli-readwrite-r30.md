@@ -272,3 +272,98 @@ and injects deadline expiration **after the first successful Blob
 POST and GET readback**, before the next Blob POST. The result must be
 `CliWriterUncertain`, with exactly one synthetic effect call and
 no CAS mutation. This does not attest actual GitHub lost-ACK behavior.
+
+## R35 — invocation-bound existing GitHub CLI credential (source-only)
+
+The independently reviewed, published R34 PR #383 source remained
+**CHANGES REQUIRED** for one Security P2: a process observing CLI actor A
+before and after an effect could miss a concurrent A→B→A switch of the
+ambient `gh auth` selection. It could falsely report a successful
+effect under A although a Blob or GitHub GraphQL CAS ran as B.
+R34's sampled `expected_actor_id` is necessary but not sufficient.
+
+R35 introduces `tools/kagari_metadata_v2_cli_session.py`, an
+**invocation-scoped adapter to the already installed CLI login**.
+The trusted Host must:
+
+1. Supply the previously admitted numeric GitHub actor ID and exact
+   repository identity, and call `GhCliSession.capture(repo, actor_id, deadline)`.
+   That method runs `gh auth token --hostname github.com` **once**
+   without login/refresh/installation and without printing or persisting
+   stdout. It verifies `gh api user` with *that captured credential*,
+   using the documented `GH_TOKEN` priority over ambient `gh auth`.
+2. Use **the same concrete** `GhCliSession` in
+   `GhReadOnlyHost(..., session=session)` and
+   `GhIssueCASWriter(..., expected_actor_id=actor_id, session=session,
+   authorize=..., original_intent=...)`.
+   The Writer refuses any separate effect callback or a different
+   credential session: only `session.effect` is accepted, and the
+   Host's read runner must be `session.read`. A session without
+   current Host grants, original durable Intent and exact OID proof
+   still grants NO Metadata write authority.
+3. Every GET, object upload and GraphQL `updateRefs` runs a subprocess
+   with a fresh sanitized environment containing **the same**
+   `GH_TOKEN` and `GH_HOST=github.com`. There is no token in
+   argv, source, Task/model prompts, Metadata objects, journals,
+   GitHub comments, or logged stderr. A concurrent `gh auth switch`
+   affects **subsequent invocation capture**, not this operation's
+   API credential. Host must close the session after the bounded
+   operation; Python cannot guarantee secure memory zeroization.
+4. Fail closed if the existing CLI is unauthenticated, token capture
+   fails, the bound `gh api user` disagrees with the admitted actor,
+   the session closes or expires, or the response is unavailable.
+   After an object upload, the existing `CliWriterUncertain`
+   handling and original #140 journal reconciliation remain required.
+   A successful captured actor observation is not a substitute for
+   #291/#337 current Task/Contract/Worktree/Attachment authority.
+
+R35 isolated tests reproduce an ambient A→B→A selection change
+between read and effect and during the effect sequence. The in-memory
+runner records all Blob/Tree/Commit and GraphQL invocations as actor
+**A**, the captured user, regardless of the ambient selection B.
+Foreign-host/repo API commands, malformed tokens, cross-principal
+capture, missing session and post-close attempts are rejected.
+The underlying CLI is unchanged: this is **not** GitHub App onboarding,
+a PAT request, a token-refresh daemon, a credential database,
+an auth proxy, or a second GitHub account.
+
+**Scope limit:** This is a source-only transport proof. The real
+Host-owned object and Writer effect callbacks have NOT been activated,
+and no GitHub Metadata ref, Issue, Product PR, Archive cleanup or
+native model/Ask mutation is authorized. Real GitHub two-ref CAS,
+stale-beforeOid rejection and remote lost-ACK verification remain
+separate Human-approved disposable canary gates. Source Commit/Push to
+Draft PR #383 requires an explicit later Human approval, with independent
+security/correctness review of the exact R35 bytes first.
+
+### R35 independent Security P2 — token capture must be memory-only
+
+The first R35 independent Security review found that ordinary
+`tempfile.TemporaryFile()` stdout used by the generic API reader
+could put plaintext output of `gh auth token` into an unnamed but
+potentially disk-backed file. That was inconsistent with the accepted
+**in-memory only** capture contract.
+
+The final R35 implementation routes *only credential capture* through
+a dedicated `subprocess.Popen(stdout=PIPE)` bounded **OS memory pipe**
+reader, enforced at **4098 output bytes** and under the same original
+deadline. Any overflow, timeout or subprocess failure triggers cleanup
+including termination and reaping of the child, without disclosing
+stderr. The token remains exclusively in Host-owned Python memory and
+the private subprocess `GH_TOKEN` environment; no token bytes are
+placed in temporary files, local Git config, argv, journal, Task
+messages, GitHub Issue/PR comments or source.
+
+Ordinary **noncredential REST GET** response decoding still uses the
+existing bounded 2 MiB temporary output facility, which does not
+receive `gh auth token` stdout. Production capture pipe tests use a
+synthetic child with an OS pipe, assert `stdout=subprocess.PIPE`
+and fail if the generic `TemporaryFile` is invoked. Additional tests
+cover oversized token output and bounded timeout child cleanup. The
+same corrected source completed a real Adam `gh` login-bound
+**GET-only** preflight without exposing the token.
+
+The private Python process cannot promise perfect zeroization of
+immutable strings or protect against a same-user hostile process
+inspecting child environments; these are not the accepted KUMIKI
+single-operator threat model. No new credential service is needed.

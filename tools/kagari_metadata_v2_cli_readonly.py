@@ -19,6 +19,8 @@ import tempfile
 import time
 from collections.abc import Callable
 
+from kagari_metadata_v2_cli_session import GhCliSession,GhSessionRefused
+
 _REPO=re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z",re.ASCII)
 _REF=re.compile(r"refs/heads/(?:kagari/metadata|kagari-metadata/[1-9][0-9]{0,127}|main)\Z",re.ASCII)
 _OID=re.compile(r"[a-f0-9]{40}\Z",re.ASCII)
@@ -75,22 +77,30 @@ class CliRepo:
 class GhReadOnlyHost:
     """One exact repo selection, app-level authority remains outside this type."""
     def __init__(self,repository:str,repo_id:int,graphql_id:str,
-                 *,runner:Run=_run)->None:
+                 *,runner:Run=_run,session:GhCliSession|None=None)->None:
         need(type(repository) is str and len(repository)<=200
              and _REPO.fullmatch(repository) is not None
              and type(repo_id) is int and repo_id>0
              and type(graphql_id) is str and 0<len(graphql_id)<=160
              and callable(runner),"cli_host_selection_invalid")
+        if session is not None:
+            need(type(session) is GhCliSession and session.repo==repository
+                 and runner is _run,"cli_host_session_invalid")
+            runner=session.read
         self.repository=repository
         self.repo_id=repo_id
         self.graphql_id=graphql_id
         self._runner=runner
+        self._session=session
         self._identity:CliRepo|None=None
 
     def _api(self,endpoint:str,deadline:float,*,allow_absent:bool=False):
         need(time.monotonic()<deadline,"cli_deadline")
-        rc,data=self._runner(["gh","api","-X","GET",endpoint],
-                             min(20.,deadline-time.monotonic()))
+        try:
+            rc,data=self._runner(["gh","api","-X","GET",endpoint],
+                                 min(20.,deadline-time.monotonic()))
+        except GhSessionRefused as error:
+            raise CliReadRefused("cli_bound_session_unavailable") from error
         need(time.monotonic()<deadline,"cli_deadline")
         parsed=_json(data)
         if rc:
@@ -112,7 +122,8 @@ class GhReadOnlyHost:
              and repo.get("default_branch")=="main"
              and repo.get("archived") is False
              and type(actor.get("id")) is int and actor["id"]>0
-             and type(actor.get("login")) is str and len(actor["login"])<=80,
+             and type(actor.get("login")) is str and len(actor["login"])<=80
+             and (self._session is None or actor["id"]==self._session.actor_id),
              "cli_repo_or_actor_identity_mismatch")
         # Host must still independently obtain exact approved Issue/grant.
         head=self.observe("refs/heads/main",deadline)
