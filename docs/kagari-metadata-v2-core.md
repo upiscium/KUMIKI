@@ -1,5 +1,7 @@
 # #337 Metadata v2 core — Phase 1, source only
 
+> **Current #337 policy supersedes the external Archive-protection gates below (2026-11-07).** KUMIKI Metadata v2 uses ordinary Git Archive/Issue branches. Neither GitHub Rulesets, Branch Protection, admin/settings changes nor dedicated Apps are required. Earlier retention-policy/bypass/negative-actor requirements in this historical phase document are **not active acceptance gates**. See [ordinary-branch contract](kagari-metadata-v2-ordinary-branch.md) and KUMIKI Issue #337 for the current contract. Preserve the original historical test results; do not interpret them as current ordinary-branch canary proof.
+
 Run: `KUMIKI-337-PHASE1-20261101-R1`.
 Base: `985102cc5ef77f30cac4b03778ea16e59e95c160` on
 `feat/337-phase1-v2-local`. No source staging, commits, publication, installation,

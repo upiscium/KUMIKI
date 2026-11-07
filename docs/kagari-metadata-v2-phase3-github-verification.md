@@ -1,5 +1,7 @@
 # KAGARI Metadata v2 — Phase 3 disposable GitHub verification (design R0)
 
+> **Current #337 policy supersedes the external Archive-protection gates below (2026-11-07).** KUMIKI Metadata v2 uses ordinary Git Archive/Issue branches. Neither GitHub Rulesets, Branch Protection, admin/settings changes nor dedicated Apps are required. Earlier retention-policy/bypass/negative-actor requirements in this historical phase document are **not active acceptance gates**. See [ordinary-branch contract](kagari-metadata-v2-ordinary-branch.md) and KUMIKI Issue #337 for the current contract. Preserve the original historical test results; do not interpret them as current ordinary-branch canary proof.
+
 **Status:** Design-only, source-only KUMIKI #337 candidate. Not installed, not
 activated, not a GitHub remote test, not permission for any external write.
 Baseline: merged #337 R9 PR #369 on `main`, SHA-1 Git source-only adapters
