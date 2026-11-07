@@ -83,6 +83,15 @@ def _v2_product_pr_api():
     return V2ProductPrFirstHost, ProductPrRefused
 
 
+def _v2_initial_checkpoint_api():
+    """Explicit R5C1B1 coordinator only; no CLI or v1 publication fallback."""
+    if __package__:
+        from .kagari_vnext_main_v2_initial_checkpoint import V2InitialCheckpointHost
+    else:
+        from kagari_vnext_main_v2_initial_checkpoint import V2InitialCheckpointHost
+    return V2InitialCheckpointHost
+
+
 def _v2_pr_first_api():
     """Lazy R5C0 Host-only PR-first proof; never the v1 collaboration facade."""
     if __package__:
@@ -232,6 +241,7 @@ class RepositoryMain:
         v2_session_for_issue: dict[int, object] | None = None,
         v2_pr_first_for_issue: dict[int, object] | None = None,
         v2_product_pr_for_issue: dict[int, object] | None = None,
+        v2_initial_checkpoint_for_issue: dict[int, object] | None = None,
     ) -> None:
         if not isinstance(store, MetadataStore) or not callable(read_issue):
             raise MainError("MAIN_CONFIGURATION_INVALID")
@@ -342,6 +352,22 @@ class RepositoryMain:
                            or host.readonly.selection.issue != issue
                            for issue, host in self.v2_product_pr_for_issue.items())):
                 raise MainError("R5C1A_HOST_BINDING_MISMATCH")
+        if (v2_initial_checkpoint_for_issue is not None
+                and type(v2_initial_checkpoint_for_issue) is not dict):
+            raise MainError("R5C1B1_HOST_INVALID")
+        initial_hosts = dict(v2_initial_checkpoint_for_issue or {})
+        if initial_hosts:
+            V2InitialCheckpointHost = _v2_initial_checkpoint_api()
+            if (self.v2_worktree_for_issue or self.v2_session_for_issue
+                    or self.v2_product_pr_for_issue or self.v2_pr_first_for_issue
+                    or initial_hosts.keys() != self.approved.keys()
+                    or self.v2_readonly_for_issue.keys() != self.approved.keys()
+                    or any(type(n) is not int or type(host) is not V2InitialCheckpointHost
+                           or host.readonly is not self.v2_readonly_for_issue.get(n)
+                           or host.readonly.selection.issue != n
+                           for n, host in initial_hosts.items())):
+                raise MainError("R5C1B1_HOST_BINDING_MISMATCH")
+        self.v2_initial_checkpoint_for_issue = MappingProxyType(initial_hosts)
         if (any(n not in self.approved or type(v) is not int or v < 1
                 for n, v in self.pr_for_issue.items())
                 or any(n not in self.approved or type(v) is not tuple
@@ -973,6 +999,59 @@ class RepositoryMain:
                     check_main_owner=lambda: owner._assert_owned(self))
             except ProductPrRefused as error:
                 raise MainError(error.code) from None
+
+    def publish_v2_initial_checkpoint(self, issue: int) -> dict:
+        """Host-only publication with the same canonical Main owner throughout.
+
+        Preserve the coordinator's typed UNCHANGED/UNCERTAIN exceptions rather
+        than collapsing a possible durable effect into a generic Main refusal.
+        """
+        if __package__:
+            from .kagari_vnext_main_service import MainSupervisor
+        else:
+            from kagari_vnext_main_service import MainSupervisor
+        choice = self._selected_choice(issue)
+        host = self.v2_initial_checkpoint_for_issue.get(issue)
+        if host is None:
+            raise MainError("R5C1B1_HOST_REQUIRED")
+        with self._main_owner_guard:
+            owner = self._main_owner
+
+            def check_owner():
+                if (type(owner) is not MainSupervisor or self._main_owner is not owner
+                        or owner.publication_only is not True
+                        or owner._attachment_lease is not host.readonly.lease
+                        or self.v2_initial_checkpoint_for_issue.get(issue) is not host
+                        or self.v2_readonly_for_issue.get(issue) is not host.readonly
+                        or self._selected_choice(issue) != choice):
+                    raise MainError("R5C1B1_OWNER_REQUIRED")
+                owner._assert_owned(self)
+
+            check_owner()
+            if choice.executor != OPENCODE:
+                raise MainError("R5C1B1_EXECUTOR_NOT_QUALIFIED")
+            if owner._initial_publish_active:
+                raise MainError("R5C1B1_ALREADY_PUBLISHING")
+            # Enter the finally boundary BEFORE touching any active state.
+            # A signal/BaseException during the first assignment must not
+            # strand the repository singleton flock at __exit__.
+            try:
+                owner._initial_publish_active = 1
+                owner._initial_publish_issue = issue
+                owner._initial_publish_host = host
+                owner._initial_publish_entered = False
+                return host.publish(
+                    project=self.store.root, repository=self.store.repository, issue=issue,
+                    branch_ref=choice.branch_ref, base_revision=choice.base_revision,
+                    contract_id=choice.contract_id, read_issue=self.read_issue,
+                    main_owner=owner)
+            finally:
+                # Clear the exit-blocking field first. No new model/metadata
+                # effect can start outside this RLock while finalizing.
+                owner._initial_publish_active = 0
+                owner._initial_publish_entered = False
+                owner._initial_publish_host = None
+                owner._initial_publish_issue = None
 
     def observe_v2(self, issue: int) -> dict:
         """Observe current v2 Host authority only; never fall back to v1."""
