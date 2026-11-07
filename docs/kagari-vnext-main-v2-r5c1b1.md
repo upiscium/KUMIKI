@@ -210,3 +210,17 @@ already unwound the publication frame but left an active flag stranded
 during finalization, Supervisor clears the stale identity and releases
 the singleton lock. This is bounded in-process recovery, not an arbitrary
 signal- or malicious-thread safety guarantee.
+
+
+## Postpublication PR #375 P2 correction (source-only)
+
+The Main route now guards *owner finalization* separately from the
+coordinator's original-plan effect. If a BaseException interrupts cleanup
+after the Host publication invocation is entered, it surfaces as
+InitialCheckpointUncertain(R5C1B1_OWNER_FINALIZATION_UNCERTAIN), with the
+original exception retained as cause. A pre-invocation signal and a
+coordinator exception whose cleanup succeeds preserve their existing
+semantics. The original plan and #337 journals remain unchanged, and the
+MainSupervisor stale-flag recovery may release the flock after the
+publishing method frame has unwound. This is an in-process source contract,
+not a claim of perfect arbitrary asynchronous-signal atomicity.

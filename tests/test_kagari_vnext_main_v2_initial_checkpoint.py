@@ -460,8 +460,11 @@ class InitialCheckpointTest(unittest.TestCase):
                 raise KeyboardInterrupt("synthetic signal before flag clear")
             original(owner, name, value)
         with patch.object(service.MainSupervisor, "__setattr__", new=interrupt):
-            with self.assertRaises(KeyboardInterrupt):
+            with self.assertRaises(coordinator.InitialCheckpointUncertain) as caught:
                 self.h.run()
+        self.assertEqual("R5C1B1_OWNER_FINALIZATION_UNCERTAIN", caught.exception.code)
+        self.assertEqual("UNCERTAIN", caught.exception.state)
+        self.assertIsInstance(caught.exception.__cause__, KeyboardInterrupt)
         self.assertEqual([True], fired)
         self.assertFalse(self.h.owner._entered)
         self.assertIsNone(self.h.owner._file)
@@ -472,6 +475,33 @@ class InitialCheckpointTest(unittest.TestCase):
         self.assertEqual({"writes": 1, "posts": 1, "views": 1}, self.h.stats)
         # A subsequent real owner should not inherit a stale flock.
         self.assertEqual("CONFIRMED", self.h.run()["initial_checkpoint"])
+
+    def test_interrupt_during_later_finalizer_assignment_reports_uncertain(self):
+        # The first active-flag clear is not the only interrupt point. An
+        # interruption after that clear must still report a durable unknown
+        # outcome and allow safe same-intent original recovery.
+        original = service.MainSupervisor.__setattr__
+        fired = []
+        def interrupt(owner, name, value):
+            if (name == "_initial_publish_entered" and value is False
+                    and getattr(owner, "_initial_publish_active", None) == 0
+                    and getattr(owner, "_initial_publish_host", None) is not None
+                    and not fired):
+                fired.append(True)
+                raise KeyboardInterrupt("synthetic finalizer signal after active clear")
+            original(owner, name, value)
+        with patch.object(service.MainSupervisor, "__setattr__", new=interrupt):
+            with self.assertRaises(coordinator.InitialCheckpointUncertain) as caught:
+                self.h.run()
+        self.assertEqual("R5C1B1_OWNER_FINALIZATION_UNCERTAIN", caught.exception.code)
+        self.assertIsInstance(caught.exception.__cause__, KeyboardInterrupt)
+        self.assertEqual([True], fired)
+        self.assertFalse(self.h.owner._entered)
+        self.assertIsNone(self.h.owner._file)
+        self.assertEqual(0, self.h.owner._initial_publish_active)
+        self.assertEqual({"writes": 1, "posts": 1, "views": 1}, self.h.stats)
+        self.assertEqual("CONFIRMED", self.h.run()["initial_checkpoint"])
+        self.assertEqual({"writes": 1, "posts": 1, "views": 1}, self.h.stats)
 
     def test_success_repeat_and_exact_canonical_identity_no_execution(self):
         before = (self.src.attached.git("rev-parse", "HEAD"),

@@ -1008,8 +1008,10 @@ class RepositoryMain:
         """
         if __package__:
             from .kagari_vnext_main_service import MainSupervisor
+            from .kagari_vnext_main_v2_initial_checkpoint import InitialCheckpointUncertain
         else:
             from kagari_vnext_main_service import MainSupervisor
+            from kagari_vnext_main_v2_initial_checkpoint import InitialCheckpointUncertain
         choice = self._selected_choice(issue)
         host = self.v2_initial_checkpoint_for_issue.get(issue)
         if host is None:
@@ -1033,25 +1035,35 @@ class RepositoryMain:
             if owner._initial_publish_active:
                 raise MainError("R5C1B1_ALREADY_PUBLISHING")
             # Enter the finally boundary BEFORE touching any active state.
-            # A signal/BaseException during the first assignment must not
-            # strand the repository singleton flock at __exit__.
+            # A signal/BaseException during initial setup has no effect yet.
+            invoked = False
             try:
                 owner._initial_publish_active = 1
                 owner._initial_publish_issue = issue
                 owner._initial_publish_host = host
                 owner._initial_publish_entered = False
+                # Any exceptional owner cleanup after this point must return
+                # typed UNCERTAIN, even if the Host call already returned.
+                invoked = True
                 return host.publish(
                     project=self.store.root, repository=self.store.repository, issue=issue,
                     branch_ref=choice.branch_ref, base_revision=choice.base_revision,
                     contract_id=choice.contract_id, read_issue=self.read_issue,
                     main_owner=owner)
             finally:
-                # Clear the exit-blocking field first. No new model/metadata
-                # effect can start outside this RLock while finalizing.
-                owner._initial_publish_active = 0
-                owner._initial_publish_entered = False
-                owner._initial_publish_host = None
-                owner._initial_publish_issue = None
+                try:
+                    # The RLock excludes a concurrent effect while finalizing.
+                    # The Supervisor separately reconciles a stale active flag
+                    # after this frame unwinds, not during a Host callback.
+                    owner._initial_publish_active = 0
+                    owner._initial_publish_entered = False
+                    owner._initial_publish_host = None
+                    owner._initial_publish_issue = None
+                except BaseException as error:
+                    if invoked:
+                        raise InitialCheckpointUncertain(
+                            "R5C1B1_OWNER_FINALIZATION_UNCERTAIN") from error
+                    raise
 
     def observe_v2(self, issue: int) -> dict:
         """Observe current v2 Host authority only; never fall back to v1."""
