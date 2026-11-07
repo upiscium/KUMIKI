@@ -407,12 +407,35 @@ class MetadataV2Test(unittest.TestCase):
             self.fixture.store(writer=False).publish_issue("101", objects, record_update=(None, record_id))
         self.assertEqual([], self.fixture.calls)
         self.publish()
-        for missing in ("retention_policy", "verify_terminal", "archive_writer"):
+        for missing in ("verify_terminal", "archive_writer"):
             with self.subTest(missing=missing):
                 before = len(self.fixture.calls)
                 with self.assertRaisesRegex(v2.InvalidMetadata, "archive requires"):
                     self.archive(**{missing: None})
                 self.assertEqual(before, len(self.fixture.calls))
+
+    def test_ordinary_archive_without_ruleset_label_or_receive_hook(self):
+        first, _ = self.publish()
+        # This disposable Git fixture has no protected-branch hook. Metadata
+        # archive construction works as an ordinary KUMIKI-owned Git branch.
+        (self.fixture.bare / "hooks/update").unlink()
+        merged = self.archive(retention_policy=None)
+        self.assertEqual((self.fixture.genesis, first),
+                         self.store.validation().archive(merged).parents)
+        request = self.fixture.calls[-1]
+        self.assertIsNone(request.retention_policy)
+        self.assertEqual(v2.ARCHIVE_REF, request.ref)
+        self.assertEqual(first, self.fixture.observe(
+            v2.issue_ref("101"), time.monotonic() + 2).commit)
+
+    def test_invalid_legacy_policy_labels_fail_without_effect(self):
+        self.publish()
+        before = len(self.fixture.calls)
+        for invalid in ("", "  ", False, 0, [], "x" * 513):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(v2.InvalidMetadata, "legacy policy"):
+                    self.archive(retention_policy=invalid)
+        self.assertEqual(before, len(self.fixture.calls))
 
     def test_disposition_is_not_terminal_proof_and_verifier_gets_exact_bindings(self):
         issue, _ = self.publish()

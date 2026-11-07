@@ -1,5 +1,7 @@
 # KAGARI Metadata v2 — #337 Phase 3A offline preflight (R1)
 
+> **Current #337 policy supersedes the external Archive-protection gates below (2026-11-07).** KUMIKI Metadata v2 uses ordinary Git Archive/Issue branches. Neither GitHub Rulesets, Branch Protection, admin/settings changes nor dedicated Apps are required. Earlier retention-policy/bypass/negative-actor requirements in this historical phase document are **not active acceptance gates**. See [ordinary-branch contract](kagari-metadata-v2-ordinary-branch.md) and KUMIKI Issue #337 for the current contract. Preserve the original historical test results; do not interpret them as current ordinary-branch canary proof.
+
 **Status: source-only implementation.** This is *not* a GitHub adapter,
 read-only B0 proof, remote identity checker, credential verifier, permission
 grant, Ruleset installation, Task/Host binding, remote conditional deletion,

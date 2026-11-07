@@ -123,9 +123,12 @@ class RefState:
 class Update:
     """Exact Host authorization/CAS request; never a transferable credential.
 
-    Host atomically checks BOTH refs, their direct type, expected-old values,
+    The trusted Host confirms current KUMIKI-owned refs, expected-old values,
     genesis/repository provenance and first-lifecycle reservation. For archive,
-    it also verifies terminal Task, no writers and server retention policy.
+    it also verifies terminal Task and no KUMIKI-owned concurrent writers.
+    Ordinary Git has no cross-ref atomic CAS or immutable server retention.
+    The optional retention_policy label remains for old journal compatibility;
+    None means ordinary branch mode, not a GitHub Ruleset grant.
     It stores bundle objects, then non-force updates ONLY `ref` to candidate.
     """
 

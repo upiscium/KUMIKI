@@ -72,7 +72,9 @@ class ArchiveOperation:
     expected_archive: str
     expected_issue: str
     record_id: str
-    retention_policy: str
+    # Legacy v2 journal label. None is a new ordinary-branch v3 operation.
+    # This is never proof of external GitHub Ruleset enforcement.
+    retention_policy: str | None = None
 
     def __post_init__(self) -> None:
         require(type(self.operation_id) is str and _HEX32.fullmatch(self.operation_id)
@@ -84,10 +86,11 @@ class ArchiveOperation:
             raise ArchiveRefused("archive_expected_oid_invalid") from None
         require(type(self.record_id) is str and _HEX64.fullmatch(self.record_id)
                 is not None, "archive_record_id_invalid")
-        require(type(self.retention_policy) is str
-                and 1 <= len(self.retention_policy) <= 512
-                and bool(self.retention_policy.strip()),
-                "archive_policy_identifier_required")
+        if self.retention_policy is not None:
+            require(type(self.retention_policy) is str
+                    and 1 <= len(self.retention_policy) <= 512
+                    and bool(self.retention_policy.strip()),
+                    "archive_legacy_policy_identifier_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,8 +394,10 @@ class ArchiveHost:
         inventory = sorted(
             (object_id, kind, hashlib.sha256(raw).hexdigest())
             for object_id, (kind, raw) in bundle.objects.items())
-        return {
-            "schema": 1, "operation": "archive-issue", "version": 2,
+        ordinary = op.retention_policy is None
+        record = {
+            "schema": 1, "operation": "archive-issue",
+            "version": 3 if ordinary else 2,
             "repository_id": self.identity.repository_id,
             "repository": self.identity.repository,
             "genesis": self.repository_identity.genesis,
@@ -405,12 +410,17 @@ class ArchiveHost:
             "contract_id": self.registered.contract_id,
             "branch_ref": self.registered.branch_ref,
             "base_revision": self.registered.base_revision,
-            "policy": op.retention_policy,
             "candidate": candidate,
             "terminal_facts": asdict(fact),
             "bundle_object_count": len(inventory),
             "bundle_sha256": hashlib.sha256(_canonical(inventory)).hexdigest(),
         }
+        if ordinary:
+            record["branch_mode"] = "ordinary-git-branch"
+        else:
+            # Retain the exact v2 schema for unknown-ACK recovery.
+            record["policy"] = op.retention_policy
+        return record
 
     def _saved(self, op: ArchiveOperation, key: str) -> dict | None:
         try:
@@ -419,27 +429,44 @@ class ArchiveHost:
             raise ArchiveUncertain("archive_journal_unreadable") from error
         if saved is None:
             return None
-        require(type(saved) is dict and saved.keys() == {
+        # The journal key is A/C-derived for both modes. An unresolved
+        # legacy intent must not be reinterpreted in ordinary mode, nor
+        # overwritten by a different record for the same key.
+        ordinary = op.retention_policy is None
+        common_fields = {
             "schema", "operation", "version", "repository_id", "repository",
             "genesis", "attach_digest", "issue", "operation_id",
             "archive_before", "issue_before", "record_id", "contract_id",
-            "branch_ref", "base_revision", "policy", "candidate",
+            "branch_ref", "base_revision", "candidate",
             "terminal_facts", "bundle_object_count", "bundle_sha256",
-        }, "archive_journal_schema_invalid")
+        }
+        mode_field = "branch_mode" if ordinary else "policy"
+        require(type(saved) is dict
+                and saved.keys() == common_fields | {mode_field},
+                "archive_journal_schema_or_mode_mismatch")
+        require(type(saved["schema"]) is int
+                and type(saved["version"]) is int
+                and type(saved["repository_id"]) is int
+                and type(saved["issue"]) is int
+                and type(saved[mode_field]) is str,
+                "archive_journal_scalar_types_invalid")
         require((saved["schema"], saved["operation"], saved["version"],
                  saved["repository_id"], saved["repository"],
                  saved["genesis"], saved["attach_digest"], saved["issue"],
                  saved["operation_id"], saved["archive_before"],
                  saved["issue_before"], saved["record_id"],
                  saved["contract_id"], saved["branch_ref"],
-                 saved["base_revision"], saved["policy"]) ==
-                (1, "archive-issue", 2, self.identity.repository_id,
-                 self.identity.repository, self.repository_identity.genesis,
-                 self.identity.attach_digest, self.registered.issue,
-                 op.operation_id, op.expected_archive, op.expected_issue,
-                 op.record_id, self.registered.contract_id,
-                 self.registered.branch_ref, self.registered.base_revision,
-                 op.retention_policy), "archive_journal_identity_mismatch")
+                 saved["base_revision"]) ==
+                (1, "archive-issue", 3 if ordinary else 2,
+                 self.identity.repository_id, self.identity.repository,
+                 self.repository_identity.genesis, self.identity.attach_digest,
+                 self.registered.issue, op.operation_id, op.expected_archive,
+                 op.expected_issue, op.record_id, self.registered.contract_id,
+                 self.registered.branch_ref, self.registered.base_revision),
+                "archive_journal_identity_mismatch")
+        require(saved[mode_field] ==
+                ("ordinary-git-branch" if ordinary else op.retention_policy),
+                "archive_journal_mode_or_policy_mismatch")
         try:
             oid(saved["candidate"])
         except (InvalidMetadata, TypeError, ValueError):
@@ -535,6 +562,11 @@ class ArchiveHost:
             self._attach()
             return self._confirm(op, saved["candidate"], state="RECOVERED")
 
+        # Once journal creation may have started, even failure while releasing
+        # a quiescence context is UNKNOWN, not a safe ordinary refusal.
+        # An ill-behaved __exit__ may suppress an exception entirely; detect
+        # fallthrough after the with statement instead of returning None.
+        effect_phase_entered = False
         try:
             held = self.hold_quiescence(op)
             with held as lock:
@@ -580,6 +612,7 @@ class ArchiveHost:
                     return True
 
                 def write(update: Update, bundle: Bundle, deadline: float) -> bool:
+                    nonlocal effect_phase_entered
                     # Hold exact same Host lease, current record, Product state
                     # and terminal/Human facts immediately before Archive CAS.
                     require(update.repository == self.identity.repository
@@ -607,6 +640,9 @@ class ArchiveHost:
                     require(time.monotonic() < deadline,
                             "archive_deadline_expired_before_intent")
                     # Journal create-once / fsync MUST precede external writer.
+                    # Set uncertainty before attempting journal persistence:
+                    # the call could have durably written then lost its ACK.
+                    effect_phase_entered = True
                     self.journal.create(key, self._record(op, facts, bundle.commit, bundle))
                     if time.monotonic() >= deadline:
                         raise ArchiveUncertain("archive_deadline_after_intent")
@@ -656,8 +692,27 @@ class ArchiveHost:
                     return result
                 except (ArchiveRefused, ArchiveUncertain) as error:
                     raise ArchiveUncertain("archive_post_effect_confirmation_unknown") from error
-        except (ArchiveRefused, ArchiveUncertain):
+            # Only reachable if the Host context suppressed an exception in
+            # the body. Never return None as a fake successful Archive.
+            if effect_phase_entered:
+                raise ArchiveUncertain("archive_context_suppressed_after_intent")
+            raise ArchiveRefused("archive_context_suppressed_before_intent")
+        except ArchiveUncertain:
+            raise
+        except ArchiveRefused as error:
+            if effect_phase_entered:
+                raise ArchiveUncertain("archive_context_refusal_after_intent") from error
             raise
         except Exception as error:
+            if effect_phase_entered:
+                raise ArchiveUncertain("archive_context_exit_unknown_after_intent") from error
             # Missing/unavailable Host context/lock is never a permit.
             raise ArchiveRefused("archive_host_quiescence_unavailable") from error
+        except BaseException as error:
+            # KeyboardInterrupt/SystemExit raised by a Host context __exit__
+            # after the original intent can mask an already applied Git
+            # effect. Keep the journal-owned UNKNOWN outcome explicit.
+            # Before an intent may exist, preserve normal interrupt semantics.
+            if effect_phase_entered:
+                raise ArchiveUncertain("archive_context_interrupted_after_intent") from error
+            raise
