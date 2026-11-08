@@ -1,13 +1,18 @@
 # #340 R6B D1B1 R1 — synthetic read-only Host binding shapes
 
 **SOURCE-ONLY / UNTRUSTED SYNTHETIC / NON-WIRED / NO AUTHORITY.**
-Base: `main@62e3a363bb573e12e378297c5bc34d329bc1e338`, isolated
-remote-free copy. R0 adds two uncommitted files to this scratch checkout;
-R1 adds only this doc, a private pure module and synthetic tests. Existing
-tracked files remain unchanged. The initial R1 candidates were drafted by
-the supervising assistant; GPT-6 Astra max subsequently modified the R1
-module and tests to reject contradictory synthetic journal evidence.
-This document's review corrections were applied separately. No claim is
+Original R1 development baseline: isolated remote-free
+`main@62e3a363bb573e12e378297c5bc34d329bc1e338`.
+Source publication: Draft PR #385, based on
+`main@02c26d26c7656380dacb854ab1cde726f6f6b579`.
+The original published HEAD at the time of independent PR-mode review was
+`b259e1f5f91433849deb2bd37aa07547f573f071`; any later documentation
+correction has its own review and publication lifecycle.
+The combined source-only PR adds two R0 files and three R1 files, with
+no changes to pre-existing tracked files. The initial R1 candidates were
+drafted by the supervising assistant; GPT-6 Astra max subsequently modified
+the R1 module and tests to reject contradictory synthetic journal evidence.
+The documentation's review corrections were applied separately. No claim is
 made that Astra max authored the entire artifact.
 
 ## Scope and reason
@@ -111,14 +116,20 @@ renames, ambiguous histories, invalid/mismatched claims and permanent
 non-grants. A static source test rejects Main/transport/Host imports and
 filesystem/process/network effect operations in this module. This is
 synthetic correctness evidence **only**, not an independent authority,
-crash, credential or model security qualification. Review the exact
-published source independently before any later Commit/Push/PR.
+crash, credential or model security qualification. The original PR #385
+published HEAD `b259e1f5f91433849deb2bd37aa07547f573f071`
+(before this documentation amendment) received independent read-only
+security and correctness reviews reporting no confirmed P0–P2 findings;
+these are not formal GitHub approvals and do not cover this amendment.
+Any further source change requires its own exact-content review and a
+fresh exact-published-HEAD check after publication.
 
 ```sh
 NIX_CONFIG='eval-cache = false' PYTHONDONTWRITEBYTECODE=1 nix develop --offline -c python3 -B -m unittest -q tests.test_kagari_vnext_claude_r6b_phase_d1b1_r1
 ```
 
 **STOP:** No R1 Main/Lane/Transport wiring, no Host state changes, no
-journal root creation, no real Task, no executor activation, and no Git
-publication. R1 source-only candidates remain unpublished; Issue #340
-remains Open.
+journal root creation, no real Task and no executor activation. The five
+source-only R0/R1 files have been published in **Draft PR #385 only**;
+the PR remains unmerged and Issue #340 remains Open. No Ready/Merge,
+deployment or runtime activation is authorized by this publication.

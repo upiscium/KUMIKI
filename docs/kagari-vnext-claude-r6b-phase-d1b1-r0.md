@@ -1,10 +1,17 @@
 # #340 R6B Phase D1B1 R0 — standalone one-shot RecoveryJournal contract
 
 **SOURCE-ONLY / DESIGN + SYNTHETIC TESTS / NON-WIRED / UNQUALIFIED. No activation.**
-Baseline: isolated, remote-free `main@62e3a363bb573e12e378297c5bc34d329bc1e338`.
-Only this document and `tests/test_kagari_vnext_claude_r6b_phase_d1b1_r0.py`
-are R0 additions; existing tracked files, KAGARI Main, Lane, transport, default
-OpenCode and `CLAUDE_EXECUTOR_UNQUALIFIED` remain untouched.
+Original R0 development baseline: isolated, remote-free
+`main@62e3a363bb573e12e378297c5bc34d329bc1e338`.
+Source publication: Draft PR #385, based on
+`main@02c26d26c7656380dacb854ab1cde726f6f6b579`.
+The original published HEAD at the time of independent PR-mode review was
+`b259e1f5f91433849deb2bd37aa07547f573f071`; any later documentation
+correction has its own review and publication lifecycle.
+This document and `tests/test_kagari_vnext_claude_r6b_phase_d1b1_r0.py`
+are the **R0 increment**; the combined PR also adds three R1 files.
+Existing Main, Lane, transport, default OpenCode and
+`CLAUDE_EXECUTOR_UNQUALIFIED` remain untouched.
 
 ## Decision: reduced operational guarantee, not equivalent security
 
