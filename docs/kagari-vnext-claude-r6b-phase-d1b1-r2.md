@@ -1,9 +1,13 @@
 # #340 R6B D1B1 R2 — existing Host journal read-only observer
 
-**Status: local source-only candidate; no Commit/Push/PR, no Host setup,
-no Claude CLI, no Main/Task wiring, no runtime activation.**
+**Publication track: source-only Draft PR #386; nonclosing and not
+a runtime qualification. No Ready/Merge/Deploy/activation, Host setup,
+Claude CLI invocation or Main/Task wiring.**
 Based on `main@f8bba7cdb55a0fa48ac194ee538724064226214e` after R0/R1
-entered main via PR #385. The repository copy is isolated and has no remote.
+entered main via PR #385. The original R2 implementation was developed in
+an isolated remote-free copy, then published through the pinned Source Guard.
+Subsequent local corrections require separate Commit/Push approval and
+exact-published-HEAD checks; a local edit is not automatically published.
 
 ## Purpose and boundary
 
@@ -58,8 +62,8 @@ HTTP or Claude/Git subprocess operation.
 | Observed state | R2 diagnostic |
 | --- | --- |
 | Invalid numeric repo ID or Issue | `REFUSED` |
-| Noncanonical/unsafe home, symlink or unsafe directory | `REFUSED` |
-| Missing owner home or Host directory | `UNKNOWN` |
+| Noncanonical/unsafe home, including dangling symlinks at or above passwd-home, or unsafe directory | `REFUSED` |
+| Genuinely absent nonsymlink owner home or Host directory | `UNKNOWN` |
 | Existing root, but no reservation key | `UNKNOWN` — **not authenticated genesis** |
 | Malformed/symlink record, read error or uncertain history | `UNKNOWN` |
 | Existing readable record (even when it claims success/permission) | `OBSERVED_BLOCKED` — **never a dispatch grant** |
@@ -106,11 +110,22 @@ and altering `TemporaryDirectory` fixtures. It covers:
   and symlinked record;
 - symlinked/unsafe directory, valid private symlink targets, replaced root
   during read, read-only group-permissive ancestors, invalid numeric IDs,
-  bad passwd home and static source-effect checks.
+  fake-passwd valid/dangling symlinks at or above home versus genuinely
+  missing home or parent directories;
+- write-capable `os.open` (including `O_CREAT` and full `O_TMPFILE` mask),
+  `io.open`, `os.write`, directory creation and journal-create guards,
+  combined with a before/after snapshot of the disposable fixture tree,
+  including the passwd-home directory's own mode.
+  Deliberately injected `O_CREAT` attempts (including `O_RDONLY|O_CREAT`)
+  must be detected by the guard; an injected home `chmod` must be detected
+  by the fixture snapshot even without direct interception.
 
 R2's test fixture constructor calls `RecoveryJournal.create` to fabricate
-a reservation; **R2 itself never calls it**. These tests do not perform
-actual Host configuration changes, real power loss or GitHub/Claude I/O.
+a reservation; **R2 itself never calls it**. The no-write guard and
+fixture snapshot verify selected supported synthetic operations; they are
+**not a complete OS-level confinement or arbitrary side-effect proof**.
+These tests do not perform actual Host configuration changes, real power
+loss or GitHub/Claude I/O.
 
 Reproduce on the isolated checkout:
 

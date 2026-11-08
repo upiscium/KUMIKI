@@ -6,6 +6,7 @@ The R2 observer itself has no bootstrap, mutation, CLI, Git or Task effects.
 from __future__ import annotations
 
 import ast
+import io
 from pathlib import Path
 import shutil
 import tempfile
@@ -205,16 +206,187 @@ class ExistingRootObserverTests(unittest.TestCase):
             self._expect(r2.observe_existing_host_journal(self.REPO, self.ISSUE),
                          "REFUSED", "owner_home_invalid")
 
+    def test_dangling_passwd_home_symlink_is_refused(self):
+        home = self.home / "passwd-home"
+        target = self.home / "missing-target"
+        home.symlink_to(target, target_is_directory=True)
+        with patch.object(r2.pwd, "getpwuid",
+                          return_value=SimpleNamespace(pw_dir=str(home))):
+            self._expect(r2.observe_existing_host_journal(self.REPO, self.ISSUE),
+                         "REFUSED", "owner_home_unsafe")
+        self.assertTrue(home.is_symlink())
+        self.assertFalse(target.exists())
+        self.assertEqual(list(self.home.iterdir()), [home])
+
+    def test_missing_passwd_home_is_unknown_and_creates_nothing(self):
+        home = self.home / "missing-home"
+        self.assertFalse(home.exists())
+        self.assertFalse(home.is_symlink())
+        with patch.object(r2.pwd, "getpwuid",
+                          return_value=SimpleNamespace(pw_dir=str(home))):
+            self._expect(r2.observe_existing_host_journal(self.REPO, self.ISSUE),
+                         "UNKNOWN", "owner_home_missing")
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_valid_passwd_home_symlink_is_refused(self):
+        home = self.home / "passwd-home"
+        target = self.home / "existing-target"
+        target.mkdir(mode=0o700)
+        home.symlink_to(target, target_is_directory=True)
+        with patch.object(r2.pwd, "getpwuid",
+                          return_value=SimpleNamespace(pw_dir=str(home))):
+            self._expect(r2.observe_existing_host_journal(self.REPO, self.ISSUE),
+                         "REFUSED", "owner_home_unsafe")
+        self.assertTrue(home.is_symlink())
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual(set(self.home.iterdir()), {home, target})
+
+    def test_dangling_passwd_home_ancestor_symlink_is_refused(self):
+        link = self.home / "dangling-ancestor"
+        missing_target = self.home / "nonexistent-target"
+        link.symlink_to(missing_target, target_is_directory=True)
+        home = link / "child-home"
+        with patch.object(r2.pwd, "getpwuid",
+                          return_value=SimpleNamespace(pw_dir=str(home))):
+            self._expect(r2.observe_existing_host_journal(self.REPO, self.ISSUE),
+                         "REFUSED", "owner_home_unsafe")
+        self.assertTrue(link.is_symlink())
+        self.assertFalse(missing_target.exists())
+        self.assertFalse(home.exists())
+        self.assertEqual(list(self.home.iterdir()), [link])
+
+    def test_missing_passwd_home_parent_is_unknown(self):
+        home = self.home / "missing-plain-parent" / "child-home"
+        with patch.object(r2.pwd, "getpwuid",
+                          return_value=SimpleNamespace(pw_dir=str(home))):
+            self._expect(r2.observe_existing_host_journal(self.REPO, self.ISSUE),
+                         "UNKNOWN", "owner_home_missing")
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def _snapshot_fixture(self):
+        """Capture every descendant file's bytes and directory mode."""
+        snapshot = {
+            ".": ("home-directory", self.home.lstat().st_mode & 0o777),
+        }
+        for entry in self.home.rglob("*"):
+            key = entry.relative_to(self.home).as_posix()
+            mode = entry.lstat().st_mode & 0o777
+            if entry.is_symlink():
+                snapshot[key] = ("symlink", str(entry.readlink()), mode)
+            elif entry.is_file():
+                snapshot[key] = ("file", entry.read_bytes(), mode)
+            elif entry.is_dir():
+                snapshot[key] = ("directory", mode)
+            else:
+                snapshot[key] = ("other", mode)
+        return snapshot
+
+    def _observe_under_no_write_guard(self):
+        """Deny write-capable opens; detect residual fixture mutations.
+
+        All patches begin after synthetic fixture provisioning and end before
+        TemporaryDirectory cleanup. This is synthetic read-only coverage,
+        NOT a security sandbox for arbitrary Python/OS side effects.
+        """
+        before = self._snapshot_fixture()
+        attempts = []
+        real_os_open = r2.os.open
+        real_io_open = io.open
+        write_flags = (r2.os.O_WRONLY | r2.os.O_RDWR | r2.os.O_CREAT
+                       | r2.os.O_TRUNC | r2.os.O_APPEND | r2.os.O_EXCL)
+        tmpfile_flags = getattr(r2.os, "O_TMPFILE", 0)
+
+        def guard_os_open(path, flags, mode=0o777, *, dir_fd=None):
+            # Linux O_TMPFILE includes O_DIRECTORY; require the FULL mask.
+            if (flags & write_flags
+                    or (tmpfile_flags and flags & tmpfile_flags == tmpfile_flags)):
+                attempts.append("write-capable os.open")
+                raise PermissionError("write-capable os.open blocked")
+            return real_os_open(path, flags, mode, dir_fd=dir_fd)
+
+        def guard_io_open(file, mode="r", *args, **kwargs):
+            if isinstance(mode, str) and any(c in mode for c in "wax+"):
+                attempts.append("write-capable io.open")
+                raise PermissionError("write-capable io.open blocked")
+            return real_io_open(file, mode, *args, **kwargs)
+
+        def guard_mutation(*_args, **_kwargs):
+            attempts.append("mutation call")
+            raise PermissionError("mutation call blocked")
+
+        with patch.object(r2.os, "open", guard_os_open), \
+             patch.object(io, "open", guard_io_open), \
+             patch.object(r2.os, "write", guard_mutation), \
+             patch.object(r2.os, "mkdir", guard_mutation), \
+             patch.object(RecoveryJournal, "create", guard_mutation):
+            result = self._observe()
+        self.assertEqual(attempts, [], "write-capable operation attempted")
+        self.assertEqual(self._snapshot_fixture(), before,
+                         "observer modified the synthetic fixture tree")
+        return result
+
     def test_no_directory_or_record_write_from_observer(self):
         self._init_private_root()
         self._record()
-        def unexpected(*_args, **_kwargs):
-            raise AssertionError("observer must not write or create")
-        # Patching begins only after synthetic fixture construction.
-        with patch.object(r2.os, "mkdir", side_effect=unexpected), \
-             patch.object(RecoveryJournal, "create", side_effect=unexpected):
-            self._expect(self._observe(), "OBSERVED_BLOCKED",
-                         "existing_reservation_observed_only")
+        self._expect(self._observe_under_no_write_guard(), "OBSERVED_BLOCKED",
+                     "existing_reservation_observed_only")
+
+    def test_write_guard_detects_injected_os_creat_after_read(self):
+        self._init_private_root()
+        self._record()
+        original_read = RecoveryJournal.read
+        marker = self.root / "injected-would-create-file"
+
+        def injected_write(journal, key):
+            result = original_read(journal, key)
+            # Simulate the P2 regression, but ONLY inside TemporaryDirectory.
+            # The guard must intercept O_CREAT before the file exists.
+            fd = r2.os.open(marker, r2.os.O_CREAT | r2.os.O_EXCL
+                            | r2.os.O_WRONLY, 0o600)
+            r2.os.close(fd)
+            return result
+
+        with patch.object(RecoveryJournal, "read", injected_write):
+            with self.assertRaisesRegex(AssertionError, "write-capable operation"):
+                self._observe_under_no_write_guard()
+        self.assertFalse(marker.exists())
+
+    def test_write_guard_detects_injected_home_mode_change(self):
+        self._init_private_root()
+        self._record()
+        original_read = RecoveryJournal.read
+        self.home.chmod(0o700)
+
+        def injected_mode_change(journal, key):
+            result = original_read(journal, key)
+            # Synthetic mutation only; the observer itself has no chmod.
+            self.home.chmod(0o755)
+            return result
+
+        with patch.object(RecoveryJournal, "read", injected_mode_change):
+            with self.assertRaisesRegex(
+                    AssertionError, "observer modified the synthetic fixture tree"):
+                self._observe_under_no_write_guard()
+        self.assertEqual(self.home.lstat().st_mode & 0o777, 0o755)
+
+    def test_write_guard_detects_os_creat_without_write_mode(self):
+        self._init_private_root()
+        self._record()
+        original_read = RecoveryJournal.read
+        marker = self.root / "injected-creat-read-only-mode"
+
+        def injected_creat_rdonly(journal, key):
+            result = original_read(journal, key)
+            # O_CREAT with O_RDONLY alone may create a file on Linux;
+            # detect O_CREAT independently of O_EXCL or O_WRONLY.
+            fd = r2.os.open(marker, r2.os.O_CREAT | r2.os.O_RDONLY, 0o600)
+            r2.os.close(fd)
+            return result
+
+        with patch.object(RecoveryJournal, "read", injected_creat_rdonly):
+            with self.assertRaisesRegex(AssertionError, "write-capable operation"):
+                self._observe_under_no_write_guard()
+        self.assertFalse(marker.exists())
 
     def test_source_is_disconnected_from_main_and_write_capabilities(self):
         path = Path(r2.__file__)

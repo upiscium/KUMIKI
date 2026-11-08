@@ -77,6 +77,12 @@ def _observe_exact_existing_root(repository_id: int, issue: int) -> dict[str, st
     if not home.is_absolute():
         return _result("REFUSED", "owner_home_invalid")
     try:
+        # Inspect existing ancestors in root-to-leaf order. A dangling
+        # symlink in the passwd-home prefix is unsafe, not an absent home.
+        # This is a read-side classification, not a pathname-race guarantee.
+        for component in (*reversed(home.parents), home):
+            if stat.S_ISLNK(component.lstat().st_mode):
+                return _result("REFUSED", "owner_home_unsafe")
         if home.resolve(strict=True) != home:
             return _result("REFUSED", "owner_home_unsafe")
     except FileNotFoundError:
