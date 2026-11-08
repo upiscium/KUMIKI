@@ -32,17 +32,23 @@ For a first effect:
 4. Acquire a **Host-owned Human grant lease** that serializes cleanup grant
    revocation with the external ref effect. Obtain a fresh cleanup-specific
    Human decision **under that held lease**, scope-bound to repository numeric
-   ID, Issue ref, expected C, archived J and operation ID. A historical Archive
-   decision ID is refused. Revocation must use the *same* synchronization
-   domain; a boolean check without exclusive serialization is inadequate.
+   ID, Issue ref, expected C, archived J and operation ID. Compare the
+   cleanup decision against BOTH the current terminal decision ID and the
+   persisted original Archive J decision ID; neither may be reused, even
+   when those historical/current IDs differ. Revocation must use the *same*
+   synchronization domain; a boolean check without exclusive serialization
+   is inadequate.
 5. Requalify both held locks, current history, terminal observations, prior
    cleanup attempts and grant before and after create-once, file+directory
    **fsynced cleanup intent**. After an attempted journal create, any error is
    uncertain, never a new implied permit.
 6. Invoke **once** the caller's pinned `CleanupDeleteRequest` callback, then
    demand exact readback proving C absent with J still reachable, keeping
-   **both** Host locks held throughout effect and readback. Any uncertain
-   effect stays journal-owned.
+   **both** Host locks held throughout effect and readback. A `DELETED`
+   response is only returned after both Host contexts exit without error;
+   neither context may suppress a body or nested lock-release exception.
+   A post-intent release failure is uncertain and must be reconciled from
+   the saved cleanup intent, with no second deletion attempt.
 
 ## Actual effect adapter remains a separate gate
 

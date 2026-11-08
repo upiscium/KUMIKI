@@ -155,6 +155,26 @@ class CleanupHumanGrantLease:
         require(live is True, "cleanup_grant_lock_lost_or_revoked")
 
 
+class _NoSuppressExit:
+    """Never let a Host context hide a body or nested __exit__ exception.
+
+    In an ExitStack, an outer context can normally suppress the exception
+    raised by an inner context's __exit__, even during a pending return.
+    Host lifecycle/grant cleanup must not turn that unknown result into
+    successful ref deletion. Leave actual release to the injected context.
+    """
+
+    def __init__(self, context: AbstractContextManager) -> None:
+        self.context = context
+
+    def __enter__(self):
+        return self.context.__enter__()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        self.context.__exit__(exc_type, exc_value, traceback)
+        return False
+
+
 class CleanupHost:
     """Host-bound one-shot delete admission and read-only intent recovery.
 
@@ -318,6 +338,37 @@ class CleanupHost:
             raise CleanupRefused("cleanup_current_terminal_unverifiable") from error
         return facts
 
+    def _original_archive_decision_id(self, op: CleanupOperation) -> str:
+        """Read the *original* J publication's decision, not current facts.
+
+        The original Archive decision cannot be replayed as a cleanup grant
+        even if a new current terminal observation has a different ID.
+        CleanupHistoryReader independently validates the entire v3 journal
+        and original Archive DAG before/after grant admission.
+        """
+        h = self.history
+        key = archive_key(h.identity.repository_id, h.registered.issue,
+                          op.archive_operation.expected_archive,
+                          op.archive_operation.expected_issue)
+        try:
+            saved = h.journal.read(key)
+            require(type(saved) is dict
+                    and saved.get("operation") == "archive-issue"
+                    and type(saved.get("version")) is int
+                    and saved["version"] == 3
+                    and saved.get("branch_mode") == "ordinary-git-branch"
+                    and saved.get("operation_id") == op.archive_operation.operation_id
+                    and saved.get("candidate") == op.archive_outcome.archive_commit,
+                    "cleanup_original_archive_decision_unbound")
+            original = saved["terminal_facts"]["human_decision_id"]
+        except CleanupRefused:
+            raise
+        except Exception as error:
+            raise CleanupRefused("cleanup_original_archive_decision_unavailable") from error
+        require(type(original) is str and _HEX64.fullmatch(original) is not None,
+                "cleanup_original_archive_decision_invalid")
+        return original
+
     def _grant(self, approval: CleanupApproval) -> CleanupHumanGrant:
         try:
             grant = self.authorize(approval)
@@ -332,7 +383,9 @@ class CleanupHost:
                      grant.ref, grant.expected_old, grant.archived_j)
                 == (r.cleanup_id, r.repository_id, r.issue,
                     r.ref, r.expected_old, r.archived_j)
-                and grant.decision_id != approval.terminal_facts.human_decision_id,
+                and grant.decision_id != approval.terminal_facts.human_decision_id
+                and grant.decision_id != self._original_archive_decision_id(
+                    approval.operation),
                 "cleanup_fresh_human_grant_denied")
         return grant
 
@@ -385,10 +438,11 @@ class CleanupHost:
             return self._reconcile(op)
 
         intent_attempted = False
+        completed: CleanupOutcome | None = None
         deadline = time.monotonic() + self.history.limits.seconds
         try:
             with ExitStack() as stack:
-                lock = stack.enter_context(self.hold_quiescence(op))
+                lock = stack.enter_context(_NoSuppressExit(self.hold_quiescence(op)))
                 require(type(lock) is CleanupQuiescenceLease,
                         "cleanup_host_lock_required")
                 lock.check(op)
@@ -401,7 +455,8 @@ class CleanupHost:
                 approval = CleanupApproval(op, before, facts, r)
                 # The Host must hold the same grant synchronization lock
                 # used by Human revocation until delete and readback finish.
-                grant_lock = stack.enter_context(self.hold_human_grant(approval))
+                grant_lock = stack.enter_context(
+                    _NoSuppressExit(self.hold_human_grant(approval)))
                 require(type(grant_lock) is CleanupHumanGrantLease,
                         "cleanup_human_grant_lock_required")
                 grant = self._grant(approval)
@@ -459,8 +514,12 @@ class CleanupHost:
                 lock.check(op)
                 grant_lock.check(approval, grant_again)
                 self._attach()
-                return self._outcome(op, "DELETED")
-            raise CleanupRefused("cleanup_context_suppressed")
+                # Do not report DELETED until BOTH Host contexts have exited
+                # without any suppressed/raised exit error.
+                completed = self._outcome(op, "DELETED")
+            require(type(completed) is CleanupOutcome,
+                    "cleanup_context_suppressed")
+            return completed
         except CleanupUncertain:
             raise
         except CleanupRefused as error:

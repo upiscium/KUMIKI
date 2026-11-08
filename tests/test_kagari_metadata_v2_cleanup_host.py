@@ -323,5 +323,116 @@ class CleanupHostTest(unittest.TestCase):
         self.assertEqual([], self.delete_calls)
         self.assertIsNone(self.local_intent())
 
+
+    def test_original_archive_human_decision_cannot_be_reused_as_cleanup(self):
+        # Regression: original J decision A, current decision B, cleanup
+        # presents A. Previously only B was rejected, so A was admitted.
+        original = self.case.human_decision_id
+        self.assertEqual("e" * 64, original)
+        current = "d" * 64
+        self.assertNotEqual(original, current)
+
+        def current_terminal(op, history):
+            return replace(self.terminal(op, history), human_decision_id=current)
+
+        def replay_archive_grant(approval):
+            return replace(self.authorize(approval), decision_id=original)
+
+        @contextmanager
+        def compatible_grant_lock(approval):
+            with self.grant_mutex:
+                self.grant_holds += 1
+                try:
+                    yield CleanupHumanGrantLease(
+                        lambda actual, grant: self.grant_holds == 1
+                        and actual == approval and grant.decision_id == original)
+                finally:
+                    self.grant_holds -= 1
+
+        with self.assertRaisesRegex(CleanupRefused, "fresh_human_grant_denied"):
+            self.run_cleanup(terminal=current_terminal,
+                             authorize=replay_archive_grant,
+                             grant_hold=compatible_grant_lock)
+        self.assertIsNone(self.local_intent())
+        self.assertEqual([], self.delete_calls)
+
+    def test_distinct_original_current_and_fresh_cleanup_decisions_pass(self):
+        original = self.case.human_decision_id
+        current = "d" * 64
+        fresh = "f" * 64
+        self.assertEqual(3, len({original, current, fresh}))
+
+        def current_terminal(op, history):
+            return replace(self.terminal(op, history), human_decision_id=current)
+
+        self.assertEqual("DELETED",
+                         self.run_cleanup(terminal=current_terminal).state)
+        self.assertEqual(1, len(self.delete_calls))
+        self.assertEqual(fresh, self.local_intent()["decision_id"])
+
+    def test_grant_exit_error_suppressed_by_outer_context_is_uncertain(self):
+        # Regression: an ExitStack pending return once allowed outer __exit__
+        # to swallow inner __exit__ failure and falsely return DELETED.
+        @contextmanager
+        def grant_exit_raises(approval):
+            with self.grant_mutex:
+                self.grant_holds += 1
+                try:
+                    yield CleanupHumanGrantLease(
+                        lambda actual, grant: actual == approval
+                        and self.granted and self.grant_holds == 1
+                        and grant.decision_id == "f" * 64)
+                finally:
+                    self.grant_holds -= 1
+            raise OSError("synthetic grant unlock failure")
+
+        @contextmanager
+        def outer_suppresses_grant_error(op):
+            self.holds += 1
+            try:
+                try:
+                    yield CleanupQuiescenceLease(
+                        lambda actual: self.lock_valid
+                        and actual == op and self.holds == 1)
+                except OSError:
+                    # A hostile/misbehaving outer Host context swallows an
+                    # inner lock release failure, just like ExitStack can.
+                    pass
+            finally:
+                self.holds -= 1
+
+        with self.assertRaisesRegex(CleanupUncertain,
+                                    "cleanup_interrupted_after_intent"):
+            self.run_cleanup(hold=outer_suppresses_grant_error,
+                             grant_hold=grant_exit_raises)
+        self.assertEqual(1, len(self.delete_calls))
+        self.assertIsNotNone(self.local_intent())
+        self.assertEqual(0, self.holds)
+        self.assertEqual(0, self.grant_holds)
+        self.assertIsNone(self.case.observation(issue_ref("101")))
+        # Journal-based recovery observes success but cannot execute again.
+        self.assertEqual("DELETED", self.run_cleanup().state)
+        self.assertEqual(1, len(self.delete_calls))
+
+    def test_lifecycle_context_cannot_suppress_pre_intent_refusal(self):
+        @contextmanager
+        def suppressing_hold(op):
+            self.holds += 1
+            try:
+                try:
+                    yield CleanupQuiescenceLease(
+                        lambda actual: self.lock_valid
+                        and actual == op and self.holds == 1)
+                except CleanupRefused:
+                    pass
+            finally:
+                self.holds -= 1
+
+        self.granted = False
+        with self.assertRaisesRegex(CleanupRefused, "fresh_human_grant_denied"):
+            self.run_cleanup(hold=suppressing_hold)
+        self.assertIsNone(self.local_intent())
+        self.assertEqual([], self.delete_calls)
+
 if __name__ == "__main__":
     unittest.main()
