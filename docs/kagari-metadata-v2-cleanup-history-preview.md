@@ -1,11 +1,13 @@
-# KUMIKI #337 — P3C/B0 Cleanup History Readback (local source-only candidate)
+# KUMIKI #337 — P3C/B0 Cleanup History Readback (merged read-only source)
 
 **Authority:** Issue #337 ordinary Git branches decision (2026-11-07).
 **Source baseline:** `main@f8bba7cdb55a0fa48ac194ee538724064226214e`.
-**Status:** new source-only module + isolated local tests, not published/installed/
-activated. No remote GitHub Metadata ref effect, Issue deletion, PR, Release or
-model. The original synthetic GitHub P3C-A acceptance is historical proof of
-normal Git delete transport, not a production Host grant.
+**Status (updated after #387 merge):** P3C/B0 read-only source/test/docs merged
+as PR #387 on 2026-11-08 at main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d;
+not installed or activated. No production GitHub Metadata-ref deletion, GA
+release, or model effect. The earlier disposable GitHub P3C-A acceptance is
+historical transport proof, not a current production Host grant. P3C/B1
+remains a separate, local-only source candidate (see cleanup-host-preview).
 
 ## Minimal role
 
