@@ -7,9 +7,10 @@ as PR #387 on 2026-11-08 at main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d;
 not installed or activated. No production GitHub Metadata-ref deletion, GA
 release, or model effect. The earlier disposable GitHub P3C-A acceptance is
 historical transport proof, not a current production Host grant. P3C/B1
-source-only Host coordination was subsequently published in Draft PR #390
-(R1 HEAD `2a925dc632d62b0e59bca9d563b17835cbb55422`); no real CLI
-cleanup adapter or production activation is implied (see cleanup-host-preview).
+source-only Host coordination was subsequently published for review through
+nonclosing PR #390 (initially Draft). Consult the PR for the moving HEAD and
+review status; no real CLI cleanup adapter or production activation is implied
+(see cleanup-host-preview).
 
 ## Minimal role
 

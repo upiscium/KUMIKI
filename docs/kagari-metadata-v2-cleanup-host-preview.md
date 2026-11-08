@@ -1,7 +1,7 @@
 # KUMIKI #337 — P3C/B1 Exact-Lease Cleanup Host (source-only preview)
 
-**Review base:** merged #387 / `main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d` (historical PR base).
-**Publication:** source-only P3C/B1 is published in **Draft PR #390**, R0 `363c6acfe4ddc40e02e519e6b1dd4d584cb3bf60` and corrected R1 HEAD `2a925dc632d62b0e59bca9d563b17835cbb55422` (2026-11-08). The Adam Worktree is on `feat/337-p3c-b1-cleanup-host`; this documentation update is local-only until separately authorized for Commit/Push.
+**Review base:** merged #387 / `main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d` (historical PR base, not the current moving main).
+**Source publication:** P3C/B1 source/test/docs were published for review through nonclosing PR #390 (opened as Draft). Consult the PR for its current lifecycle, HEAD, CI and review evidence; this source document does not assert those moving values or a local publication state.
 **Runtime:** NOT installed/activated. No production GitHub Metadata ref mutation, provider I/O or model/Task execution has been performed by this source-only implementation.
 
 ## Boundary
@@ -82,6 +82,27 @@ than being replaced. In particular `STILL_C` never triggers a blind retry.
 A new independently authorized recovery protocol would be required for any
 new external attempt after an unknown outcome.
 
+## B1-A/B1 cross-protocol admission (not yet implemented)
+
+Merged #388 introduced `CleanupIntentHost` (B1-A), which persists an
+**original-C-scoped reservation** and a separate prepared-only intent. The
+B1 `CleanupHost` in PR #390 instead owns a **C/J-scoped cleanup intent** and
+an injected one-shot delete callback. These journal keys and APIs do not
+implicitly inspect or exclude one another, even though both use the same
+`RecoveryJournal` directory. Neither a B1-A prepared receipt nor a B1 saved
+intent is a transferable permission to delete.
+
+Before any live Host wiring, `prior_attempts_cleared` must inspect **both**
+protocols under the **same real lifecycle synchronization domain**, refuse
+unresolved reservations, ambiguous writes and unknown effects for the same
+repository/Issue/original C, and require an explicitly approved recovery or
+handoff. The shared state machine must reconcile B1-A's separately planned
+effect-attempt marker with B1's conservative intent-first/no-retry behavior;
+neither side may silently replace receipts or retry a remote effect. Mixed
+protocol-order, concurrent admission, crash/restart and moved-J/C regression
+tests are still required. Source-only coexistence is **not** production
+cross-protocol exclusion or permission to activate a deletion adapter.
+
 ## Tests and acceptance separation
 
 `tests/test_kagari_metadata_v2_cleanup_host.py` exercises local disposable
@@ -91,18 +112,18 @@ unknown ACK both sides of effect, invalid Human/Task/lock authority,
 cross-attempt collision, and poisoned saved intent.
 
 The local fixture's `git update-ref -d <ref> <old>` is **not** a proof of
-the future CLI remote `--force-with-lease` adapter. The reviewed R1 source
-was published to Draft PR #390 under the pinned Source Guard. At R1 HEAD
-`2a925dc632d62b0e59bca9d563b17835cbb55422`, local focused + adjacent
-regressions passed **76/76**, GitHub Template CI completed **15/15 jobs** with
-**16/16 PR checks PASS**, and independent exact-published-HEAD OpenCode
-Correctness / Security PR-mode reviews both returned **PASS** (source-only).
+the future CLI remote `--force-with-lease` adapter. The R1 source checkpoint
+passed **76/76** local tests, **15/15** GitHub CI jobs and **16/16** PR checks,
+with independent Correctness/Security source-only reviews PASS. The subsequent
+docs-only R2 also passed exact-HEAD CI. A synthetic latest-main source snapshot
+passed **97/97** combined B1-A/B1 tests, but that suite did **not** exercise
+cross-protocol reservation handoff or prove a real deletion adapter. The exact
+published SHAs, CI runs and independent review evidence are in PR #390.
 
 Remaining gates: verify/implement the real trusted CLI adapter and live Host
 Task/Session/grant provenance, integrate #140 recovery/cleanup scheduling,
 reconfirm historical versioned PR checkpoints after actual delete via fresh
 clone, and run a separately authorized disposable GitHub canary with independent
-correctness/security review. The existing Draft PR remains nonclosing; a
-separate Human decision is required for any subsequent source publication,
-Ready/Merge, and optional runtime activation. Preserve #337/#291 OPEN and
-v1 behavior unchanged.
+correctness/security review. The PR is nonclosing, and separate Human decisions
+are required for subsequent source publication, Ready/Merge, and optional runtime
+activation. Preserve #337/#291 OPEN and v1 behavior unchanged.
