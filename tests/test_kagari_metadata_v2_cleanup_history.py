@@ -188,6 +188,86 @@ class CleanupHistoryReaderTest(unittest.TestCase):
             path.write_bytes(original)
         self.assertEqual("PRESENT_EXACT", self.inspect().issue_ref_state)
 
+    def test_semantically_invalid_historical_terminal_facts_fail_closed(self):
+        # The journal can retain well-typed but impossible prior Host facts.
+        # ArchiveHost._facts could not have accepted any of these snapshots.
+        entries = tuple(self.case.jpath.iterdir())
+        self.assertEqual(1, len(entries))
+        path = entries[0]
+        original = path.read_bytes()
+        def replace_field(name, value):
+            return lambda d: d["terminal_facts"].__setitem__(name, value)
+        cases = (
+            ("not_stopped", replace_field("session_stopped", False)),
+            ("writer_running", replace_field("metadata_writers_quiescent", False)),
+            ("unique_product_work", replace_field("no_unpublished_product_work", False)),
+            ("product_unpreserved", replace_field("product_history_preserved", False)),
+            ("unproved_product_ancestry", replace_field("product_ancestry_proven", False)),
+            ("foreign_product_base_ref", replace_field("product_base_ref", "refs/heads/task-101")),
+            ("invalid_product_head_oid", replace_field("product_head_oid", "not-a-commit")),
+            ("invalid_product_base_oid", replace_field("product_base_oid", "not-a-commit")),
+            ("closed_unmerged_pr", replace_field("pr_state", "CLOSED")),
+            ("missing_merge_pr", replace_field("pr_number", None)),
+            ("foreign_pr_id", replace_field("pr_repository_id", RID + 1)),
+            ("foreign_pr_repository", replace_field("pr_repository", "other/repo")),
+            ("foreign_pr_issue", replace_field("pr_issue", 202)),
+            ("wrong_pr_head", replace_field("pr_head_oid", "f" * 40)),
+            ("wrong_pr_base", replace_field("pr_base_ref", "refs/heads/other")),
+            ("malformed_merge_oid", replace_field("pr_merge_oid", "invalid")),
+            ("foreign_replacement", replace_field("replacement_task", "202")),
+            ("route_not_record", replace_field("route", "CANCELLED")),
+        )
+        try:
+            for label, mutate in cases:
+                with self.subTest(case=label):
+                    value = json.loads(original)
+                    mutate(value)
+                    path.write_bytes(json.dumps(
+                        value, sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=True).encode("ascii"))
+                    with self.assertRaisesRegex(
+                        CleanupHistoryRefused, "terminal_semantics_invalid"):
+                        self.inspect()
+        finally:
+            path.write_bytes(original)
+        self.assertEqual("PRESENT_EXACT", self.inspect().issue_ref_state)
+
+    def test_original_cancelled_and_superseded_routes_are_valid(self):
+        for disposition in (
+            {"kind": "cancelled"},
+            {"kind": "superseded",
+             "replacement": {"repository": REPOSITORY, "task": "202"}},
+        ):
+            with self.subTest(disposition=disposition):
+                case = archive_fixture.ArchiveHostTest("runTest")
+                case.setUp()
+                try:
+                    new_record = case._retire(disposition)
+                    case.registered = replace(case.registered, record_id=new_record)
+                    op = case.op(record_id=new_record, policy=None)
+                    outcome = case.archive(op)
+                    self.assertEqual("PUBLISHED", outcome.state)
+                    with gate.hold_verified(
+                            case.project, case.home, case.package) as lease:
+                        identity = BootstrapIdentity(
+                            RID, REPOSITORY, lease._fingerprint, "sha1")
+                    reader = CleanupHistoryReader(
+                        identity, case.repository_identity,
+                        case.registered, case.approved,
+                        journal=case.journal(),
+                        reader=case.fixture.reader, observer=case.fixture.observe)
+                    self.assertEqual(
+                        "PRESENT_EXACT", reader.inspect(op, outcome).issue_ref_state)
+                    case.fixture.git(
+                        "update-ref", "--no-deref", "-d",
+                        issue_ref("101"), op.expected_issue)
+                    self.assertEqual(
+                        "ALREADY_ABSENT", reader.inspect(op, outcome).issue_ref_state)
+                    self.assertEqual(outcome.archive_commit,
+                                     case.observation(ARCHIVE_REF))
+                finally:
+                    case.doCleanups()
+
     def test_ArchiveOutcome_does_not_grant_deletion(self):
         observation = self.inspect()
         self.assertFalse(hasattr(observation, "delete"))

@@ -28,6 +28,7 @@ import metadata_codec as codec
 
 
 _DIGEST64 = re.compile(r"[0-9a-f]{64}\Z")
+_OID40 = re.compile(r"[0-9a-f]{40}\Z")
 
 
 class CleanupHistoryRefused(ValueError):
@@ -37,6 +38,59 @@ class CleanupHistoryRefused(ValueError):
 def need(ok: bool, detail: str) -> None:
     if not ok:
         raise CleanupHistoryRefused(detail)
+
+
+def _check_original_terminal_semantics(facts: dict, disposition: dict | None,
+                                       *, repository_id: int, repository: str,
+                                       issue: int) -> None:
+    """Validate *historical* ArchiveHost admission shape, never current grant.
+
+    Facts are journal provenance and cannot prove present Task terminality.
+    They must nonetheless be a state ArchiveHost._facts could have accepted
+    at the original J publication, consistent with C's immutable disposition.
+    """
+    need(facts["product_base_ref"] == "refs/heads/main"
+         and _OID40.fullmatch(facts["product_head_oid"]) is not None
+         and _OID40.fullmatch(facts["product_base_oid"]) is not None
+         and facts["product_history_preserved"] is True
+         and facts["no_unpublished_product_work"] is True
+         and facts["session_stopped"] is True
+         and facts["metadata_writers_quiescent"] is True,
+         "cleanup_archive_terminal_semantics_invalid")
+    if disposition is None:
+        need(facts["route"] == "MERGED_PR"
+             and facts["product_ancestry_proven"] is True
+             and type(facts["pr_number"]) is int and facts["pr_number"] > 0
+             and facts["pr_state"] == "MERGED"
+             and type(facts["pr_repository_id"]) is int
+             and facts["pr_repository_id"] == repository_id
+             and facts["pr_repository"] == repository
+             and type(facts["pr_issue"]) is int and facts["pr_issue"] == issue
+             and facts["pr_head_oid"] == facts["product_head_oid"]
+             and facts["pr_base_ref"] == facts["product_base_ref"]
+             and type(facts["pr_merge_oid"]) is str
+             and _OID40.fullmatch(facts["pr_merge_oid"]) is not None
+             and facts["replacement_repository"] is None
+             and facts["replacement_task"] is None,
+             "cleanup_archive_terminal_semantics_invalid")
+    else:
+        kind = disposition["kind"]  # Already validated by decode_record.
+        need(facts["route"] == kind.upper()
+             and all(facts[field] is None for field in (
+                 "pr_number", "pr_state", "pr_head_oid", "pr_merge_oid",
+                 "pr_base_ref", "pr_repository_id", "pr_repository",
+                 "pr_issue")),
+             "cleanup_archive_terminal_semantics_invalid")
+        if kind == "superseded":
+            replacement = disposition["replacement"]
+            need((facts["replacement_repository"], facts["replacement_task"])
+                 == (replacement["repository"], replacement["task"]),
+                 "cleanup_archive_terminal_semantics_invalid")
+        else:
+            need(kind == "cancelled"
+                 and facts["replacement_repository"] is None
+                 and facts["replacement_task"] is None,
+                 "cleanup_archive_terminal_semantics_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +277,12 @@ class CleanupHistoryReader:
                  and contract["payload"]["title"] == self.approved.title
                  and contract["payload"]["body"] == self.approved.body,
                  "cleanup_original_requirements_changed")
+            # Reconcile saved terminal facts with the original, immutable
+            # Record disposition. Neither is current authorization to delete.
+            _check_original_terminal_semantics(
+                saved_facts, record["payload"].get("disposition"),
+                repository_id=self.identity.repository_id,
+                repository=self.identity.repository, issue=self.registered.issue)
             current = validator.observe(self.observer, ref, absent=True)
             need(current in {None, operation.expected_issue},
                  "cleanup_issue_ref_moved")
