@@ -18,6 +18,7 @@ from .kagari_vnext_main_v2_observation import CurrentTask, V2Selection, V2_PROFI
 from kagari_metadata_v2_task_admission import (
     ApprovedIssue, RegisteredIssue, RepositoryIdentity,
 )
+from task_record import TaskRecordError, validate_branch_ref
 from . import _kagari_vnext_claude_r6b_phase_d1b1_r1 as r1
 from . import _kagari_vnext_claude_r6b_phase_d1b1_r2 as r2
 
@@ -45,6 +46,107 @@ _R2_KEYS = frozenset((
     "commit_allowed", "authenticated_absence", "effective_policy",
 ))
 _OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}\Z", re.ASCII)
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+_REPO = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z",
+    re.ASCII,
+)
+_CONCRETE_PATH_TYPE = type(Path())  # PosixPath on the supported Linux Host
+
+
+def _repo(value: object) -> bool:
+    return (type(value) is str and len(value) <= 512
+            and _REPO.fullmatch(value) is not None)
+
+
+def _oid(value: object) -> bool:
+    return type(value) is str and _OID.fullmatch(value) is not None
+
+
+def _sha(value: object) -> bool:
+    return type(value) is str and _SHA256.fullmatch(value) is not None
+
+
+def _branch(value: object) -> bool:
+    # Reuse the existing Metadata v2 Task branch grammar, including .lock
+    # on intermediate components, instead of duplicating a partial parser.
+    # Strict primitive type first: no caller-defined string operations.
+    if type(value) is not str or len(value) > 512:
+        return False
+    try:
+        return validate_branch_ref(value) == value
+    except (TaskRecordError, ValueError):
+        return False
+
+
+def _bounded_utf8(value: object, maximum: int, *, required: bool = False) -> bool:
+    if type(value) is not str or (required and not value.strip()):
+        return False
+    try:
+        return len(value.encode("utf-8", errors="strict")) <= maximum
+    except UnicodeError:
+        return False
+
+
+def _complete_v2_fields(identity: RepositoryIdentity,
+                        registered: RegisteredIssue,
+                        approved: ApprovedIssue,
+                        selection: V2Selection) -> bool:
+    """Reject uninitialized exact-class dataclasses before scalar lookup.
+
+    Existing canonical classes use frozen slots, but object.__new__ can
+    produce an exact-class instance with missing required fields.
+    """
+    for obj, names in (
+        (identity, ("repository_id", "repository", "genesis", "git_object_format")),
+        (registered, ("repository_id", "repository", "issue", "branch_ref",
+                      "base_revision", "record_id", "contract_id")),
+        (approved, ("repository_id", "repository", "issue", "branch_ref",
+                    "base_revision", "title", "body")),
+        (selection, ("profile", "repository_id", "repository", "issue",
+                     "attach_digest")),
+    ):
+        try:
+            for name in names:
+                object.__getattribute__(obj, name)
+        except AttributeError:
+            return False
+    return True
+
+
+def _valid_v2_fields(identity: RepositoryIdentity,
+                     registered: RegisteredIssue,
+                     approved: ApprovedIssue,
+                     selection: V2Selection) -> bool:
+    """Revalidate every constructor-field shape before ANY v2 comparison.
+
+    Frozen/slotted dataclasses can be modified using object.__setattr__;
+    type(instance) alone does not ensure __post_init__ ran or still holds.
+    Checking exact primitive types first excludes custom __eq__ callbacks.
+    This proves no origin, Main owner, history or execution permission.
+    """
+    return (
+        _repo(identity.repository) and _oid(identity.genesis)
+        and type(identity.git_object_format) is str
+        and identity.git_object_format == "sha1"
+        and _repo(registered.repository)
+        and _branch(registered.branch_ref)
+        and _oid(registered.base_revision)
+        and _sha(registered.record_id) and _sha(registered.contract_id)
+        and _repo(approved.repository)
+        and _branch(approved.branch_ref)
+        # ApprovedIssue's constructor requires the Issue number as a
+        # separate numeric token in the branch name, not a substring.
+        and re.search(r"(^|[^0-9])" + str(approved.issue) + r"([^0-9]|$)",
+                      approved.branch_ref) is not None
+        and _oid(approved.base_revision)
+        and _bounded_utf8(approved.title, 64000, required=True)
+        and _bounded_utf8(approved.body, 160000)
+        and type(selection.profile) is str
+        and selection.profile == V2_PROFILE
+        and _repo(selection.repository)
+        and _sha(selection.attach_digest)
+    )
 
 
 def _report(status: str, reason: str) -> dict[str, str | bool]:
@@ -62,22 +164,29 @@ def _valid_current(value: object) -> bool:
         return False
     return (type(value.repository_id) is int and 1 <= value.repository_id <= r1.REPO_MAX
             and type(value.issue) is int and 1 <= value.issue <= r1.ISSUE_MAX
-            and type(value.repository) is str and bool(value.repository)
-            and all(type(getattr(value, field)) is str
-                    and _OID.fullmatch(getattr(value, field)) is not None
+            and _repo(value.repository)
+            and all(_oid(getattr(value, field))
                     for field in ("metadata_tip", "archive_tip", "base_revision"))
-            and all(type(getattr(value, field)) is str
-                    and re.fullmatch(r"[0-9a-f]{64}", getattr(value, field))
-                    is not None for field in ("record_id", "contract_id"))
-            and type(value.branch_ref) is str and value.branch_ref.startswith("refs/heads/"))
+            and all(_sha(getattr(value, field))
+                    for field in ("record_id", "contract_id"))
+            and _branch(value.branch_ref))
 
 
 def _valid_path(value: object) -> bool:
-    return isinstance(value, Path) and value.is_absolute() and ".." not in value.parts
+    # No subclass hooks: is_absolute, parts, joining and equality must not
+    # dispatch user-defined code. This is still lexical, not inode proof.
+    return (type(value) is _CONCRETE_PATH_TYPE and value.is_absolute()
+            and ".." not in value.parts)
 
 
 def _valid_r2_report(value: object) -> bool:
-    if type(value) is not dict or value.keys() != _R2_KEYS:
+    if type(value) is not dict:
+        return False
+    # Check key types BEFORE dict_keys equality or string lookups. An
+    # arbitrary key with __hash__/__eq__ could otherwise impersonate 'status'.
+    if any(type(key) is not str for key in value):
+        return False
+    if value.keys() != _R2_KEYS:
         return False
     status = value.get("status")
     if type(status) is not str or status not in _R2_REASONS:
@@ -124,33 +233,35 @@ def assess_r3a_unqualified(
                 and type(approved) is ApprovedIssue
                 and type(selection) is V2Selection):
             return _report("REFUSED", "v2_shape_invalid")
+        if not _complete_v2_fields(identity, registered, approved, selection):
+            return _report("REFUSED", "v2_fields_invalid")
         if type(selection.profile) is not str or selection.profile != V2_PROFILE:
             return _report("REFUSED", "v2_profile_invalid")
-        try:
-            r1.reservation_key(identity.repository_id, registered.issue)
-        except ValueError:
-            return _report("REFUSED", "repository_numeric_invalid")
+        # No digest/key derivation is necessary in a negative-path check.
+        # Validate exact primitive numeric ranges BEFORE any comparison.
         if any(type(x) is not int or not 1 <= x <= r1.REPO_MAX for x in (
                 identity.repository_id, registered.repository_id,
                 approved.repository_id, selection.repository_id)):
             return _report("REFUSED", "repository_numeric_invalid")
+        if not all(type(x) is int and 1 <= x <= min(r1.ISSUE_MAX, 10**9)
+                   for x in (registered.issue, approved.issue, selection.issue)):
+            return _report("REFUSED", "issue_invalid")
+        # Frozen dataclasses may have been forged/mutated post-construction.
+        # Reject invalid names and all other fields BEFORE name drift checks.
+        if not _valid_v2_fields(identity, registered, approved, selection):
+            return _report("REFUSED", "v2_fields_invalid")
         if len({identity.repository_id, registered.repository_id,
                 approved.repository_id, selection.repository_id}) != 1:
             return _report("REFUSED", "repository_numeric_mismatch")
-        if type(main_repository_name) is not str or not main_repository_name:
+        if not _repo(main_repository_name):
             return _report("REFUSED", "main_repository_invalid")
         names = (identity.repository, registered.repository,
                  approved.repository, selection.repository,
                  main_repository_name)
-        if not all(type(name) is str for name in names):
-            return _report("REFUSED", "repository_name_invalid")
         if len(set(names)) != 1:
-            # Numeric IDs agree, so a textual alias/rename may be in flight.
-            # The name-keyed Main flock could split: freeze, never re-key.
+            # All names are now well-formed, so a same-ID alias/rename
+            # may be in flight. Freeze admission; never re-key.
             return _report("UNKNOWN", "repository_name_drift")
-        if not all(type(x) is int and 1 <= x <= r1.ISSUE_MAX
-                   for x in (registered.issue, approved.issue, selection.issue)):
-            return _report("REFUSED", "issue_invalid")
         if (registered.issue != selection.issue or approved.issue != selection.issue
                 or registered.branch_ref != approved.branch_ref
                 or registered.base_revision != approved.base_revision):
@@ -161,10 +272,13 @@ def assess_r3a_unqualified(
             return _report("REFUSED", "current_task_invalid")
         if current_before != current_after:
             return _report("UNKNOWN", "current_task_drift")
-        if (current_before.repository_id, current_before.repository,
-                current_before.issue) != (
-                identity.repository_id, identity.repository, selection.issue):
+        if (current_before.repository_id, current_before.issue) != (
+                identity.repository_id, selection.issue):
             return _report("REFUSED", "current_identity_mismatch")
+        # A same-numeric-ID current record with a different repository name
+        # is an alias/rename reconciliation freeze, not a new identity.
+        if current_before.repository != identity.repository:
+            return _report("UNKNOWN", "repository_name_drift")
         if (current_before.record_id, current_before.contract_id,
                 current_before.branch_ref, current_before.base_revision) != (
                 registered.record_id, registered.contract_id,

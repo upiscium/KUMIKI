@@ -1,7 +1,8 @@
 """#340 R6B D1B1 R3A synthetic-only negative-path binding contract.
 
-All v2 dataclass values are deliberately caller fabricated. No Host, Main,
-Git, Journal, Task, process, CLI, network or filesystem state is inspected.
+All v2 dataclass values are deliberately caller fabricated. The R3A
+assessment does not inspect Host, Main, Git, Journal, Task, CLI or live
+filesystem state. Static tests read the R3A module's source file.
 """
 from __future__ import annotations
 
@@ -111,6 +112,29 @@ class R3AUnqualifiedBindingTests(unittest.TestCase):
             self.evaluate(main_repository_name="upiscium/RENAMED"),
             "UNKNOWN", "repository_name_drift")
 
+    def test_malformed_main_repository_name_is_refused(self):
+        for bad in ("", "upiscium", "upiscium//KUMIKI", False, None):
+            with self.subTest(name=bad):
+                self.assert_non_grant(
+                    self.evaluate(main_repository_name=bad),
+                    "REFUSED", "main_repository_invalid")
+
+    def test_mutated_malformed_v2_repository_names_refused_before_drift(self):
+        for name, obj in (
+                ("identity", self.identity),
+                ("registered", self.registered),
+                ("approved", self.approved),
+                ("selection", self.selection)):
+            with self.subTest(name=name):
+                old = obj.repository
+                try:
+                    # Exact dataclass class, but invalid scalar field.
+                    object.__setattr__(obj, "repository", "bad/")
+                    self.assert_non_grant(
+                        self.evaluate(), "REFUSED", "v2_fields_invalid")
+                finally:
+                    object.__setattr__(obj, "repository", old)
+
     def test_main_owner_missing_or_stale_always_refuses(self):
         for claim in ("MISSING", "STALE", "UNVERIFIED", False, None):
             with self.subTest(claim=claim):
@@ -170,15 +194,27 @@ class R3AUnqualifiedBindingTests(unittest.TestCase):
             self.evaluate(current_after=changed_archive),
             "UNKNOWN", "current_task_drift")
 
-    def test_current_task_wrong_repository_or_issue_refuses(self):
+    def test_current_task_wrong_numeric_repository_or_issue_refuses(self):
         for changed in (
                 replace(self.current, repository_id=self.REPO_ID + 1),
-                replace(self.current, issue=self.ISSUE + 1),
-                replace(self.current, repository="upiscium/OTHER")):
+                replace(self.current, issue=self.ISSUE + 1)):
             with self.subTest(current=changed):
                 self.assert_non_grant(
                     self.evaluate(current_before=changed, current_after=changed),
                     "REFUSED", "current_identity_mismatch")
+
+    def test_current_only_old_repository_name_freezes_same_numeric_id(self):
+        new_name = "upiscium/RENAMED"
+        result = self.evaluate(
+            identity=replace(self.identity, repository=new_name),
+            registered=replace(self.registered, repository=new_name),
+            approved=replace(self.approved, repository=new_name),
+            selection=replace(self.selection, repository=new_name),
+            main_repository_name=new_name,
+            # Both same-ID current snapshots retain the old repository name.
+            current_before=self.current, current_after=self.current,
+        )
+        self.assert_non_grant(result, "UNKNOWN", "repository_name_drift")
 
     def test_wrong_current_contract_or_record_refuses(self):
         for changed in (
@@ -281,6 +317,192 @@ class R3AUnqualifiedBindingTests(unittest.TestCase):
             "REFUSED", "attachment_unverified")
         self.assertEqual(called, [])
 
+    def test_mutated_v2_dataclass_fields_refused_without_equality_hooks(self):
+        called = []
+
+        class EqualityTrap:
+            def __eq__(self, _other):
+                called.append("unexpected equality")
+                raise AssertionError("forged v2 field equality executed")
+            def __ne__(self, _other):
+                called.append("unexpected inequality")
+                raise AssertionError("forged v2 field inequality executed")
+
+        for name, obj, field, forged in (
+                ("identity", self.identity, "genesis", EqualityTrap()),
+                ("identity", self.identity, "git_object_format", EqualityTrap()),
+                ("registered", self.registered, "record_id", EqualityTrap()),
+                ("registered", self.registered, "contract_id", EqualityTrap()),
+                ("registered", self.registered, "branch_ref", EqualityTrap()),
+                ("registered", self.registered, "base_revision", EqualityTrap()),
+                ("approved", self.approved, "branch_ref", EqualityTrap()),
+                ("approved", self.approved, "base_revision", EqualityTrap()),
+                ("approved", self.approved, "title", EqualityTrap()),
+                ("approved", self.approved, "body", EqualityTrap()),
+                ("selection", self.selection, "attach_digest", "bad"),
+                ("selection", self.selection, "attach_digest", EqualityTrap()),
+        ):
+            with self.subTest(name=name, field=field, forged=type(forged).__name__):
+                old = getattr(obj, field)
+                try:
+                    # Bypass frozen dataclass constructor to simulate a forged
+                    # exact-class in-process Python object, NOT a Host record.
+                    object.__setattr__(obj, field, forged)
+                    self.assert_non_grant(
+                        self.evaluate(), "REFUSED", "v2_fields_invalid")
+                finally:
+                    object.__setattr__(obj, field, old)
+        self.assertEqual(called, [])
+
+    def test_mutated_approved_branch_missing_issue_is_refused(self):
+        wrong_branch = "refs/heads/task/999-r3a"
+        old_reg = self.registered.branch_ref
+        old_approved = self.approved.branch_ref
+        try:
+            # Both canonical v2 classes were initially constructed validly.
+            # Mutate them and the current snapshot to agree on a branch
+            # that ApprovedIssue.__post_init__ would reject.
+            object.__setattr__(self.registered, "branch_ref", wrong_branch)
+            object.__setattr__(self.approved, "branch_ref", wrong_branch)
+            current = replace(self.current, branch_ref=wrong_branch)
+            self.assert_non_grant(
+                self.evaluate(current_before=current, current_after=current),
+                "REFUSED", "v2_fields_invalid")
+        finally:
+            object.__setattr__(self.registered, "branch_ref", old_reg)
+            object.__setattr__(self.approved, "branch_ref", old_approved)
+
+    def test_intermediate_dotlock_branch_is_refused_using_canonical_parser(self):
+        wrong_branch = "refs/heads/task.lock/340-r3a"
+        old_reg = self.registered.branch_ref
+        old_approved = self.approved.branch_ref
+        try:
+            object.__setattr__(self.registered, "branch_ref", wrong_branch)
+            object.__setattr__(self.approved, "branch_ref", wrong_branch)
+            current = replace(self.current, branch_ref=wrong_branch)
+            self.assert_non_grant(
+                self.evaluate(current_before=current, current_after=current),
+                "REFUSED", "v2_fields_invalid")
+        finally:
+            object.__setattr__(self.registered, "branch_ref", old_reg)
+            object.__setattr__(self.approved, "branch_ref", old_approved)
+
+    def test_malformed_unicode_in_approved_title_is_refused(self):
+        old_title = self.approved.title
+        try:
+            object.__setattr__(self.approved, "title", "\ud800")
+            self.assert_non_grant(
+                self.evaluate(), "REFUSED", "v2_fields_invalid")
+        finally:
+            object.__setattr__(self.approved, "title", old_title)
+
+    def test_r2_nonstring_dict_key_rejected_before_equality(self):
+        called = []
+
+        class KeyTrap:
+            def __hash__(self):
+                return hash("status")
+            def __eq__(self, other):
+                called.append("custom key equality called")
+                return other == "status"
+
+        forged = {k: v for k, v in self.r2_report.items() if k != "status"}
+        forged[KeyTrap()] = "OBSERVED_BLOCKED"
+        called.clear()
+        self.assert_non_grant(
+            self.evaluate(r2_report=forged), "REFUSED", "r2_report_invalid")
+        self.assertEqual(called, [])
+
+    def test_path_subclass_cannot_override_lexical_validity(self):
+        called = []
+
+        class ForgedPath(type(self.project)):
+            def is_absolute(self):
+                called.append("is_absolute")
+                return True
+            @property
+            def parts(self):
+                called.append("parts")
+                return ("fictional",)
+            def __truediv__(self, other):
+                called.append("truediv")
+                return self
+            def __eq__(self, other):
+                called.append("eq")
+                return True
+            __hash__ = type(self.project).__hash__
+
+        bad_project = ForgedPath("relative/../forged")
+        bad_worktree = ForgedPath("elsewhere")
+        for change in (
+                {"project_root": bad_project, "worktree_path": bad_worktree},
+                {"worktree_path": bad_worktree},
+                {"project_root": bad_project},
+        ):
+            with self.subTest(change=tuple(change)):
+                self.assert_non_grant(
+                    self.evaluate(**change), "REFUSED", "worktree_claim_invalid")
+        self.assertEqual(called, [])
+
+    def test_bool_numeric_field_and_str_subclass_are_refused(self):
+        old_id = self.registered.repository_id
+        try:
+            object.__setattr__(self.registered, "repository_id", True)
+            self.assert_non_grant(
+                self.evaluate(), "REFUSED", "repository_numeric_invalid")
+        finally:
+            object.__setattr__(self.registered, "repository_id", old_id)
+
+        class StrangeStr(str):
+            pass
+
+        old_digest = self.selection.attach_digest
+        try:
+            object.__setattr__(self.selection, "attach_digest", StrangeStr("e" * 64))
+            self.assert_non_grant(
+                self.evaluate(), "REFUSED", "v2_fields_invalid")
+        finally:
+            object.__setattr__(self.selection, "attach_digest", old_digest)
+
+    def test_canonical_invalid_branch_characters_are_refused(self):
+        for branch in ("refs/heads/task/340^invalid",
+                       "refs/heads/task/340..bad",
+                       "refs/heads/task/340@{1}"):
+            with self.subTest(branch=branch):
+                original = self.registered.branch_ref
+                try:
+                    object.__setattr__(self.registered, "branch_ref", branch)
+                    self.assert_non_grant(
+                        self.evaluate(), "REFUSED", "v2_fields_invalid")
+                finally:
+                    object.__setattr__(self.registered, "branch_ref", original)
+
+    def test_mismatched_r2_status_and_reason_are_refused(self):
+        for status, reason in (
+                ("UNKNOWN", "existing_reservation_observed_only"),
+                ("OBSERVED_BLOCKED", "host_journal_missing"),
+                ("REFUSED", "history_absence_unproven")):
+            with self.subTest(status=status, reason=reason):
+                self.assert_non_grant(
+                    self.evaluate(r2_report={
+                        **self.r2_report, "status": status, "reason": reason,
+                    }), "REFUSED", "r2_report_invalid")
+
+    def test_uninitialized_exact_v2_dataclasses_are_refused(self):
+        for name, cls in (
+            ("identity", m.RepositoryIdentity),
+            ("registered", m.RegisteredIssue),
+            ("approved", m.ApprovedIssue),
+            ("selection", m.V2Selection),
+        ):
+            with self.subTest(name=name):
+                # Deliberately bypass __init__ and __post_init__. A frozen
+                # class identity does not guarantee its slots were filled.
+                broken = object.__new__(cls)
+                self.assert_non_grant(
+                    self.evaluate(**{name: broken}),
+                    "REFUSED", "v2_fields_invalid")
+
     def test_malformed_uninitialized_current_is_unknown(self):
         broken = object.__new__(m.CurrentTask)
         self.assert_non_grant(
@@ -306,10 +528,17 @@ class R3AUnqualifiedBindingTests(unittest.TestCase):
             elif isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Attribute):
                     calls.append(node.func.attr)
+                elif isinstance(node.func, ast.Name):
+                    # Supplement the module's no-effect boundary check:
+                    # an unqualified built-in open() is also forbidden.
+                    self.assertNotIn(
+                        node.func.id,
+                        {"open", "eval", "exec", "__import__", "compile"},
+                    )
         self.assertTrue(imported <= {
             "__future__", "pathlib", "re",
             "kagari_vnext_main_v2_observation",
-            "kagari_metadata_v2_task_admission", "<relative>",
+            "kagari_metadata_v2_task_admission", "task_record", "<relative>",
         })
         for disallowed in (
                 "observe", "_assert_owned", "mkdir", "open", "create",

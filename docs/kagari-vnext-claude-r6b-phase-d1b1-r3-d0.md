@@ -1,9 +1,14 @@
 # #340 R6B D1B1 R3 D0 — Host identity, one-shot genesis and lost-history handoff
 
-**DESIGN-ONLY / LOCAL-ONLY / NON-WIRED / NO AUTHORITY.**
-Baseline: `main@d8e3ccf00d53c37b0bed54b6f1223892d0eaf32a`, isolated
-remote-free checkout after source-only PR #386 was merged. This document is
-not published. No Commit/Push/PR, deploy, Host directory creation,
+**DESIGN-ONLY / NON-WIRED / NO AUTHORITY.**
+Original development baseline:
+`main@d8e3ccf00d53c37b0bed54b6f1223892d0eaf32a` in an isolated
+remote-free checkout after source-only PR #386 was merged.
+This design was subsequently published in source-only Draft PR #389
+(head `54fbf20f532ec3294a1d06e722034f1abb54a727`,
+base `main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d`).
+Any R1 documentation correction is local-only until separately authorized
+for publication. No Ready/Merge, deploy, Host directory creation,
 `RecoveryJournal.create`, CLI execution, permission change or activation.
 
 ## Decision

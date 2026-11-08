@@ -1,12 +1,16 @@
 # #340 R6B D1B1 R3A — unqualified v2/R2 Host-binding negative-path contract
 
-**SOURCE-ONLY / ISOLATED SYNTHETIC / NON-WIRED / ALL RESULTS DENY / NO ACTIVATION.**
+**SOURCE-ONLY / SYNTHETIC / NON-WIRED / ALL RESULTS DENY / NO ACTIVATION.**
 
-Prepared on isolated remote-free checkout
-`main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d`.
-`R3 D0` is a local-only companion design, not an already published
-artifact. No Commit/Push/PR, no Host mutation, no new Journal/genesis,
-no Claude CLI or model Task, no Main or Transport wiring.
+Original development on isolated remote-free
+`main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d`, then source-only
+publication in Draft PR #389 at
+`54fbf20f532ec3294a1d06e722034f1abb54a727`.
+The R3 D0 companion design was included in that same Draft PR.
+Subsequent R1 local corrections are **not yet published** and require a
+new exact-HEAD review after authorized publication.
+No Ready/Merge/Deploy/activation, Host mutation, new Journal/genesis,
+Claude CLI or model Task, or Main/Transport wiring.
 
 ## Narrow implementation
 
@@ -15,10 +19,18 @@ no Claude CLI or model Task, no Main or Transport wiring.
 Python data types**, not a second implementation of Task decoding:
 
 - `RepositoryIdentity`, `RegisteredIssue`, `ApprovedIssue`,
-  `V2Selection` and `CurrentTask`.
+  `V2Selection` and `CurrentTask`. **Every scalar field** of the
+  submitted v2 data types is checked for expected primitive type and
+  bounded format before any cross-object comparisons; missing slots
+  in uninitialized exact-class objects are also `REFUSED`. The canonical
+  `task_record.validate_branch_ref` is reused for **every** branch
+  component, including intermediate `.lock` cases; frozen dataclass
+  class identity alone does not protect fields from in-process mutation.
 - `R1` numeric repository ID + positive Issue limits for the **fixed**
   root/reservation identity. No new keying function and no new attempt UUID.
-- `R2`'s exact closed report format and non-grant fields.
+- `R2`'s exact closed report format, exact-string dictionary keys and
+  non-grant fields. Custom Python key equality cannot substitute for
+  an actual string key.
 
 The input values—including ones with names such as `RepositoryIdentity`,
 `CurrentTask`, `main_owner_claim`, `attachment_claim`, or
@@ -39,13 +51,20 @@ activate the Main lifecycle.
 | --- | --- |
 | Exact existing v2 classes and fixed `V2_PROFILE` | `REFUSED` for wrong classes/profile |
 | Numeric repository ID, Issue, v2 selection, registered/approved identity | `REFUSED` for invalid/mismatched ID or Issue |
-| Repository name across all supplied v2 views and claimed Main | `UNKNOWN` for rename/alias drift, **no re-key** |
+| Repository name across all supplied v2 views, claimed Main, **and current Task** (same numeric ID) | **Malformed** names `REFUSED` before comparison; only valid-name rename/alias drift is `UNKNOWN`, **no re-key** |
+| Malformed fields within otherwise exact-class v2 instances | `REFUSED` before user-defined equality methods are reached |
 | Registered vs approved base/branch, current vs registered record/contract/base/branch | `REFUSED` for mismatches |
 | Two supplied current `CurrentTask` observations | `UNKNOWN` for changed snapshot/metadata tip/archive tip |
 | Main owner, Attachment and absence of legacy v1 assignment | Claimed held/clear may proceed to **observation only**; missing/stale/collision blocks |
-| Expected `<project>/.worktrees/<issue>` vs reported Worktree | `REFUSED` for lexical mismatch; **no symlink/inode/Git verification** |
+| Expected `<project>/.worktrees/<issue>` vs reported Worktree | `REFUSED` for lexical mismatch or subclassed `Path`; concrete `Path` only, **no symlink/inode/Git verification** |
 | R2 report absent, REFUSED, UNKNOWN or retained reservation | Always missing/blocked/refused; **never permission** |
 | Forged extra R2 fields, successful-launch claim or any `True` grant | `REFUSED` |
+
+An uninitialized exact-class `RepositoryIdentity`, `RegisteredIssue`,
+`ApprovedIssue` or `V2Selection` is malformed configuration input and is
+`REFUSED`. An unavailable or incomplete `CurrentTask` observation is
+instead `UNKNOWN`: it requires a fresh Host read and is **not** a valid
+replacement, grant or proof of absence.
 
 Even in the all-matching case the output is
 `OBSERVED_BLOCKED / r2_reservation_claim_blocks_only`, not a Task grant.
@@ -102,10 +121,18 @@ reviewed and approved work:
 
 `tests/test_kagari_vnext_claude_r6b_phase_d1b1_r3a.py` uses literal
 in-memory synthetic v2 objects and `Path` values. Tests exercise
-repo-ID and name drift, stale current record and tips, record/contract,
-owner and Attachment claims, worktree mismatch, missing/unsafe R2
-observations, forged permissions and permanent non-grants. It has no
-live GitHub, Main, Journal or CLI operations.
+repo-ID and name drift (including the current-only old-name case),
+stale current record and tips, record/contract,
+owner and Attachment claims, worktree mismatch, mutated exact-class
+v2 fields with custom equality traps, malformed and missing-Issue
+branch names, intermediate `.lock` branch components, subclassed
+`Path`, non-string R2 dict keys, forged permissions and permanent
+non-grants.
+The assessment has no live GitHub, Main, Journal or CLI operations.
+The **static tests** read the R3A module's own source file for AST
+checks; imports of existing v2 modules may resolve module paths and
+change `sys.path`.
+Neither property proves sandboxing of arbitrary in-process Python code.
 
 Offline targeted test command:
 
