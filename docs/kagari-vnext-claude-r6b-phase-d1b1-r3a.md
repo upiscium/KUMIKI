@@ -3,12 +3,15 @@
 **SOURCE-ONLY / SYNTHETIC / NON-WIRED / ALL RESULTS DENY / NO ACTIVATION.**
 
 Original development on isolated remote-free
-`main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d`, then source-only
-publication in Draft PR #389 at
-`54fbf20f532ec3294a1d06e722034f1abb54a727`.
-The R3 D0 companion design was included in that same Draft PR.
-Subsequent R1 local corrections are **not yet published** and require a
-new exact-HEAD review after authorized publication.
+`main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d`.
+Draft PR #389 first published
+`54fbf20f532ec3294a1d06e722034f1abb54a727`,
+then published the reviewed R1 input-hardening corrections at
+`583d873b32d8579159579184e3e274226cc7c7d6` (current published HEAD
+when R2 began). The R3 D0 companion design is in the same Draft PR.
+**R2 one-sided CurrentTask validation-order and documentation corrections
+are local-only, NOT committed or pushed**, until separately approved.
+They require new exact-published-head CI and PR-mode review after publication.
 No Ready/Merge/Deploy/activation, Host mutation, new Journal/genesis,
 Claude CLI or model Task, or Main/Transport wiring.
 
@@ -51,10 +54,10 @@ activate the Main lifecycle.
 | --- | --- |
 | Exact existing v2 classes and fixed `V2_PROFILE` | `REFUSED` for wrong classes/profile |
 | Numeric repository ID, Issue, v2 selection, registered/approved identity | `REFUSED` for invalid/mismatched ID or Issue |
-| Repository name across all supplied v2 views, claimed Main, **and current Task** (same numeric ID) | **Malformed** names `REFUSED` before comparison; only valid-name rename/alias drift is `UNKNOWN`, **no re-key** |
+| Repository name across all supplied v2 views, claimed Main, **and current Task** (same numeric ID) | **Malformed** names `REFUSED` before comparison; after registered-Task and both CurrentTask numeric IDs/bindings pass, valid-name rename/alias drift is `UNKNOWN`, **no re-key**. A concurrent name drift never hides a wrong Issue/Record/Contract |
 | Malformed fields within otherwise exact-class v2 instances | `REFUSED` before user-defined equality methods are reached |
-| Registered vs approved base/branch, current vs registered record/contract/base/branch | `REFUSED` for mismatches |
-| Two supplied current `CurrentTask` observations | `UNKNOWN` for changed snapshot/metadata tip/archive tip |
+| Registered vs approved base/branch; **each** current snapshot vs selected numeric ID/Issue and registered record/contract/base/branch | `REFUSED` for mismatches in either snapshot, even when the snapshots also differ |
+| Two supplied current `CurrentTask` observations | **Every available, valid-shaped snapshot** is bound to the selected numeric ID/Issue and registered Task before missing, incomplete, name-drift or tip-drift classification. A wrong binding in the other snapshot is `REFUSED` even if one is missing; otherwise missing/incomplete is `UNKNOWN`. With two complete bound snapshots, valid name or metadata/archive tip drift is `UNKNOWN` |
 | Main owner, Attachment and absence of legacy v1 assignment | Claimed held/clear may proceed to **observation only**; missing/stale/collision blocks |
 | Expected `<project>/.worktrees/<issue>` vs reported Worktree | `REFUSED` for lexical mismatch or subclassed `Path`; concrete `Path` only, **no symlink/inode/Git verification** |
 | R2 report absent, REFUSED, UNKNOWN or retained reservation | Always missing/blocked/refused; **never permission** |
@@ -63,8 +66,11 @@ activate the Main lifecycle.
 An uninitialized exact-class `RepositoryIdentity`, `RegisteredIssue`,
 `ApprovedIssue` or `V2Selection` is malformed configuration input and is
 `REFUSED`. An unavailable or incomplete `CurrentTask` observation is
-instead `UNKNOWN`: it requires a fresh Host read and is **not** a valid
-replacement, grant or proof of absence.
+`UNKNOWN` **only after any available well-formed counterpart is checked
+for wrong numeric identity and record/contract/branch/base binding**;
+a mismatch in that counterpart is `REFUSED`. An uncertain observation
+requires a fresh Host read and is **not** a valid replacement, grant or
+proof of absence.
 
 Even in the all-matching case the output is
 `OBSERVED_BLOCKED / r2_reservation_claim_blocks_only`, not a Task grant.
@@ -122,6 +128,9 @@ reviewed and approved work:
 `tests/test_kagari_vnext_claude_r6b_phase_d1b1_r3a.py` uses literal
 in-memory synthetic v2 objects and `Path` values. Tests exercise
 repo-ID and name drift (including the current-only old-name case),
+**one-sided before/after Issue, repository ID, record, contract, base
+and branch mismatches**, including a missing or incomplete counterpart,
+ahead of name- and tip-drift classification,
 stale current record and tips, record/contract,
 owner and Attachment claims, worktree mismatch, mutated exact-class
 v2 fields with custom equality traps, malformed and missing-Issue

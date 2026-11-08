@@ -258,32 +258,60 @@ def assess_r3a_unqualified(
         names = (identity.repository, registered.repository,
                  approved.repository, selection.repository,
                  main_repository_name)
-        if len(set(names)) != 1:
-            # All names are now well-formed, so a same-ID alias/rename
-            # may be in flight. Freeze admission; never re-key.
-            return _report("UNKNOWN", "repository_name_drift")
+        # All names are well-formed, but do NOT classify their drift yet.
+        # A name change must never mask a wrong registered Task or a wrong
+        # Issue/Contract in either CurrentTask snapshot.
         if (registered.issue != selection.issue or approved.issue != selection.issue
                 or registered.branch_ref != approved.branch_ref
                 or registered.base_revision != approved.base_revision):
             return _report("REFUSED", "registered_task_mismatch")
-        if type(current_before) is not CurrentTask or type(current_after) is not CurrentTask:
+        # Even if one snapshot is absent or uninitialized, a WRONG binding
+        # in the other existing snapshot is a refusal, not merely UNKNOWN.
+        # Do not dereference or compare non-CurrentTask caller objects.
+        available = []
+        missing = False
+        incomplete = False
+        for snapshot in (current_before, current_after):
+            if type(snapshot) is not CurrentTask:
+                missing = True
+                continue
+            try:
+                valid = _valid_current(snapshot)
+            except AttributeError:
+                # Preserve R3A's existing policy for an incomplete/current
+                # read: UNKNOWN, not an authenticated absence.
+                incomplete = True
+                continue
+            if not valid:
+                return _report("REFUSED", "current_task_invalid")
+            available.append(snapshot)
+        # Check every available, well-formed snapshot against the exact
+        # selected numeric identity and the registered Task binding before
+        # returning an observation-missing, rename, or tip-drift reason.
+        expected_identity = (identity.repository_id, selection.issue)
+        if any((snapshot.repository_id, snapshot.issue) != expected_identity
+               for snapshot in available):
+            return _report("REFUSED", "current_identity_mismatch")
+        expected_binding = (registered.record_id, registered.contract_id,
+                            registered.branch_ref, registered.base_revision)
+        if any((snapshot.record_id, snapshot.contract_id,
+                snapshot.branch_ref, snapshot.base_revision) != expected_binding
+               for snapshot in available):
+            return _report("REFUSED", "current_contract_or_record_mismatch")
+        if incomplete:
+            return _report("UNKNOWN", "untrusted_snapshot_invalid")
+        if missing:
             return _report("UNKNOWN", "current_task_missing")
-        if not _valid_current(current_before) or not _valid_current(current_after):
-            return _report("REFUSED", "current_task_invalid")
+        # Only after both complete snapshots and the registered Task pass
+        # binding checks may any valid same-ID textual rename be UNKNOWN.
+        if (len(set(names)) != 1
+                or any(snapshot.repository != identity.repository
+                       for snapshot in available)):
+            return _report("UNKNOWN", "repository_name_drift")
+        # The only remaining before/after differences are metadata/archive
+        # observation tips, never effect permission.
         if current_before != current_after:
             return _report("UNKNOWN", "current_task_drift")
-        if (current_before.repository_id, current_before.issue) != (
-                identity.repository_id, selection.issue):
-            return _report("REFUSED", "current_identity_mismatch")
-        # A same-numeric-ID current record with a different repository name
-        # is an alias/rename reconciliation freeze, not a new identity.
-        if current_before.repository != identity.repository:
-            return _report("UNKNOWN", "repository_name_drift")
-        if (current_before.record_id, current_before.contract_id,
-                current_before.branch_ref, current_before.base_revision) != (
-                registered.record_id, registered.contract_id,
-                registered.branch_ref, registered.base_revision):
-            return _report("REFUSED", "current_contract_or_record_mismatch")
         if type(main_owner_claim) is not str or main_owner_claim != "HELD_CLAIMED":
             return _report("REFUSED", "main_owner_unverified")
         if type(attachment_claim) is not str or attachment_claim != "HELD_CLAIMED":

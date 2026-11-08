@@ -184,6 +184,51 @@ class R3AUnqualifiedBindingTests(unittest.TestCase):
                     self.evaluate(**{key: None}),
                     "UNKNOWN", "current_task_missing")
 
+    def test_missing_one_current_cannot_hide_other_wrong_binding(self):
+        for missing_side, present_side in (
+                ("current_before", "current_after"),
+                ("current_after", "current_before")):
+            for field, value, reason in (
+                    ("repository_id", self.REPO_ID + 1,
+                     "current_identity_mismatch"),
+                    ("issue", self.ISSUE + 1,
+                     "current_identity_mismatch"),
+                    ("record_id", "0" * 64,
+                     "current_contract_or_record_mismatch"),
+                    ("contract_id", "f" * 64,
+                     "current_contract_or_record_mismatch"),
+                    ("branch_ref", "refs/heads/task/340-other",
+                     "current_contract_or_record_mismatch"),
+                    ("base_revision", "0" * 40,
+                     "current_contract_or_record_mismatch")):
+                with self.subTest(missing=missing_side, field=field):
+                    wrong = replace(self.current, **{field: value})
+                    self.assert_non_grant(
+                        self.evaluate(**{
+                            missing_side: None,
+                            present_side: wrong,
+                        }),
+                        "REFUSED", reason)
+
+    def test_incomplete_one_current_cannot_hide_other_wrong_binding(self):
+        incomplete = object.__new__(m.CurrentTask)
+        for incomplete_side, present_side in (
+                ("current_before", "current_after"),
+                ("current_after", "current_before")):
+            with self.subTest(incomplete=incomplete_side):
+                wrong = replace(self.current, contract_id="f" * 64)
+                self.assert_non_grant(
+                    self.evaluate(**{
+                        incomplete_side: incomplete,
+                        present_side: wrong,
+                    }),
+                    "REFUSED", "current_contract_or_record_mismatch")
+        # An incomplete CurrentTask without a wrong available counterpart
+        # is still UNKNOWN, not a grant and not proof of missing history.
+        self.assert_non_grant(
+            self.evaluate(current_before=incomplete),
+            "UNKNOWN", "untrusted_snapshot_invalid")
+
     def test_stale_current_task_observation_is_unknown(self):
         moved = replace(self.current, metadata_tip="3" * 40)
         self.assert_non_grant(
@@ -202,6 +247,96 @@ class R3AUnqualifiedBindingTests(unittest.TestCase):
                 self.assert_non_grant(
                     self.evaluate(current_before=changed, current_after=changed),
                     "REFUSED", "current_identity_mismatch")
+
+    def test_one_sided_current_identity_mismatches_refuse_before_drift(self):
+        for side in ("current_before", "current_after"):
+            for field, value in (
+                    ("repository_id", self.REPO_ID + 1),
+                    ("issue", self.ISSUE + 1)):
+                with self.subTest(side=side, field=field):
+                    changed = replace(self.current, **{field: value})
+                    self.assert_non_grant(
+                        self.evaluate(**{side: changed}),
+                        "REFUSED", "current_identity_mismatch")
+
+    def test_one_sided_current_binding_mismatches_refuse_before_drift(self):
+        for side in ("current_before", "current_after"):
+            for field, value in (
+                    ("record_id", "0" * 64),
+                    ("contract_id", "f" * 64),
+                    ("base_revision", "0" * 40),
+                    ("branch_ref", "refs/heads/task/340-other")):
+                with self.subTest(side=side, field=field):
+                    changed = replace(self.current, **{field: value})
+                    self.assert_non_grant(
+                        self.evaluate(**{side: changed}),
+                        "REFUSED", "current_contract_or_record_mismatch")
+
+    def test_one_sided_repository_name_drift_remains_unknown(self):
+        for side in ("current_before", "current_after"):
+            with self.subTest(side=side):
+                changed = replace(self.current, repository="upiscium/RENAMED")
+                self.assert_non_grant(
+                    self.evaluate(**{side: changed}),
+                    "UNKNOWN", "repository_name_drift")
+
+    def test_wrong_current_binding_overrides_tip_or_name_drift(self):
+        changed = replace(self.current, issue=self.ISSUE + 1,
+                          metadata_tip="3" * 40)
+        self.assert_non_grant(
+            self.evaluate(current_after=changed),
+            "REFUSED", "current_identity_mismatch")
+        changed = replace(self.current, contract_id="f" * 64,
+                          metadata_tip="3" * 40)
+        self.assert_non_grant(
+            self.evaluate(current_after=changed),
+            "REFUSED", "current_contract_or_record_mismatch")
+        # A same-ID rename in one snapshot cannot hide a wrong binding
+        # in the other snapshot.
+        renamed = replace(self.current, repository="upiscium/RENAMED")
+        wrong_record = replace(self.current, record_id="0" * 64)
+        self.assert_non_grant(
+            self.evaluate(current_before=renamed, current_after=wrong_record),
+            "REFUSED", "current_contract_or_record_mismatch")
+
+    def test_main_name_drift_does_not_hide_one_sided_current_mismatch(self):
+        for side in ("current_before", "current_after"):
+            for field, value, reason in (
+                    ("repository_id", self.REPO_ID + 1,
+                     "current_identity_mismatch"),
+                    ("issue", self.ISSUE + 1,
+                     "current_identity_mismatch"),
+                    ("record_id", "0" * 64,
+                     "current_contract_or_record_mismatch"),
+                    ("contract_id", "f" * 64,
+                     "current_contract_or_record_mismatch")):
+                with self.subTest(side=side, field=field):
+                    changed = replace(self.current, **{field: value})
+                    self.assert_non_grant(
+                        self.evaluate(
+                            main_repository_name="upiscium/RENAMED",
+                            **{side: changed}),
+                        "REFUSED", reason)
+
+    def test_v2_name_drift_does_not_hide_registered_or_current_mismatch(self):
+        changed_identity = replace(
+            self.identity, repository="upiscium/RENAMED")
+        changed_registered = replace(
+            self.registered, branch_ref="refs/heads/task/340-other")
+        self.assert_non_grant(
+            self.evaluate(identity=changed_identity,
+                          registered=changed_registered),
+            "REFUSED", "registered_task_mismatch")
+        self.assert_non_grant(
+            self.evaluate(
+                identity=changed_identity,
+                current_after=replace(self.current, record_id="0" * 64)),
+            "REFUSED", "current_contract_or_record_mismatch")
+
+    def test_main_name_drift_alone_still_freezes_without_permissions(self):
+        self.assert_non_grant(
+            self.evaluate(main_repository_name="upiscium/RENAMED"),
+            "UNKNOWN", "repository_name_drift")
 
     def test_current_only_old_repository_name_freezes_same_numeric_id(self):
         new_name = "upiscium/RENAMED"

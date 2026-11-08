@@ -5,10 +5,14 @@ Original development baseline:
 `main@d8e3ccf00d53c37b0bed54b6f1223892d0eaf32a` in an isolated
 remote-free checkout after source-only PR #386 was merged.
 This design was subsequently published in source-only Draft PR #389
-(head `54fbf20f532ec3294a1d06e722034f1abb54a727`,
+(initial head `54fbf20f532ec3294a1d06e722034f1abb54a727`,
 base `main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d`).
-Any R1 documentation correction is local-only until separately authorized
-for publication. No Ready/Merge, deploy, Host directory creation,
+Reviewed R1 corrections were published at
+`583d873b32d8579159579184e3e274226cc7c7d6`.
+The R2 CurrentTask ordering / document-status correction is **local-only**
+until separately approved for Commit/Push; neither historical published
+HEAD is an R2 review or CI qualification.
+No Ready/Merge, deploy, Host directory creation,
 `RecoveryJournal.create`, CLI execution, permission change or activation.
 
 ## Decision
