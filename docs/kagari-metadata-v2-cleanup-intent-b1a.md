@@ -1,8 +1,10 @@
 # KUMIKI #337 — P3C/B1-A durable cleanup intent (source-only)
 
-**State:** Local prototype of Host-owned admission and create-once cleanup
-intent. No external GitHub branch deletion, Git object publication, Task
-execution, activation, install, deployment, commit, push, or PR.
+**State:** Host-owned admission and create-once cleanup intent are published
+as source/test/docs-only Draft PR #388. The implementation is not activated,
+installed or deployed. It performs no Metadata Git ref mutation, Issue branch
+deletion, model/Task execution or remote cleanup effect. Publication of this
+source-only PR is not runtime admission or approval to perform a delete.
 
 **Base:** `main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d`
 (PR #387 P3C/B0 merged). Ordinary Git branches are the approved lifecycle;
@@ -111,5 +113,7 @@ Only after source review, CI and another Human gate:
 - The ordinary Archive can still be force-rewritten or deleted by
   an unrelated external actor. This is the accepted #337 limitation,
   not a justification for introducing mandatory GitHub configuration.
-- Keep Issue #337 OPEN, default GA/v1 unchanged and P3C/B1-A
-  unpublished until explicit Source Guard Commit/Push/Draft PR approval.
+- PR #388 is published as a nonclosing Draft with `Refs #337`.
+  Keep Issue #337 OPEN, default GA/v1 unchanged, and PR #388 unmerged
+  until separate exact-published-head CI/review and Human Ready/Merge
+  approval. This source-only publication grants no runtime cleanup effect.
