@@ -1,7 +1,7 @@
 # ADR-0006: Claude主体の実行構成、host所有のMain、Ask二分類、v3廃止
 
 - **Status:** Proposed — Humanの設計選択は2026-11-09に会話上で確定。本ファイルのレビュー・Mergeは未了
-- **Human decision:** 案Y（Claude主体）を採用。未確定4論点＋同時実行数について推奨案をすべて承認（2026-11-09 JST）
+- **Human decision:** 案Y（Claude主体）を採用。未確定4論点＋同時実行数について推奨案をすべて承認。D8のリリース定義と#291 ACの扱いを承認（いずれも2026-11-09 JST）
 - **Related:** ADR-0001/0004/0005、#291、#340、#292、#339、#288、#359、#317、#364、#337、#256、#194、#197、#142
 - **Supersedes:** 引き継ぎ文書の「OpenCodeがdefault、Claudeは任意executor」という前提、#340の「optional executor」という位置付け、#288の「N/C上限を強制しない」のうちClaudeセッション部分
 
@@ -83,8 +83,31 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 
 ### D8 — 次のリリースの条件
 
-- 次のリリースは**Claude経路でのE2E-01**（Issue 1件 → worktree → Task Orchestrator → Leaf → テスト・レビュー → Draft PR）を必須とする。
-- 具体的な受入範囲は#291のAC-MAIN-01〜08から選んで本ADRの追補に記録する（**未決定**）。
+**リリース定義（Human承認 2026-11-09）:**
+
+> 承認ラベルの付いたIssue 1件を、Main（host）が選んでworktreeを作り、ClaudeのTask Orchestratorが実装し、OpenCode + TSUMGIのレビューを通し、Draft PRまで作る。続けて2件目のIssueを同じMainで順番に処理する。途中で中断しても二重にdispatchしない。NEEDS_*が出たらBLOCKEDになり、CLIに理由を表示する。
+
+**#291 AC-MAIN-01〜08の扱い:**
+
+| AC | 扱い | 補足 |
+| --- | --- | --- |
+| 01 単一Main | 含める | 既存のflock・AttachmentLeaseを使う |
+| 02 対象Issue選択 | 含める | 明示した番号リストに、D5の承認ラベル判定を加える |
+| 03 Issue正本・Contract | 含める | 既存の#191 Contract固定とdrift検知を使う |
+| 04 二重割り当て防止 | 含める | 既存の#286 allocatorを使う |
+| 05 Taskセッション起動 | 含める（主要作業） | `opencode serve`前提（#163）を、worktree内でheadlessのClaudeを起動する方式に置き換える。現在のMainはClaudeを`CLAUDE_EXECUTOR_UNQUALIFIED`として拒否している |
+| 06 進捗とNEEDS_*の上申 | 縮小して含める | 権限AskはhostがContractで自動判定する（D4）。NEEDS_*はTaskをBLOCKEDにしてCLIに表示するだけとし、HumanはIssueを直して新しいContractで再実行する。MUSUBIからの回答と再開は次の版に回す |
+| 07 中断からの復旧 | 縮小して含める | 安全に停止すること、再起動しても二重にdispatchしないこと、曖昧な状態ではBLOCKすることに限る。中断した操作をちょうど1回だけ再開する完全な復旧は次の版に回す |
+| 08 実Projectでの一連の流れ | 含める | 「configured OpenCode model」をClaudeに読み替える。2件目のIssueは1件目の後に順番に処理し、並行実行は検証しない（D6） |
+
+**リリース範囲外とするもの:**
+
+- MUSUBI経由の生のAsk回答と再開（#292のClaude対応）
+- Metadata v2のArchiveとcleanup（#337 P3C、#390/#391）。E2E-01ではIssueごとのmetadata branchと初期checkpointがあれば足り、古いbranchは手動で削除してよい
+- 完全なexactly-once復旧（#332〜#334）
+- 複数Taskの並行実行
+
+**残る主な作業:** AC-05のClaude起動、権限Askの自動判定を行うhost窓口（`--permission-prompt-tool`のMCP）、レビュー用Leafのhost窓口（OpenCode + TSUMGI）。作業量の見積もりは、実機確認(a)〜(d)の結果を受けて行う。
 
 ## Consequences
 
@@ -100,6 +123,7 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 | #288 | D3・D6に合わせて改める |
 | #317 / #364 | ClaudeのPreToolUse hookとコマンド構文の解析で、根本的に解決できるかを先に確かめる |
 | #332〜#336 | 引き続き保留 |
+| #337 P3C（#391） | Archive・cleanupはD8の範囲外。リリースまで新しい作業を止める |
 
 ### 既知の限界
 
@@ -122,7 +146,6 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 
 - 承認ラベルの名称と、agentによる付与を禁止する具体的な設定
 - host Leaf窓口（MCPツール）のインターフェース
-- D8に含める#291 ACの範囲
 - 同時実行数の上限をどこで強制するか（Mainかhost窓口か）
 - 引き継ぎ文書をこのADRに合わせて更新すること
 
