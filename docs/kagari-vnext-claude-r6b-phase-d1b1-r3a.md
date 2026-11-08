@@ -6,12 +6,14 @@ Original development on isolated remote-free
 `main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d`.
 Draft PR #389 first published
 `54fbf20f532ec3294a1d06e722034f1abb54a727`,
-then published the reviewed R1 input-hardening corrections at
-`583d873b32d8579159579184e3e274226cc7c7d6` (current published HEAD
-when R2 began). The R3 D0 companion design is in the same Draft PR.
-**R2 one-sided CurrentTask validation-order and documentation corrections
-are local-only, NOT committed or pushed**, until separately approved.
-They require new exact-published-head CI and PR-mode review after publication.
+then the R1 input-hardening corrections at
+`583d873b32d8579159579184e3e274226cc7c7d6`, and finally the R2
+one-sided CurrentTask validation-order and documentation corrections at
+`9c824bd276ab2def886d6e3b4303bfe7feec1644`.
+The R3 D0 companion design is in the same Draft PR.
+The R2 published HEAD passed Template CI (run `42478833346`:
+15/15 jobs, 16/16 checks). These publication and CI facts do **not**
+qualify the Host, grant Task execution, or imply Ready/Merge.
 No Ready/Merge/Deploy/activation, Host mutation, new Journal/genesis,
 Claude CLI or model Task, or Main/Transport wiring.
 

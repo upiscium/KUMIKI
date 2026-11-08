@@ -9,9 +9,11 @@ This design was subsequently published in source-only Draft PR #389
 base `main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d`).
 Reviewed R1 corrections were published at
 `583d873b32d8579159579184e3e274226cc7c7d6`.
-The R2 CurrentTask ordering / document-status correction is **local-only**
-until separately approved for Commit/Push; neither historical published
-HEAD is an R2 review or CI qualification.
+R2 CurrentTask validation-order and documentation corrections were then
+published at `9c824bd276ab2def886d6e3b4303bfe7feec1644` in the same
+**Draft PR #389**. The R2 HEAD completed Template CI successfully
+(run `42478833346`, 15/15 jobs and 16/16 checks). These are source/test/docs
+publication milestones, **not** real Host qualification or activation.
 No Ready/Merge, deploy, Host directory creation,
 `RecoveryJournal.create`, CLI execution, permission change or activation.
 
