@@ -1,11 +1,16 @@
-# KUMIKI #337 — P3C/B0 Cleanup History Readback (local source-only candidate)
+# KUMIKI #337 — P3C/B0 Cleanup History Readback (merged read-only source)
 
 **Authority:** Issue #337 ordinary Git branches decision (2026-11-07).
 **Source baseline:** `main@f8bba7cdb55a0fa48ac194ee538724064226214e`.
-**Status:** new source-only module + isolated local tests, not published/installed/
-activated. No remote GitHub Metadata ref effect, Issue deletion, PR, Release or
-model. The original synthetic GitHub P3C-A acceptance is historical proof of
-normal Git delete transport, not a production Host grant.
+**Status (updated after #387 merge):** P3C/B0 read-only source/test/docs merged
+as PR #387 on 2026-11-08 at main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d;
+not installed or activated. No production GitHub Metadata-ref deletion, GA
+release, or model effect. The earlier disposable GitHub P3C-A acceptance is
+historical transport proof, not a current production Host grant. P3C/B1
+source-only Host coordination was subsequently published for review through
+nonclosing PR #390 (initially Draft). Consult the PR for the moving HEAD and
+review status; no real CLI cleanup adapter or production activation is implied
+(see cleanup-host-preview).
 
 ## Minimal role
 
@@ -41,10 +46,13 @@ The typed `CleanupHistory` is **only an observation**, not a delete
 authority token. A consumer must not treat `PRESENT_EXACT` or an earlier
 terminal Record disposition as automatic approval.
 
-## Missing source/runtime gate for P3C/B1
+## P3C/B1 source coordinator and remaining runtime gates
 
-Reuse the same existing Host ownership and #140 `RecoveryJournal`, rather
-than introducing another Task state model or a new permissions service.
+The separate source-only CleanupHost was published in Draft PR #390. The
+following requirements remain binding for the future trusted Host/CLI effect
+adapter; source publication alone is not production qualification. Reuse the
+existing Host ownership and #140 `RecoveryJournal` rather than introducing
+another Task state model or permissions service.
 
 - **Before delete:** the real trusted Main/Host must verify current
   Task terminality, Human decision, Product work preservation, no remaining
