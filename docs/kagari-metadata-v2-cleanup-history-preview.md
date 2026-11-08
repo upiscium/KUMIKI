@@ -7,7 +7,9 @@ as PR #387 on 2026-11-08 at main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d;
 not installed or activated. No production GitHub Metadata-ref deletion, GA
 release, or model effect. The earlier disposable GitHub P3C-A acceptance is
 historical transport proof, not a current production Host grant. P3C/B1
-remains a separate, local-only source candidate (see cleanup-host-preview).
+source-only Host coordination was subsequently published in Draft PR #390
+(R1 HEAD `2a925dc632d62b0e59bca9d563b17835cbb55422`); no real CLI
+cleanup adapter or production activation is implied (see cleanup-host-preview).
 
 ## Minimal role
 
@@ -43,10 +45,13 @@ The typed `CleanupHistory` is **only an observation**, not a delete
 authority token. A consumer must not treat `PRESENT_EXACT` or an earlier
 terminal Record disposition as automatic approval.
 
-## Missing source/runtime gate for P3C/B1
+## P3C/B1 source coordinator and remaining runtime gates
 
-Reuse the same existing Host ownership and #140 `RecoveryJournal`, rather
-than introducing another Task state model or a new permissions service.
+The separate source-only CleanupHost was published in Draft PR #390. The
+following requirements remain binding for the future trusted Host/CLI effect
+adapter; source publication alone is not production qualification. Reuse the
+existing Host ownership and #140 `RecoveryJournal` rather than introducing
+another Task state model or permissions service.
 
 - **Before delete:** the real trusted Main/Host must verify current
   Task terminality, Human decision, Product work preservation, no remaining

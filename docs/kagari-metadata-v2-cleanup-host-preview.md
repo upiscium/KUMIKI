@@ -1,9 +1,8 @@
 # KUMIKI #337 — P3C/B1 Exact-Lease Cleanup Host (source-only preview)
 
-**Base:** merged #387 / main ddabe2c4524d78c07afdfaba378378c2ac8ec37d.
-**State:** disposable Adam detached Worktree candidate, NOT committed/pushed/
-installed/activated. No real GitHub Metadata ref mutation, provider I/O or
-model/Task execution has been run by this preview.
+**Review base:** merged #387 / `main@ddabe2c4524d78c07afdfaba378378c2ac8ec37d` (historical PR base).
+**Publication:** source-only P3C/B1 is published in **Draft PR #390**, R0 `363c6acfe4ddc40e02e519e6b1dd4d584cb3bf60` and corrected R1 HEAD `2a925dc632d62b0e59bca9d563b17835cbb55422` (2026-11-08). The Adam Worktree is on `feat/337-p3c-b1-cleanup-host`; this documentation update is local-only until separately authorized for Commit/Push.
+**Runtime:** NOT installed/activated. No production GitHub Metadata ref mutation, provider I/O or model/Task execution has been performed by this source-only implementation.
 
 ## Boundary
 
@@ -92,13 +91,18 @@ unknown ACK both sides of effect, invalid Human/Task/lock authority,
 cross-attempt collision, and poisoned saved intent.
 
 The local fixture's `git update-ref -d <ref> <old>` is **not** a proof of
-the future CLI remote `--force-with-lease` adapter. Independent OpenCode
-review and the exact file SHA manifest must precede any guarded publication.
+the future CLI remote `--force-with-lease` adapter. The reviewed R1 source
+was published to Draft PR #390 under the pinned Source Guard. At R1 HEAD
+`2a925dc632d62b0e59bca9d563b17835cbb55422`, local focused + adjacent
+regressions passed **76/76**, GitHub Template CI completed **15/15 jobs** with
+**16/16 PR checks PASS**, and independent exact-published-HEAD OpenCode
+Correctness / Security PR-mode reviews both returned **PASS** (source-only).
 
 Remaining gates: verify/implement the real trusted CLI adapter and live Host
 Task/Session/grant provenance, integrate #140 recovery/cleanup scheduling,
 reconfirm historical versioned PR checkpoints after actual delete via fresh
-clone, run separately authorized disposable GitHub canary and independent
-correctness/security reviews; then obtain separate Human decisions for PR
-publication, merge and optional activation. Preserve #337/#291 OPEN and v1
-behavior unchanged.
+clone, and run a separately authorized disposable GitHub canary with independent
+correctness/security review. The existing Draft PR remains nonclosing; a
+separate Human decision is required for any subsequent source publication,
+Ready/Merge, and optional runtime activation. Preserve #337/#291 OPEN and
+v1 behavior unchanged.
