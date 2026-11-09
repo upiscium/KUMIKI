@@ -1,6 +1,6 @@
 # ADR-0006: Claude主体の実行構成、host所有のMain、Ask二分類、v3廃止
 
-- **Status:** Proposed — Humanの設計選択は2026-11-09に会話上で確定。本ファイルのレビュー・Mergeは未了
+- **Status:** Accepted — PR #392で2026-11-09にMerge。同日の追補（D4aのプラグイン方針、Follow-upの追記）を含む
 - **Human decision:** 案Y（Claude主体）を採用。未確定4論点＋同時実行数について推奨案をすべて承認。D8のリリース定義、#291 ACの扱い、v1 metadata経路の採用を承認（いずれも2026-11-09 JST）
 - **Related:** ADR-0001/0004/0005、#291、#340、#292、#339、#288、#359、#317、#364、#337、#256、#194、#197、#142
 - **Supersedes:** 引き継ぎ文書の「OpenCodeがdefault、Claudeは任意executor」という前提、#340の「optional executor」という位置付け、#288の「N/C上限を強制しない」のうちClaudeセッション部分
@@ -69,7 +69,11 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 
 - **Task の規則は、起動時の追加システムプロンプトでClaudeに渡す。** KAGARIはProjectの`AGENTS.md`・`CLAUDE.md`・`CLAUDE.local.md`に書き込まない。`CLAUDE.md`または`CLAUDE.local.md`が存在すると`AGENTS.md`が読まれなくなるため、KAGARIがこれらのファイルを置くとProjectの規則を消してしまう（実機確認M2・M4）。
 - hostは起動前に、worktreeでどの指示ファイルが有効になるか（`AGENTS.md`のみ、`CLAUDE.md`のみ、`@AGENTS.md`の取り込みあり、など）を診断し、Evidenceに記録する。ADR-0004（AGENTS.mdとの共存）は、Claudeでの読み込み規則を前提に追補する。
-- **Task セッションではプラグインを無効にし、クリーンな環境変数で起動する。** 親セッションの`CLAUDECODE`・`CLAUDE_CODE_SESSION_ID`などは除去する。個人profileで有効なプラグイン（確認時は`arca-issue-handoff`）がTaskに混入しないようにするためである。MCPは`--strict-mcp-config`でKAGARIが指定したものだけを使う。
+- **Task セッションはクリーンな環境変数で起動する。** 親セッションの`CLAUDECODE`・`CLAUDE_CODE_SESSION_ID`などは除去する。MCPは`--strict-mcp-config`でKAGARIが指定したものだけを使う。
+- **Task セッションのプラグインは、KAGARIの設定に明示した許可リストで決める（2026-11-09追補）。** 許可リストに無いプラグイン（確認時の`arca-issue-handoff`など）は読み込ませない。許可リストの初期値は空とする。
+  - プラグインを一律に禁止はしない。ただし許可リストに加える前に、そのプラグインが持つhooks・MCPサーバ・skillsを確認し、(1) 権限窓口（D4）の判定やdenyルールを迂回しないこと、(2) skillが自動起動してIssueやPRへの書き込み、worktreeの削除など、Task Orchestratorの役割（承認済みIssueの実装）を超える操作を始めないこと、を確かめる。
+  - 起動記録には、実際に有効だったプラグインの名前とバージョンを残す。個人profileのプラグインは更新で中身が変わり、同じIssueでも実行日によって振る舞いが変わり得るためである。
+  - 設計・承認側の作業（User、claude.ai Project、Adamの設計用Claude Codeセッション）でプラグインを使うことは、この制限の対象外とする（D5）。
 
 ### D5 — 外部設計者と承認の作法
 
@@ -148,7 +152,7 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 ### 既知の限界
 
 - **承認ラベルの真正性：** agentとUserは同じGitHub CLI認証を共有している（2026-11-07の決定）。そのためGitHub上の操作者からは、ラベルを付けたのが人間かagentかを区別できない。悪意あるagentは脅威モデルの範囲外（ADR-0001）なので、agentがラベルを付けられないよう**権限ルールとhookで禁止する**ことで担保する。これは暗号的な証明ではない。
-- **個人ログインとmod：** managed settingsが無く個人ログインで動かす場合、インストールしたmodがdenyルールを覆して承認できる。host側のeffective policy検証に、mod・pluginの有無を含める。プラグインを無効にする具体的な指定方法は未確認。
+- **個人ログインとmod：** managed settingsが無く個人ログインで動かす場合、インストールしたmodがdenyルールを覆して承認できる。host側のeffective policy検証に、mod・pluginの有無を含める。許可リスト外のプラグインを読み込ませない具体的な指定方法は未確認。
 - **`python3`のallowルール：** `python3 -c '…'`や`python3 ok.py`は、exactなallowルールでも承認要求になった。原因は未確認。窓口経由では実行できる（A8）ため、テスト実行は窓口の判定に任せる。
 - **利用枠と規約：** 個人サブスクリプションの利用上限と、自動実行の規約上の扱いは未確認である。
 - **モデル系統の同一性：** Claudeの標準subagentによる調査は作り手と同じ系統になる。独立性が必要な検証には使わない。
@@ -169,7 +173,7 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 
 - 権限Askの窓口が異常終了したとき、およびタイムアウトしたときに、操作が拒否されること
 - 入れ子の上限（3層目）の実際の挙動
-- プラグインを無効にした起動で、deny規則とContract判定が想定どおりに効くこと
+- 許可リストどおりにプラグインを読み込ませた起動で、deny規則とContract判定が想定どおりに効くこと
 - レビュー用Leafが読み取り専用のsnapshotで動くこと
 
 ## Follow-up (not decided here)
@@ -177,5 +181,8 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 - 承認ラベルの名称と、agentによる付与を禁止する具体的な設定
 - host Leaf窓口（MCPツール）のインターフェース
 - 同時実行数の上限をどこで強制するか（Mainかhost窓口か）
+- **MUSUBIからの承認（2026-11-09追記）：** MainがAPIを公開し、MUSUBIから承認ラベルを付けられるようにする。承認APIは、agentから届かない資格情報、Taskセッションからの到達拒否、承認経路のEvidenceへの記録、Issueの4欄が揃わなければ承認不可、の4条件で守る。D8の後に別のADRで決める。
+- **利用枠（2026-11-09追記）：** サブスクリプション認証の`claude -p`は、Userの対話と同じ5時間枠・週枠を消費する。使用率が設定した割合を超えたら新しいdispatchを止める仕組みと、上限到達時に`BLOCKED(RATE_LIMITED)`にしてリセット後に次のIssueを新しくdispatchする仕組みを、D8の後に検討する。途中からの再開は行わない。headlessで使用率と上限到達を機械的に取れるかは未確認（実機確認(e)）。
+- **認証経路（2026-11-09追記）：** Max以上のプランの月次APIクレジットを、APIキー経由の`claude -p`に使えるかは、公式文書の間で記述が食い違っており未確認。使えなくても本ADRの構成は変えない。切り替える場合は、hostがdispatchごとに環境変数で認証経路を選び、Evidenceに記録する。
 
 本ADRは、Source Publication、Merge、Release、本番適用、またはv3コンシューマの変更を承認するものではない。

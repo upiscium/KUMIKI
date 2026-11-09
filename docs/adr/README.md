@@ -9,7 +9,7 @@ KUMIKI（組木）/ KAGARI（篝）の合意済み設計判断を記録します
 | [0003 — 自己更新可能な source 開発と統一復旧](0003-self-hosted-development-and-recovery.md) | Accepted principles; implementation choices pending | Source Guard、自律更新、既知・未知の障害への対処 |
 | [0004 — KAGARIとAGENTS.mdの共存](0004-kagari-agents-coexistence.md) | Accepted design; publication pending | 既存の設定と衝突時Ask |
 | [0005 — v0.1.0優先と耐障害性拡張の凍結](0005-v010-delivery-and-resilience-freeze.md) | Accepted; v0.1.0 bounded GA released | 最小実モデルTask・基本着脱・公開順序 |
-| [0006 — Claude主体の実行構成とv3廃止](0006-claude-primary-execution-topology.md) | Proposed; Human design choices recorded 2026-11-09 | 実行構成・host所有のMain・Ask二分類・Leaf実行・承認ラベル・v3廃止・次期リリース条件 |
+| [0006 — Claude主体の実行構成とv3廃止](0006-claude-primary-execution-topology.md) | Accepted (PR #392, 2026-11-09); addendum 2026-11-09 | 実行構成・host所有のMain・Ask二分類・Leaf実行・承認ラベル・v3廃止・次期リリース条件 |
 
 **Decision tracking:** [Issue #254](https://github.com/upiscium/KUMIKI/issues/254)。既存の v4 [Issue #189](https://github.com/upiscium/KUMIKI/issues/189)、KUMIKI/KAGARI 改名 [#242](https://github.com/upiscium/KUMIKI/issues/242)、#221 / Draft PR #224、#250 と整合させる。
 
