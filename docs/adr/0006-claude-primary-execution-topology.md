@@ -41,7 +41,9 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 
 ### D3 — Leafの実行方式
 
-1. **Claude標準subagentは読み取り専用の調査に限る。** `tools`から編集系と`Agent`を外す。加えて`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`で入れ子を禁止する。Claude Codeは既定で、subagentがさらに3段までsubagentを起動できるためである。
+1. **Claude標準subagentは読み取り専用の調査に限る。** `tools`から編集系と`Agent`を外す。加えて`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`で入れ子を禁止する。Claude Codeは既定で本体の下に3層までsubagentを起動できる（subagentからさらに起動できるのは2段まで。実機で確認したのは2層目まで）。この環境変数は親プロセスから継承されるため、hostは継承に頼らず毎回明示的に設定する。
+   - 組み込みの汎用subagentは無効にする。読み取り専用の制限を迂回されないためである。
+   - 背景実行のsubagent（`background` / `run_in_background`）は禁止する。背景subagentがあるとstream-jsonの`result`イベントが複数回出て、完了判定を誤らせるためである。
 2. **ファイルを編集するLeafと独立レビューは、すべてhostのLeaf窓口（MCPツール）を経由する。**
    - 入力：TaskSpecと許可範囲
    - 出力：`COMPLETED` / `BLOCKED` / `NEEDS_APPROVAL` / `NEEDS_DECISION`
@@ -53,12 +55,21 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 
 | 種類 | 発生源 | 経路 | 人間に届く条件 |
 | --- | --- | --- | --- |
-| 権限Ask | ツール実行の許可確認（Claudeの`--permission-prompt-tool`、OpenCodeのPermission API） | host窓口へ直接届く | hostがContractと照合し、範囲内なら自動許可、範囲外なら自動拒否してagentに返す。ADR-0001が定めるAsk対象の操作だけを人間に回す |
+| 権限Ask | ツール実行の許可確認（Claudeの`--permission-prompt-tool`、OpenCodeのPermission API） | 設定のallow / denyルールで決まらなかった確認だけがhost窓口に届く | hostがContractと照合し、範囲内なら自動許可、範囲外なら自動拒否してagentに返す。ADR-0001が定めるAsk対象の操作だけを人間に回す |
 | 判断Ask | `NEEDS_DECISION` / `NEEDS_APPROVAL` | Leaf → Task Orchestrator（範囲・権限・代替案を再評価）→ host窓口 | Task Orchestratorが自分で解決できないもの |
 
 - host窓口だけがAskの受付・照合・回答の正本を持つ。MUSUBIは表示と回答入力のclientであり、Askを管理しない（#292）。
 - 拒否された操作を、言い換えて人間へのAskに変換してはならない（不変条件13を維持）。
 - 不変条件3・11・12・13は変更しない。
+- **Task セッションのallowルールは読み取り系に限る。** allowやdenyのルールに一致した操作は窓口に届かず、Contractとの照合が効かないためである（実機確認A6・A7）。それ以外の操作はすべて窓口の判定に回す。
+- 窓口に届く要求には、本体とsubagentを区別する情報が含まれない（`tool_name`・`input`・`tool_use_id`のみ）。D3.1によりsubagentは読み取り系のツールしか持たないため、窓口は届いた要求をTask Orchestratorのものとして、同じContractで判定する。発生元の区別が必要になった場合は、stream-jsonの`parent_tool_use_id`との突き合わせで行う。
+- 窓口が応答しない、異常終了する、不正な応答を返す場合、操作は拒否されなければならない。不正な応答で拒否されることは確認済み（A10）。異常終了とタイムアウトは未確認であり、実装時の受入条件とする。
+
+### D4a — Task 規則の渡し方と起動環境
+
+- **Task の規則は、起動時の追加システムプロンプトでClaudeに渡す。** KAGARIはProjectの`AGENTS.md`・`CLAUDE.md`・`CLAUDE.local.md`に書き込まない。`CLAUDE.md`または`CLAUDE.local.md`が存在すると`AGENTS.md`が読まれなくなるため、KAGARIがこれらのファイルを置くとProjectの規則を消してしまう（実機確認M2・M4）。
+- hostは起動前に、worktreeでどの指示ファイルが有効になるか（`AGENTS.md`のみ、`CLAUDE.md`のみ、`@AGENTS.md`の取り込みあり、など）を診断し、Evidenceに記録する。ADR-0004（AGENTS.mdとの共存）は、Claudeでの読み込み規則を前提に追補する。
+- **Task セッションではプラグインを無効にし、クリーンな環境変数で起動する。** 親セッションの`CLAUDECODE`・`CLAUDE_CODE_SESSION_ID`などは除去する。個人profileで有効なプラグイン（確認時は`arca-issue-handoff`）がTaskに混入しないようにするためである。MCPは`--strict-mcp-config`でKAGARIが指定したものだけを使う。
 
 ### D5 — 外部設計者と承認の作法
 
@@ -121,14 +132,16 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 | #339 | MUSUBIからの入口としては残す。「OpenCode workerの並列実行」部分は見直す |
 | #359 | OpenCode Leafでは引き続き必要だが、優先度は下げる |
 | #288 | D3・D6に合わせて改める |
-| #317 / #364 | ClaudeのPreToolUse hookとコマンド構文の解析で、根本的に解決できるかを先に確かめる |
+| #317 | 実機確認(d)で、引用符内の`\|`・`;`による誤検知はClaude経路では構文解析で解消されることを確認した。v3の実害は手動での回避と移行で解消する。v4向けのA2（型付き操作）・B2（隔離レビュー）は次期リリースの前提にしない |
+| #364 | Git読み取り時の外部コード実行は、Claude経路でも窓口のContract判定で扱う。PreToolUse hookによる対処は未確認 |
 | #332〜#336 | 引き続き保留 |
 | #337 P3C（#391） | Archive・cleanupはD8の範囲外。リリースまで新しい作業を止める |
 
 ### 既知の限界
 
 - **承認ラベルの真正性：** agentとUserは同じGitHub CLI認証を共有している（2026-11-07の決定）。そのためGitHub上の操作者からは、ラベルを付けたのが人間かagentかを区別できない。悪意あるagentは脅威モデルの範囲外（ADR-0001）なので、agentがラベルを付けられないよう**権限ルールとhookで禁止する**ことで担保する。これは暗号的な証明ではない。
-- **個人ログインとmod：** managed settingsが無く個人ログインで動かす場合、インストールしたmodがdenyルールを覆して承認できる。host側のeffective policy検証に、mod・pluginの有無を含める。
+- **個人ログインとmod：** managed settingsが無く個人ログインで動かす場合、インストールしたmodがdenyルールを覆して承認できる。host側のeffective policy検証に、mod・pluginの有無を含める。プラグインを無効にする具体的な指定方法は未確認。
+- **`python3`のallowルール：** `python3 -c '…'`や`python3 ok.py`は、exactなallowルールでも承認要求になった。原因は未確認。窓口経由では実行できる（A8）ため、テスト実行は窓口の判定に任せる。
 - **利用枠と規約：** 個人サブスクリプションの利用上限と、自動実行の規約上の扱いは未確認である。
 - **モデル系統の同一性：** Claudeの標準subagentによる調査は作り手と同じ系統になる。独立性が必要な検証には使わない。
 
@@ -142,11 +155,19 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 - (d) 引用符内の`|`・`;`が部分コマンドの区切りとして扱われないこと（#317の再現条件）。
 - 以上を満たしたうえで、D8のE2E-01を実Project（使い捨てのclone）で通すこと。
 
+**実施状況（2026-11-09）：** (a)〜(d)はClaude CLI 2.1.293、OpenCode 1.18.35、`tsumgi/qwen3.8-27b`で実施し、すべてPASS。詳細と証拠の場所はPR #392のコメントを参照。結果を受けてD3.1、D4、D4aを修正した。
+
+**未確認（実装時の受入条件とする）:**
+
+- 権限Askの窓口が異常終了したとき、およびタイムアウトしたときに、操作が拒否されること
+- 入れ子の上限（3層目）の実際の挙動
+- プラグインを無効にした起動で、deny規則とContract判定が想定どおりに効くこと
+- レビュー用Leafが読み取り専用のsnapshotで動くこと
+
 ## Follow-up (not decided here)
 
 - 承認ラベルの名称と、agentによる付与を禁止する具体的な設定
 - host Leaf窓口（MCPツール）のインターフェース
 - 同時実行数の上限をどこで強制するか（Mainかhost窓口か）
-- 引き継ぎ文書をこのADRに合わせて更新すること
 
 本ADRは、Source Publication、Merge、Release、本番適用、またはv3コンシューマの変更を承認するものではない。
