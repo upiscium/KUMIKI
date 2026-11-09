@@ -1,7 +1,7 @@
 # ADR-0006: Claude主体の実行構成、host所有のMain、Ask二分類、v3廃止
 
 - **Status:** Proposed — Humanの設計選択は2026-11-09に会話上で確定。本ファイルのレビュー・Mergeは未了
-- **Human decision:** 案Y（Claude主体）を採用。未確定4論点＋同時実行数について推奨案をすべて承認。D8のリリース定義と#291 ACの扱いを承認（いずれも2026-11-09 JST）
+- **Human decision:** 案Y（Claude主体）を採用。未確定4論点＋同時実行数について推奨案をすべて承認。D8のリリース定義、#291 ACの扱い、v1 metadata経路の採用を承認（いずれも2026-11-09 JST）
 - **Related:** ADR-0001/0004/0005、#291、#340、#292、#339、#288、#359、#317、#364、#337、#256、#194、#197、#142
 - **Supersedes:** 引き継ぎ文書の「OpenCodeがdefault、Claudeは任意executor」という前提、#340の「optional executor」という位置付け、#288の「N/C上限を強制しない」のうちClaudeセッション部分
 
@@ -80,7 +80,7 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 
 ### D6 — 同時実行数
 
-- Claude Task Orchestratorの同時実行数は**1**から始め、Claude経路でE2E-01が通ったら**2**に上げる。それ以上は利用実績を見て別途決める。
+- Claude Task Orchestratorの同時実行数は**1**から始める。**2**に上げるのは、Claude経路でE2E-01が通り、かつmetadataをv2（#337）へ移行した後とする。v1は全Issueが1本の共有refに書き込むため、並行実行では書き込みが衝突するからである（D8「実行経路とmetadata」）。それ以上は利用実績を見て別途決める。
 - OpenCode Leafの同時実行数はTSUMGIのGPU容量で決める。
 - これは#288の「N/C上限を強制しない」を、Claudeセッションに限って改める。
 
@@ -114,9 +114,17 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 **リリース範囲外とするもの:**
 
 - MUSUBI経由の生のAsk回答と再開（#292のClaude対応）
-- Metadata v2のArchiveとcleanup（#337 P3C、#390/#391）。E2E-01ではIssueごとのmetadata branchと初期checkpointがあれば足り、古いbranchは手動で削除してよい
+- Metadata v2（#337）全体。次期リリースは既存のv1 metadata（`refs/agentcore/metadata`）を使う（下記「実行経路とmetadata」）
 - 完全なexactly-once復旧（#332〜#334）
 - 複数Taskの並行実行
+
+**実行経路とmetadata（Human承認 2026-11-09）:**
+
+- 次期リリースは、既存のv1 dispatch経路（`RepositoryMain.dispatch`）を土台にする。この経路は、worktreeの確保（#286）、初期Draft PR（#194）、Issueの変更検知、初回プロンプトの二重送信防止までを1本の流れとして持つ、main上で唯一の経路である。
+- OpenCodeに依存する3か所（`opencode serve`によるセッション起動、HTTPによるプロンプト送信、OpenCodeのセッションAPIを使った再送時の照合）だけをClaudeの起動に置き換える。
+- metadataはv1（`refs/agentcore/metadata`）を使う。v1とv2はTask Record・Contract・Evidence・Task Viewのデータ形式が同じで、違いは保存場所の構造である。v1の弱点である共有refへの並行書き込みの衝突は、同時実行1件（D6）の次期リリースでは表に出ない。
+- main上のv2系の部品（v2 readonly / worktree / session / PR-first / product PRの各経路）は互いに排他で、dispatchの流れに統合されていない。v2での実行は`V2_MAIN_EXECUTION_NOT_QUALIFIED`で拒否される。これらの統合はリリース後に行う。
+- **v1の dispatch経路のテストはfakeのOpenCodeとfixtureで行われており、実モデルで一連の流れを通した記録は確認できていない。** 次期リリースのE2Eが、この経路の初めての実地検証になる。
 
 **残る主な作業:** AC-05のClaude起動、権限Askの自動判定を行うhost窓口（`--permission-prompt-tool`のMCP）、レビュー用Leafのhost窓口（OpenCode + TSUMGI）。作業量の見積もりは、実機確認(a)〜(d)の結果を受けて行う。
 
@@ -135,7 +143,7 @@ User ──承認ラベル──▶ Issue（要件・受入条件・非目標・
 | #317 | 実機確認(d)で、引用符内の`\|`・`;`による誤検知はClaude経路では構文解析で解消されることを確認した。v3の実害は手動での回避と移行で解消する。v4向けのA2（型付き操作）・B2（隔離レビュー）は次期リリースの前提にしない |
 | #364 | Git読み取り時の外部コード実行は、Claude経路でも窓口のContract判定で扱う。PreToolUse hookによる対処は未確認 |
 | #332〜#336 | 引き続き保留 |
-| #337 P3C（#391） | Archive・cleanupはD8の範囲外。リリースまで新しい作業を止める |
+| #337 Metadata v2 | 次期リリースはv1を使うため、リリースまで新しい作業を止める（P3Cの#391を含む）。リリース後、同時実行数を2に上げる前にv2へ移行する |
 
 ### 既知の限界
 
