@@ -158,6 +158,9 @@ class EnvironmentAndArgvTests(FixtureCase):
         self.assertEqual((self.evidence / "task-rules.md").read_text(), "# rules\n")
         settings = json.loads(next(item for item in argv if item.startswith("--settings="))[len("--settings="):])
         self.assertEqual(settings["permissions"]["allow"], [])
+        self.assertEqual(settings["permissions"]["ask"], ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"])
+        self.assertEqual(settings["env"], {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
+                                           "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"})
         for name in ("general-purpose", "claude", "fork"):
             self.assertIn(f"Agent({name})", settings["permissions"]["deny"])
 
@@ -171,9 +174,10 @@ class EnvironmentAndArgvTests(FixtureCase):
 
 
 class RefusalTests(FixtureCase):
-    def write_settings(self, value, name="settings.json"):
-        (self.worktree / ".claude").mkdir(exist_ok=True)
-        (self.worktree / ".claude" / name).write_text(json.dumps(value))
+    def write_settings(self, value, name="settings.json", root=None):
+        directory = (root or self.worktree) / ".claude"
+        directory.mkdir(exist_ok=True)
+        (directory / name).write_text(json.dumps(value))
 
     def test_unregistered_or_unlinked_worktree(self):
         self.assert_refused("WORKTREE_NOT_LINKED", worktree=self.repo)
@@ -190,16 +194,37 @@ class RefusalTests(FixtureCase):
         self.write_settings({"hooks": {}, "permissions": {"allow": ["Bash(touch *)", "Read(src/**)"]}})
         self.plan([init_event(), SUCCESS])
         self.assertEqual(self.launch()["status"], "COMPLETED")
-        recorded = self.record()["project_settings"]["settings.json"]
+        recorded = self.record()["project_settings"]["worktree/.claude/settings.json"]
         self.assertEqual(recorded["keys"], ["hooks", "permissions"])
         self.assertEqual(recorded["non_read_only_allow"], ["Bash(touch *)"])
+
+    def test_main_checkout_local_settings_are_recorded(self):
+        # Claude reads settings.local.json from the main checkout in a worktree.
+        self.write_settings({"permissions": {"allow": ["Bash(gh issue *)"]},
+                             "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "7"}},
+                            name="settings.local.json", root=self.repo)
+        self.plan([init_event(), SUCCESS])
+        self.assertEqual(self.launch()["status"], "COMPLETED")
+        recorded = self.record()["project_settings"]["main/.claude/settings.local.json"]
+        self.assertEqual(recorded["path"], str(self.repo / ".claude/settings.local.json"))
+        self.assertEqual(recorded["non_read_only_allow"], ["Bash(gh issue *)"])
+        self.assertEqual(recorded["env_names"], ["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"])
+
+    def test_bare_main_repository_has_no_main_checkout_settings(self):
+        bare = self.root / "bare.git"
+        self.git("clone", "-q", "--bare", str(self.repo), str(bare), cwd=self.root)
+        worktree = self.root / "bare-wt"
+        self.git("worktree", "add", "-q", str(worktree), "main", cwd=bare)
+        self.plan([init_event(), SUCCESS])
+        self.assertEqual(self.launch(worktree=worktree)["status"], "COMPLETED")
+        self.assertEqual(self.record()["project_settings"], {})
 
     def test_invalid_project_settings_are_recorded_and_never_block(self):
         (self.worktree / ".claude").mkdir()
         (self.worktree / ".claude/settings.json").write_text("{")
         self.plan([init_event(), SUCCESS])
         self.assertEqual(self.launch()["status"], "COMPLETED")
-        self.assertEqual(self.record()["project_settings"]["settings.json"], {"valid": False})
+        self.assertEqual(self.record()["project_settings"]["worktree/.claude/settings.json"], {"valid": False})
 
     def test_evidence_location_and_gate_configuration(self):
         self.assert_refused("EVIDENCE_DIR_INVALID", evidence_dir=self.worktree / "evidence")

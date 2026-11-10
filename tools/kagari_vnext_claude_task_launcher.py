@@ -24,13 +24,17 @@ ENV_FIXED = {
     "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
 }
-# Project settings carry CLAUDE.md/AGENTS.md loading, so user settings (and with
-# them user and synced plugins) are the only source that can be left out.
+# Project settings carry CLAUDE.md/AGENTS.md loading and local carries
+# CLAUDE.local.md, so user settings (and with them user and synced plugins) are
+# the only source that can be left out.
 SETTING_SOURCES = "project,local"
 READ_ONLY_SUBAGENTS = frozenset(("Explore", "Plan"))
 DENIED_BUILTIN_SUBAGENTS = ("general-purpose", "claude", "statusline-setup",
                             "claude-code-guide", "web-fetch", "fork")
 READ_ONLY_TOOLS = frozenset(("Read", "Glob", "Grep"))
+# ask outranks allow from every scope, so a Project allow rule for these tools
+# still reaches the permission gate instead of being resolved by Claude.
+GATED_TOOLS = ("Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch")
 PROJECT_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
 MAX_STREAM_BYTES = 256 * 1024 * 1024
 VERSION_TIMEOUT = 30.0
@@ -133,11 +137,18 @@ def _read_only_rule(rule: Any) -> bool:
     return isinstance(rule, str) and rule.split("(", 1)[0] in READ_ONLY_TOOLS
 
 
-def diagnose_project_settings(worktree: Path) -> dict[str, Any]:
-    """Record Project settings; they stay the Project's own and never block a launch."""
+def diagnose_project_settings(worktree: Path, main_checkout: Path | None) -> dict[str, Any]:
+    """Record Project settings; they stay the Project's own and never block a launch.
+
+    In a worktree Claude reads ``settings.local.json`` from the main checkout,
+    so that file is recorded too.
+    """
     report: dict[str, Any] = {}
-    for name in ("settings.json", "settings.local.json"):
-        path = worktree / ".claude" / name
+    candidates = [("worktree/.claude/settings.json", worktree / ".claude/settings.json"),
+                  ("worktree/.claude/settings.local.json", worktree / ".claude/settings.local.json")]
+    if main_checkout is not None and main_checkout != worktree:
+        candidates.append(("main/.claude/settings.local.json", main_checkout / ".claude/settings.local.json"))
+    for name, path in candidates:
         if not path.is_file():
             continue
         try:
@@ -149,10 +160,12 @@ def diagnose_project_settings(worktree: Path) -> dict[str, Any]:
             continue
         permissions = settings.get("permissions")
         allow = permissions.get("allow") if isinstance(permissions, dict) else None
+        env = settings.get("env")
         report[name] = {
-            "valid": True, "keys": sorted(settings),
+            "valid": True, "path": str(path), "keys": sorted(settings),
             "non_read_only_allow": [rule for rule in allow if not _read_only_rule(rule)]
             if isinstance(allow, list) else [],
+            "env_names": sorted(map(str, env)) if isinstance(env, dict) else [],
         }
     return report
 
@@ -170,7 +183,10 @@ def project_subagent_names(worktree: Path) -> list[str]:
 
 def build_settings(project_agents: list[str]) -> dict[str, Any]:
     denied = [*DENIED_BUILTIN_SUBAGENTS, *project_agents]
-    return {"permissions": {"allow": [], "deny": [f"Agent({name})" for name in denied]}}
+    # Command-line settings outrank Project settings, so their env keeps the
+    # fixed values even when a Project settings file sets the same names.
+    return {"env": dict(ENV_FIXED), "permissions": {
+        "allow": [], "ask": list(GATED_TOOLS), "deny": [f"Agent({name})" for name in denied]}}
 
 
 def build_environment(parent: Mapping[str, str], claude_config_dir: Path) -> dict[str, str]:
@@ -467,7 +483,8 @@ def _cli_version(request: TaskLaunch, environment: Mapping[str, str]) -> str:
     return output
 
 
-def _check_registered_worktree(worktree: Path, environment: Mapping[str, str]) -> None:
+def _check_registered_worktree(worktree: Path, environment: Mapping[str, str]) -> Path | None:
+    """Return the main checkout, or None for a bare repository."""
     if not (worktree / ".git").is_file():
         raise LaunchError("WORKTREE_NOT_LINKED", str(worktree))
     try:
@@ -477,8 +494,14 @@ def _check_registered_worktree(worktree: Path, environment: Mapping[str, str]) -
         ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         raise LaunchError("WORKTREE_NOT_REGISTERED", type(exc).__name__) from exc
-    if f"worktree {worktree}" not in listing.splitlines():
+    lines = listing.splitlines()
+    if f"worktree {worktree}" not in lines:
         raise LaunchError("WORKTREE_NOT_REGISTERED", str(worktree))
+    # The first porcelain block is the main worktree.
+    main_block = listing.split("\n\n", 1)[0].splitlines()
+    if "bare" in main_block or not main_block[0].startswith("worktree "):
+        return None
+    return Path(main_block[0].removeprefix("worktree "))
 
 
 def _mcp_servers(request: TaskLaunch) -> frozenset[str]:
@@ -509,7 +532,7 @@ def launch_task(request: TaskLaunch, parent_environment: Mapping[str, str] | Non
         raise LaunchError("TIMEOUT_INVALID", str(request.timeout))
     parent = os.environ if parent_environment is None else parent_environment
     environment = build_environment(parent, request.claude_config_dir)
-    _check_registered_worktree(request.worktree, environment)
+    main_checkout = _check_registered_worktree(request.worktree, environment)
     mcp_servers = _mcp_servers(request)
     cli_version = _cli_version(request, environment)
     project_agents = project_subagent_names(request.worktree)
@@ -539,7 +562,7 @@ def launch_task(request: TaskLaunch, parent_environment: Mapping[str, str] | Non
                 and name.startswith(("CLAUDE", "ANTHROPIC"))),
         },
         "instructions": instructions, "project_files_before": before,
-        "project_settings": diagnose_project_settings(request.worktree),
+        "project_settings": diagnose_project_settings(request.worktree, main_checkout),
         "plugin_allowlist": [item.source for item in request.plugin_allowlist],
         "denied_subagents": [*DENIED_BUILTIN_SUBAGENTS, *project_agents],
         "mcp_servers": sorted(mcp_servers),

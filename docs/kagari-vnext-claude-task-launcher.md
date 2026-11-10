@@ -13,10 +13,10 @@ any process starts, or runs the session and returns the outcome.
 
 | Concern | Behavior |
 | --- | --- |
-| Environment | Built from an allowlist (`HOME`, `USER`, `LOGNAME`, `PATH`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`) plus the requested `CLAUDE_CONFIG_DIR`. Always sets `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`. |
+| Environment | Built from an allowlist (`HOME`, `USER`, `LOGNAME`, `PATH`, `LANG`, `LC_ALL`, `TERM`, `TMPDIR`) plus the requested `CLAUDE_CONFIG_DIR`. Always sets `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, both in the process environment and in the `env` of `--settings`. A Project settings `env` overrides the process environment, but command-line settings outrank Project settings. |
 | Setting sources | `--setting-sources=project,local`. `project` is what loads `AGENTS.md`/`CLAUDE.md`, and `local` is what loads `CLAUDE.local.md`; user settings, and with them user and synced plugins, are left out. |
-| Project settings | Stay the Project's own and never block a launch, so KAGARI stays easy to attach and detach. Their keys and any `allow` rule outside `Read`, `Glob`, `Grep` are recorded in `launch.json`. Such a rule is resolved by Claude without reaching the permission gate. |
-| Permissions | `allow` is empty, so anything a rule does not resolve goes to `--permission-prompt-tool`. Reads inside the worktree need no approval under `--permission-mode manual`. |
+| Project settings | Stay the Project's own and never block a launch, so KAGARI stays easy to attach and detach. The worktree's `.claude/settings.json` and `.claude/settings.local.json`, and the main checkout's `.claude/settings.local.json` (the one Claude reads in a worktree, even in an untrusted workspace), are recorded in `launch.json`: keys, `allow` rules outside `Read`, `Glob`, `Grep`, and `env` names. |
+| Permissions | `allow` is empty. `ask` lists `Bash`, `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebSearch`; ask outranks allow from every scope, so a Project `allow` rule for these tools still reaches `--permission-prompt-tool`. Project `deny` rules still apply first. Reads inside the worktree need no approval under `--permission-mode manual`. |
 | Subagents | `Explore` and `Plan` stay available. Other built-ins and every `.claude/agents` definition are denied as `Agent(<name>)`. An omitted `subagent_type` falls back to `general-purpose` and is denied too. |
 | MCP | `--strict-mcp-config`. Every server in the caller's config must be `connected` in `init`. |
 | Task rules | Written to the Evidence directory and passed with `--append-system-prompt-file`. Project instruction files are never written; their hashes are compared before and after. |
