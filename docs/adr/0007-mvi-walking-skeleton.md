@@ -1,6 +1,6 @@
 # ADR-0007: Issue起点の最小E2E経路（MVI walking skeleton）をD8より先に通す
 
-- **Status:** Proposed（下書き 2026-11-11）
+- **Status:** Accepted（2026-11-11）; implementation pending
 - **Human decision:** 案B（KUMIKI内に最小E2E経路を新設し、ADR-0006 D8より先に通す）を採用（2026-11-11 JST）。承認ラベルの付与をagentに許さないADR-0006の制約は維持する。
 - **Issues:** #403（I-0 LXC）、#404（I-1 骨格）、#405（I-2 Claude実装）、#406（I-3 レビュー）
 - **Related:** ADR-0001、ADR-0005、ADR-0006（D1〜D8）、#291、#340
