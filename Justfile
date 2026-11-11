@@ -5,6 +5,7 @@ mod template 'just/template.just'
 mod runtime 'just/runtime.just'
 mod agent-core 'just/agent-core.just'
 mod source 'just/source.just'
+mod mvi 'just/mvi.just'
 
 default:
     @just --list
