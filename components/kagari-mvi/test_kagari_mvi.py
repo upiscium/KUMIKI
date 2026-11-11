@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import kagari_mvi as mvi  # noqa: E402
+import kagari_mvi_exec as ex  # noqa: E402
 
 
 TEST_BODY = "body %d\n\n### テストコマンド\n```sh\npython3 -m unittest\n```\n"
@@ -43,7 +44,7 @@ class FakeRunner:
         self.routes = routes  # {(method, path-prefix): response}
         self.fail = fail or {}  # {argv-substring: output}
         self.outputs = outputs if outputs is not None else {
-            "stream-json": stream("done\nstatus: COMPLETED"), "status --porcelain": " M a.py"}
+            "stream-json": stream("done\nstatus: COMPLETED"), "diff --cached --name-only": " M a.py"}
         self.calls = []
 
     def __call__(self, args, cwd=None, input=None, timeout=None):
@@ -133,18 +134,18 @@ class ParseTest(unittest.TestCase):
         self.assertIsNone(mvi.test_command("### テストコマンド\n### 次\n```\nmake\n```"))
 
     def test_agent_outcome(self):
-        done = mvi.agent_outcome(stream("ok\nstatus: COMPLETED", denials=2), False)
+        done = ex.agent_outcome(stream("ok\nstatus: COMPLETED", denials=2), False)
         self.assertEqual((done["completed"], done["status"], done["denials"], done["auth"]),
                          (True, "COMPLETED", 2, False))
-        blocked = mvi.agent_outcome(stream("status: BLOCKED: needs X"), False)
+        blocked = ex.agent_outcome(stream("status: BLOCKED: needs X"), False)
         self.assertEqual((blocked["completed"], blocked["status"]), (False, "BLOCKED: needs X"))
-        self.assertTrue(mvi.agent_outcome("Not logged in · Please run /login", True)["auth"])
-        self.assertTrue(mvi.agent_outcome(stream("API Error: 401 {}", is_error=True), True)["auth"])
-        self.assertFalse(mvi.agent_outcome(stream("401 in code\nstatus: COMPLETED"), False)["auth"])
+        self.assertTrue(ex.agent_outcome("Not logged in · Please run /login", True)["auth"])
+        self.assertTrue(ex.agent_outcome(stream("API Error: 401 {}", is_error=True), True)["auth"])
+        self.assertFalse(ex.agent_outcome(stream("401 in code\nstatus: COMPLETED"), False)["auth"])
         # An unrelated failure whose stream mentions 401 / login elsewhere is not an auth error.
         noisy = json.dumps({"type": "user", "uuid": "a401b", "content": "see /login docs"})
         timeout = noisy + "\n" + stream("max turns", is_error=True) + "\ntimed out after 3600s"
-        self.assertFalse(mvi.agent_outcome(timeout, True)["auth"])
+        self.assertFalse(ex.agent_outcome(timeout, True)["auth"])
 
 
 class RunOnceTest(unittest.TestCase):
@@ -184,14 +185,17 @@ class RunOnceTest(unittest.TestCase):
         self.assertIn("Bash(python3 -m unittest)", allow)
         self.assertTrue(any(rule.startswith("Edit(//") and rule.endswith("/wt/issue-7/**)") for rule in allow))
         self.assertNotIn("Edit", allow)
-        self.assertEqual(kill[-2], "kill -KILL -1 2>/dev/null; true")
+        # kill -1 must be the direct child of sudo: no timeout/env wrapper it would also kill.
+        self.assertEqual(kill, ["sudo", "-n", "-u", "kagari-agent", "-H", "--", "sh", "-c", "kill -KILL -1; true"])
         self.assertNotIn("-lc", test)  # no login shell: agent-written ~/.profile is ignored
         self.assertTrue(test[-3].endswith("/wt/issue-7.verify"))
-        self.assertEqual(test[-2:], ["python3 -m unittest", str(mvi.TEST_TIMEOUT)])
+        self.assertEqual(test[-2:], ["python3 -m unittest", str(ex.TEST_TIMEOUT)])
         self.assertEqual(claude[claude.index("timeout"):claude.index("timeout") + 4],
-                         ["timeout", "-k", "10", str(mvi.AGENT_TIMEOUT)])
+                         ["timeout", "-k", "10", str(ex.AGENT_TIMEOUT)])
         checkout = next(args for args, _, _ in runner.calls if "checkout" in args)
         self.assertEqual(checkout[checkout.index("--work-tree") + 1], test[-3])
+        add = next(args for args, _, _ in runner.calls if "--all" in args)
+        self.assertIn(":(exclude,glob)**/__pycache__/**", add)
         commit = next(args for args, _, _ in runner.calls if "commit" in args)
         self.assertIn("--git-dir", commit)
         self.assertIn("core.hooksPath=/dev/null", commit)
@@ -229,11 +233,14 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(runner.api_calls("POST", "repos/o/r/pulls"), [])
         self.assertEqual(sum(1 for args, _, _ in runner.calls if "stream-json" in args), 1)
         self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.BLOCKED])
-        self.assertIn("kagari-agent の再ログインが必要", self.comments(runner, 7)[0])
+        comment = self.comments(runner, 7)[0]
+        self.assertIn("kagari-agent の再ログインが必要", comment)
+        self.assertIn("Please run /login", comment)
+        self.assertNotIn('"type"', comment)  # no raw stream-json in the Issue comment
 
     def test_no_changes_blocks_without_pr(self):
         runner = FakeRunner(self.routes())
-        runner.outputs["status --porcelain"] = ""
+        runner.outputs["diff --cached --name-only"] = ""
         self.assertEqual(self.run_worker(runner), 1)
         self.assertEqual(runner.api_calls("POST", "repos/o/r/pulls"), [])
         self.assertIn("no changes", self.comments(runner, 7)[0])

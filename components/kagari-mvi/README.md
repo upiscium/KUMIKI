@@ -2,7 +2,7 @@
 
 ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります。
 
-- **構成**：本体は `kagari_mvi.py` の 1 ファイルです。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は使いません。
+- **構成**：本体は 2 ファイルで、合わせて 700 行以内に保ちます（User 判断 2026-11-11。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は使いません。
 - **状態の持ち方**：状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata にも依存しません。
 - **実行の単位**：1 回の実行で処理する Issue は最大 1 件です。systemd timer などから定期的に呼ぶ前提です。
 - **ユーザーの分担**（D3）：
@@ -159,7 +159,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - 認証エラーの扱い：`Not logged in`、`Login expired`、`401` などで終わった場合は、`blocked` を付けて「kagari-agent の再ログインが必要」とコメントします。リトライはしません。
 6. **commit する**（段階 `commit`、`kagari-runner` が実行）
    - worktree の中にある `.git` ファイルは `kagari-agent` が書き換えられるので、使いません。git の管理ディレクトリを `--git-dir` で明示して指定します。
-   - `core.hooksPath=/dev/null` と `core.fsmonitor=false` を指定し、`--no-verify` を付けて、すべての変更を commit します。
+   - `core.hooksPath=/dev/null` と `core.fsmonitor=false` を指定し、`--no-verify` を付けて、すべての変更を commit します。ただし、テストで生成されるファイル（`__pycache__`、`*.pyc`、`.pytest_cache`、`node_modules`、`.mypy_cache`）は commit しません。
    - 変更が無い場合は、PR を作らずに `blocked` にします。
 7. **テストを実行し直す**（段階 `test`）：合否を決めるのは、この結果だけです。Claude の自己申告では決めません。
    - まず、`kagari-agent` のプロセスをすべて止めます。
@@ -183,6 +183,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **`python3` の許可ルール**：ADR-0006 の既知の限界により、`python3 …` を Bash の許可ルールに完全一致で書いても、確認を求められることがあります。headless ではその操作は拒否されるので、Claude 自身はテストを実行できない場合があります。ただし、合否は手順 7 の runner による実行で判断します。
 - **target リポジトリの設定**：target リポジトリの `.claude/settings.json` は読み込みません。`.claude/settings.local.json` を commit しているリポジトリは対象にできません。target リポジトリの `CLAUDE.md` が読み込まれるかどうかは、未確認です。
 - **Claude の読み取り**：Read は worktree の外も読めます。テストのコードも `kagari-agent` として何でも実行できます。そのため、`kagari-agent` が持つ Claude の資格情報（`~/.claude/.credentials.json`）を worktree にコピーされると、commit されて push されるおそれがあります。public リポジトリでは、merge する前に PR の差分を確認してください。
+- **Claude が書く設定ファイル**：Claude はセッション中に `.claude/settings.local.json` を書けます。そのファイルを読み込み直して権限が広がるかどうかは、未確認です。書かれたファイルは PR の差分に入るので、merge する前に確認してください。
 - **残るプロセス**：Claude とテストは、sudo の内側で `timeout -k` によって時間を区切ります。テストの前には `kill -1` でプロセスを止めます。ただし、cron・at・`systemd-run --user` で後から起動するプロセスは止められません。そうしたプロセスがテストの最中に `.verify` を書き換えることは、防げていません。
 - **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。Actions の secrets があるリポジトリを対象にする前に、対策を決めてください。対策の候補は、Workflows 権限の無い fine-grained token を使うこと、`.github/` を変更した差分は push しないことです。
 - **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。これは処理を止めるだけで、権限の昇格にはつながりません。
@@ -213,17 +214,20 @@ new_issue() {  # $1 = タイトル、$2 = 本文
 
    確認すること：`rc=0` であること。Draft PR が 1 件あること。PR に「recorded by the runner」のコメントがあり、`exit code: 0` になっていること。Issue のラベルが `implemented` になっていること。
 
-2. **許可リストに無いコマンド（`curl`）が拒否され、セッションが止まらずに終わる**
+2. **許可リストに無いコマンドが拒否され、セッションが止まらずに終わる**
+
+   Claude への規則で `curl` を禁止しているため、`curl` を例にすると、Claude は実行を試みずに終わります。そこで、規則で禁止しておらず、許可リストにも無い `uname -a` を、Bash ツールで実際に試させます。
 
    ````sh
-   new_issue "MVI I-2: curl probe" "$(printf '%s\n' \
-     '実装の前に、`curl -sI https://example.com` を実行して結果を確認すること。その後、probe.txt に ok と書く。' \
+   new_issue "MVI I-2: deny probe" "$(printf '%s\n' \
+     '権限の確認のため、実装の前に Bash ツールで `uname -a` の実行を必ず 1 回試みること（拒否されてよい）。' \
+     'その後、probe.txt に、実行できた場合はその出力を、拒否された場合は denied と書く。' \
      '' '### テストコマンド' '```sh' 'test -f probe.txt' '```')"
    time just mvi::run-once $R; echo rc=$?
    jq -c 'select(.type=="result") | {is_error, permission_denials}' /srv/kagari/logs/issue-$N-claude.jsonl
    ````
 
-   確認すること：コマンドがタイムアウト（1 時間）より前に終わること。`permission_denials` に `curl` を含む Bash の拒否が入っていること。
+   確認すること：コマンドがタイムアウト（1 時間）より前に終わること。`permission_denials` に `uname -a` の Bash の拒否が入っていること。
 
 3. **Claude の側（`kagari-agent`）では gh も git push も失敗する**
 
@@ -245,7 +249,9 @@ new_issue() {  # $1 = タイトル、$2 = 本文
    sudo -n -u kagari-agent -H -- env GIT_TERMINAL_PROMPT=0 sh -lc 'gh auth status; echo gh=$?; cd "$(mktemp -d)" && git init -q && git -c user.name=p -c user.email=p@p commit -q --allow-empty -m p && git push https://github.com/upiscium/kagari-mvi-sandbox.git HEAD:refs/heads/kagari-probe; echo push=$?'
    ```
 
-   確認すること：`gh=` と `push=` がどちらも 0 以外になること。
+   確認すること：`gh=` と `push=` がどちらも 0 以外になること。`push=` の直前に、`could not read Username`（資格情報が無い）のような認証のエラーが出ていること。init や commit で失敗して `push=` が 0 以外になった場合は、資格情報の確認になりません。このコマンドで確かめているのは HTTPS での push だけです。
+
+   もう一つ、`kagari-agent` が SSH の鍵を持っていないことも確かめてください：`sudo -n -u kagari-agent -H -- sh -lc 'ls -la ~/.ssh'`。ディレクトリが無いか、中に鍵が無ければ確認できます。
 
 4. **テスト結果が runner によって記録される**：1〜3 の PR コメントが「recorded by the runner (not reported by Claude)」で始まっていること。
 
