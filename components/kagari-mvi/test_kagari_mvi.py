@@ -139,7 +139,12 @@ class ParseTest(unittest.TestCase):
         blocked = mvi.agent_outcome(stream("status: BLOCKED: needs X"), False)
         self.assertEqual((blocked["completed"], blocked["status"]), (False, "BLOCKED: needs X"))
         self.assertTrue(mvi.agent_outcome("Not logged in · Please run /login", True)["auth"])
+        self.assertTrue(mvi.agent_outcome(stream("API Error: 401 {}", is_error=True), True)["auth"])
         self.assertFalse(mvi.agent_outcome(stream("401 in code\nstatus: COMPLETED"), False)["auth"])
+        # An unrelated failure whose stream mentions 401 / login elsewhere is not an auth error.
+        noisy = json.dumps({"type": "user", "uuid": "a401b", "content": "see /login docs"})
+        timeout = noisy + "\n" + stream("max turns", is_error=True) + "\ntimed out after 3600s"
+        self.assertFalse(mvi.agent_outcome(timeout, True)["auth"])
 
 
 class RunOnceTest(unittest.TestCase):
@@ -165,16 +170,26 @@ class RunOnceTest(unittest.TestCase):
         runner = FakeRunner(self.routes())
         self.assertEqual(self.run_worker(runner), 0)
         argvs = [args for args, _, _ in runner.calls if args[0] == "sudo"]
-        self.assertEqual(len(argvs), 2)  # Claude, then the runner's own test run
-        claude, test = argvs
+        self.assertEqual(len(argvs), 3)  # Claude, kill leftovers, the runner's own test run
+        claude, kill, test = argvs
         self.assertEqual(claude[:6], ["sudo", "-n", "-u", "kagari-agent", "-H", "--"])
         self.assertIn("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1", claude)
-        for flag in ("--strict-mcp-config", "--setting-sources=project,local", "stream-json"):
+        self.assertIn("sh", claude)
+        self.assertIn("-lc", claude)
+        for flag in ("--strict-mcp-config", "--setting-sources=local", "stream-json"):
             self.assertIn(flag, claude)
         self.assertNotIn("--bare", claude)
         settings = json.loads(next(a for a in claude if a.startswith("--settings="))[11:])
-        self.assertIn("Bash(python3 -m unittest)", settings["permissions"]["allow"])
-        self.assertEqual(test[-3:], ["sh", "-c", "exec 2>&1; python3 -m unittest"])
+        allow = settings["permissions"]["allow"]
+        self.assertIn("Bash(python3 -m unittest)", allow)
+        self.assertTrue(any(rule.startswith("Edit(//") and rule.endswith("/wt/issue-7/**)") for rule in allow))
+        self.assertNotIn("Edit", allow)
+        self.assertEqual(kill[-1], "kill -KILL -1 2>/dev/null; true")
+        self.assertNotIn("-lc", test)  # no login shell: agent-written ~/.profile is ignored
+        self.assertTrue(test[-2].endswith("/wt/issue-7.verify"))
+        self.assertEqual(test[-1], "python3 -m unittest")
+        checkout = next(args for args, _, _ in runner.calls if "checkout" in args)
+        self.assertEqual(checkout[checkout.index("--work-tree") + 1], test[-2])
         commit = next(args for args, _, _ in runner.calls if "commit" in args)
         self.assertIn("--git-dir", commit)
         self.assertIn("core.hooksPath=/dev/null", commit)
@@ -191,7 +206,7 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(runner.removed_labels(), ["kagari%3Arunning"])
 
     def test_failing_test_creates_pr_then_blocks(self):
-        runner = FakeRunner(self.routes(), fail={"sh -c exec 2>&1; python3 -m unittest": "FAILED (failures=1)"})
+        runner = FakeRunner(self.routes(), fail={".verify python3 -m unittest": "FAILED (failures=1)"})
         self.assertEqual(self.run_worker(runner), 1)
         self.assertEqual(len(runner.api_calls("POST", "repos/o/r/pulls")), 1)
         self.assertIn("exit code: 1", self.comments(runner, 70)[0])
@@ -254,12 +269,13 @@ class RunOnceTest(unittest.TestCase):
                 mvi.Worker("o/r", run=call, log=lambda _: None).run_once(["upiscium"], workdir)
         self.assertEqual(runner.removed_labels(), [])
 
-    def test_existing_pr_is_reused(self):
+    def test_existing_pr_is_not_duplicated_nor_marked_implemented(self):
         runner = FakeRunner(self.routes(existing_pr={"number": 70, "html_url": "u"}))
-        self.assertEqual(self.run_worker(runner, "/nonexistent"), 0)
+        self.assertEqual(self.run_worker(runner, "/nonexistent"), 1)
         self.assertEqual(runner.api_calls("POST", "repos/o/r/pulls"), [])
         self.assertFalse(any(args[0] in ("git", "sudo") for args, _, _ in runner.calls))
-        self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.IMPLEMENTED])
+        self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.BLOCKED])
+        self.assertIn("PR #70", self.comments(runner, 7)[0])
 
     def test_no_candidate_is_a_noop(self):
         runner = FakeRunner({("GET", "repos/o/r/issues?"): [issue(1, [mvi.APPROVED, mvi.BLOCKED])]})

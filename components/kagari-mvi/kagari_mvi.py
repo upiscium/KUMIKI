@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.parse
@@ -42,9 +43,11 @@ SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] + GI
 AGENT_TIMEOUT = 3600
 TEST_TIMEOUT = 1800
 AGENT_SCRIPT = 'cd "$1" && umask 002 && shift && exec "$@"'
+# Tests: no login shell (agent-written ~/.profile is ignored) and a throwaway HOME.
+TEST_SCRIPT = 'cd "$1" && umask 002 && HOME=$(mktemp -d) && export HOME && exec sh -c "$2" 2>&1'
 TEST_HEADING = re.compile(r"^#{2,6}[ \t]*(?:テストコマンド|Test command)[ \t]*$", re.M | re.I)
-AUTH_MARKERS = ("login expired", "not logged in", "401", "invalid api key",
-                "authentication_error", "oauth token", "/login")
+AUTH_PATTERN = re.compile(r"login expired|not logged in|invalid api key|authentication_error|"
+                          r"oauth token|please run /login|api error:? *401\b|\b401 unauthorized", re.I)
 AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worker.
 - Implement only what the Issue asks. Edit files in the current directory only.
 - Do not run git, gh, curl or other network commands, and do not commit.
@@ -73,7 +76,8 @@ def subprocess_runner(args: Sequence[str], cwd: Optional[str] = None,
     """Run a command and return stdout; raise CommandError with stdout+stderr."""
     try:
         proc = subprocess.run(list(args), cwd=cwd, input=input, capture_output=True,
-                              text=True, env=_command_env(), timeout=timeout)
+                              text=True, env=_command_env(), timeout=timeout, start_new_session=True,
+                              stdin=subprocess.DEVNULL if input is None else None)
     except subprocess.TimeoutExpired as error:
         partial = "".join(part.decode(errors="replace") if isinstance(part, bytes) else part
                           for part in (error.stdout, error.stderr) if part)
@@ -150,11 +154,12 @@ def test_command(body: Optional[str]) -> Optional[str]:
 
 def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
     """Summarize Claude's stream-json: auth failure, final status, permission denials."""
-    result = None
+    result, plain = None, []
     for line in output.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
+            plain.append(line)  # stderr and other non-JSON text
             continue
         if isinstance(event, dict) and event.get("type") == "result":
             result = event
@@ -162,7 +167,8 @@ def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
     text = str((result or {}).get("result") or "")
     statuses = re.findall(r"status:\s*(COMPLETED|BLOCKED[^\n]*)", text)
     return {
-        "auth": errored and any(marker in output.lower() for marker in AUTH_MARKERS),
+        # Only the final result and stderr: file contents and ids may contain "401".
+        "auth": errored and bool(AUTH_PATTERN.search("\n".join(plain + [text]))),
         "status": statuses[-1].strip() if statuses else "(none)",
         "completed": not errored and bool(statuses) and statuses[-1] == "COMPLETED",
         "denials": len((result or {}).get("permission_denials") or []),
@@ -282,7 +288,7 @@ class Worker:
                 if not self.commit_changes(clone, worktree, number):
                     raise Blocked("Claude made no changes (status: %s)." % outcome["status"])
                 stage = "test"
-                code, output = self.run_test(worktree, test)
+                code, output = self.run_test(clone, worktree, number, test)
                 stage = "push"
                 self.run(["git", "-C", clone] + SAFE_GIT + [
                     "push", "origin", "refs/heads/%s" % branch_name(number)])
@@ -295,7 +301,9 @@ class Worker:
                                "exit code is %d. See the PR comment." % (
                                    pr["number"], outcome["status"], code))
             else:
-                self.log("#%d already has PR #%d; reusing it" % (number, pr["number"]))
+                problem = ("PR #%d for `%s` already exists and its test result is not re-checked. "
+                           "Review it, or close it and delete the branch to retry."
+                           % (pr["number"], branch_name(number)))
             stage = "labels"
             if problem is not None:
                 raise Blocked(problem)
@@ -348,24 +356,26 @@ class Worker:
                                                      worktree, "origin/%s" % base])
         return clone, worktree
 
-    def as_agent(self, cwd: str, argv: List[str]) -> List[str]:
-        """Run argv as the agent user from a clean login environment."""
-        env = ["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1"]
+    def as_agent(self, cwd: str, argv: List[str], login: bool = True) -> List[str]:
+        """Run argv as the agent user; sudo resets the environment."""
+        env = ["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1",
+               "GIT_TERMINAL_PROMPT=0"]
         if self.agent_config_dir:
             env.append("CLAUDE_CONFIG_DIR=%s" % self.agent_config_dir)
-        return (["sudo", "-n", "-u", self.agent_user, "-H", "--", "env"] + env
-                + ["sh", "-lc", AGENT_SCRIPT, "sh", cwd] + argv)
+        shell = ["sh", "-lc", AGENT_SCRIPT] if login else ["sh", "-c", TEST_SCRIPT]
+        return ["sudo", "-n", "-u", self.agent_user, "-H", "--", "env"] + env + shell + ["sh", cwd] + argv
 
     def run_agent(self, workdir: str, worktree: str, issue: Dict[str, Any],
                   test: str) -> Dict[str, Any]:
         number = issue["number"]
         settings = {
-            "permissions": {"allow": ["Read", "Glob", "Grep", "Edit", "Write", "Bash(%s)" % test],
+            "permissions": {"allow": ["Read", "Glob", "Grep", "Edit(/%s/**)" % worktree,
+                                      "Write(/%s/**)" % worktree, "Bash(%s)" % test],
                             "deny": ["Agent", "WebFetch", "WebSearch", "NotebookEdit"]},
             "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"},
         }
         argv = [self.claude, "-p", "--output-format", "stream-json", "--verbose",
-                "--no-session-persistence", "--setting-sources=project,local",
+                "--no-session-persistence", "--setting-sources=local",
                 "--settings=" + json.dumps(settings), "--strict-mcp-config",
                 "--mcp-config=" + json.dumps({"mcpServers": {}}),
                 "--append-system-prompt", AGENT_RULES.format(test=test)]
@@ -400,11 +410,16 @@ class Worker:
                  cwd=worktree)
         return True
 
-    def run_test(self, worktree: str, test: str) -> Tuple[int, str]:
-        """Re-run the test command ourselves (as the agent user): never self-reported."""
+    def run_test(self, clone: str, worktree: str, number: int, test: str) -> Tuple[int, str]:
+        """Re-run the test ourselves on a clean checkout of the commit (as the agent user)."""
+        self.run(self.as_agent(worktree, ["kill -KILL -1 2>/dev/null; true"], login=False))
+        verify = worktree + ".verify"  # no leftover processes may write here now
+        shutil.rmtree(verify, ignore_errors=True)
+        os.makedirs(verify)
+        self.run(["git", "--git-dir", os.path.join(clone, ".git", "worktrees", "issue-%d" % number),
+                  "--work-tree", verify] + SAFE_GIT + ["checkout", "-f", "HEAD", "--", "."])
         try:
-            argv = ["sh", "-c", "exec 2>&1; " + test]
-            return 0, self.run(self.as_agent(worktree, argv), timeout=TEST_TIMEOUT)
+            return 0, self.run(self.as_agent(verify, [test], login=False), timeout=TEST_TIMEOUT)
         except CommandError as error:
             return error.code, error.output
 
