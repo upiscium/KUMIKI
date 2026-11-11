@@ -184,12 +184,14 @@ class RunOnceTest(unittest.TestCase):
         self.assertIn("Bash(python3 -m unittest)", allow)
         self.assertTrue(any(rule.startswith("Edit(//") and rule.endswith("/wt/issue-7/**)") for rule in allow))
         self.assertNotIn("Edit", allow)
-        self.assertEqual(kill[-1], "kill -KILL -1 2>/dev/null; true")
+        self.assertEqual(kill[-2], "kill -KILL -1 2>/dev/null; true")
         self.assertNotIn("-lc", test)  # no login shell: agent-written ~/.profile is ignored
-        self.assertTrue(test[-2].endswith("/wt/issue-7.verify"))
-        self.assertEqual(test[-1], "python3 -m unittest")
+        self.assertTrue(test[-3].endswith("/wt/issue-7.verify"))
+        self.assertEqual(test[-2:], ["python3 -m unittest", str(mvi.TEST_TIMEOUT)])
+        self.assertEqual(claude[claude.index("timeout"):claude.index("timeout") + 4],
+                         ["timeout", "-k", "10", str(mvi.AGENT_TIMEOUT)])
         checkout = next(args for args, _, _ in runner.calls if "checkout" in args)
-        self.assertEqual(checkout[checkout.index("--work-tree") + 1], test[-2])
+        self.assertEqual(checkout[checkout.index("--work-tree") + 1], test[-3])
         commit = next(args for args, _, _ in runner.calls if "commit" in args)
         self.assertIn("--git-dir", commit)
         self.assertIn("core.hooksPath=/dev/null", commit)
@@ -206,7 +208,7 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(runner.removed_labels(), ["kagari%3Arunning"])
 
     def test_failing_test_creates_pr_then_blocks(self):
-        runner = FakeRunner(self.routes(), fail={".verify python3 -m unittest": "FAILED (failures=1)"})
+        runner = FakeRunner(self.routes(), fail={".verify python3 -m unittest 1800": "FAILED (failures=1)"})
         self.assertEqual(self.run_worker(runner), 1)
         self.assertEqual(len(runner.api_calls("POST", "repos/o/r/pulls")), 1)
         self.assertIn("exit code: 1", self.comments(runner, 70)[0])
@@ -235,6 +237,15 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(self.run_worker(runner), 1)
         self.assertEqual(runner.api_calls("POST", "repos/o/r/pulls"), [])
         self.assertIn("no changes", self.comments(runner, 7)[0])
+
+    def test_committed_settings_local_blocks_before_claude(self):
+        runner = FakeRunner(self.routes())
+        with tempfile.TemporaryDirectory() as workdir:
+            os.makedirs(os.path.join(workdir, "wt", "issue-7", ".claude"))
+            open(os.path.join(workdir, "wt", "issue-7", ".claude", "settings.local.json"), "w").close()
+            self.assertEqual(self.run_worker(runner, workdir), 1)
+        self.assertFalse(any("stream-json" in args for args, _, _ in runner.calls))
+        self.assertIn("settings.local.json", self.comments(runner, 7)[0])
 
     def test_missing_test_command_blocks_before_start(self):
         routes = self.routes()

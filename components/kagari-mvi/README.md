@@ -54,8 +54,8 @@ sudo usermod -aG kagari kagari-agent
 sudo install -d -o kagari-runner -g kagari -m 0750 /srv/kagari
 sudo install -d -o kagari-runner -g kagari -m 3770 /srv/kagari/wt
 sudo install -d -o kagari-runner -g kagari -m 0700 /srv/kagari/repos /srv/kagari/logs
-echo 'kagari-runner ALL=(kagari-agent) NOPASSWD: ALL' > /tmp/kagari-mvi.sudoers
-sudo visudo -cf /tmp/kagari-mvi.sudoers && sudo install -m 0440 /tmp/kagari-mvi.sudoers /etc/sudoers.d/kagari-mvi
+t=$(mktemp) && echo 'kagari-runner ALL=(kagari-agent) NOPASSWD: ALL' > "$t"
+sudo visudo -cf "$t" && sudo install -m 0440 "$t" /etc/sudoers.d/kagari-mvi; rm -f "$t"
 ```
 
 セットアップの後、`kagari-runner` で次のコマンドを実行して確かめます。`claude` のパスとバージョンが表示されれば完了です。
@@ -65,7 +65,7 @@ sudo -n -u kagari-agent -H -- sh -lc 'command -v claude && claude --version'
 ```
 
 - `sudo` の権限は、`kagari-agent` として実行することに限ります。`kagari-agent` は `kagari-runner` より弱いユーザーです。
-- テストを実行する前に、worker は `kagari-agent` のプロセスをすべて止めます。前回の実行で残ったプロセスが、テストの結果を書き換えないようにするためです。そのため、`kagari-agent` で対話的な作業（`/login` など）をしているときは、`run-once` を動かさないでください。
+- テストを実行する前に、worker は `kagari-agent` のプロセスをすべて止めます。前回の実行で残ったプロセスが、テストの結果を書き換えないようにするためです。そのため、`kagari-agent` で対話的な作業（`/login` など）をしているときは、`run-once` を動かさないでください。`run-once` を同時に 2 つ動かすこともしないでください。
 - テストは、ログインシェルを使わずに、sudo の `secure_path` で実行します。テストで使うコマンドは、`secure_path`（たとえば `/usr/bin`）に置くか、絶対パスで書いてください。
 - `claude` が見つからない場合は、`kagari-agent` の `~/.profile` で PATH を通すか、`run-once` に `--claude /絶対パス` を渡してください。
 - I-1 のときに作った `/srv/kagari` が残っている場合は、`sudo rm -rf /srv/kagari` で消してから作り直してください。中にあるのはテストの状態だけです。
@@ -151,6 +151,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - 設定（D3 と #405 による）：
      - `--strict-mcp-config` を付け、MCP サーバーは空にします。
      - `--setting-sources=local` を付けます。ユーザー設定と target リポジトリの `.claude/settings.json` は読み込みません。そのため、そこで有効にしたプラグイン・hooks・許可ルールは効きません。
+     - `local` の設定ファイル（`.claude/settings.local.json`）を target リポジトリが commit している場合は、それを読み込むと権限が広がります。そのため、Claude を起動せずに `blocked` にします。
      - `--bare` は付けません。将来、`CLAUDE_CODE_OAUTH_TOKEN` に切り替えられるようにするためです。
      - 環境変数 `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` を設定します。
      - 規則は `--append-system-prompt` で渡します。内容は「Issue の範囲だけを実装する」「git・gh・ネットワークは使わない」「最後に `status: COMPLETED` または `status: BLOCKED: 理由` を出力する」です。
@@ -180,7 +181,9 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **承認後の本文の変更**：承認した後に Issue 本文が変わっても、検知しません。
 - **残ったブランチ**：PR を作る前に失敗した後で再実行すると、remote に `kagari/issue-N` が残っている場合があります。そのときは push が non-fast-forward で拒否され、`blocked` になります。force push はしません。再実行する前に、そのブランチを削除してください。
 - **`python3` の許可ルール**：ADR-0006 の既知の限界により、`python3 …` を Bash の許可ルールに完全一致で書いても、確認を求められることがあります。headless ではその操作は拒否されるので、Claude 自身はテストを実行できない場合があります。ただし、合否は手順 7 の runner による実行で判断します。
-- **target リポジトリの設定**：target リポジトリの `.claude/settings.json` は読み込みません。target リポジトリの `CLAUDE.md` が読み込まれるかどうかは、未確認です。
+- **target リポジトリの設定**：target リポジトリの `.claude/settings.json` は読み込みません。`.claude/settings.local.json` を commit しているリポジトリは対象にできません。target リポジトリの `CLAUDE.md` が読み込まれるかどうかは、未確認です。
+- **Claude の読み取り**：Read は worktree の外も読めます。テストのコードも `kagari-agent` として何でも実行できます。そのため、`kagari-agent` が持つ Claude の資格情報（`~/.claude/.credentials.json`）を worktree にコピーされると、commit されて push されるおそれがあります。public リポジトリでは、merge する前に PR の差分を確認してください。
+- **残るプロセス**：Claude とテストは、sudo の内側で `timeout -k` によって時間を区切ります。テストの前には `kill -1` でプロセスを止めます。ただし、cron・at・`systemd-run --user` で後から起動するプロセスは止められません。そうしたプロセスがテストの最中に `.verify` を書き換えることは、防げていません。
 - **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。Actions の secrets があるリポジトリを対象にする前に、対策を決めてください。対策の候補は、Workflows 権限の無い fine-grained token を使うこと、`.github/` を変更した差分は push しないことです。
 - **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。これは処理を止めるだけで、権限の昇格にはつながりません。
 - **一覧への反映の遅れ**：承認した直後の実行では、Issue が選ばれないことがあります。ラベルで絞り込む一覧 API への反映が遅れるためと推測しています。次の実行で拾われます。
@@ -235,6 +238,14 @@ new_issue() {  # $1 = タイトル、$2 = 本文
    ````
 
    確認すること：PR の runner コメントに、gh の未ログインと git push の認証エラーが出ていること。終了コードが 0 以外になっていること。Issue が `blocked` になっていること（テストが失敗したため。期待どおりの結果です）。sandbox に `kagari-probe` ブランチができていないこと。
+
+   テストは使い捨ての HOME で実行されます。そのため上の確認だけでは、`kagari-agent` の本来の HOME に資格情報が無いことまでは確かめられません。Claude と同じ条件（本来の HOME とログインシェル）でも、次のコマンドで確かめてください。
+
+   ```sh
+   sudo -n -u kagari-agent -H -- env GIT_TERMINAL_PROMPT=0 sh -lc 'gh auth status; echo gh=$?; cd "$(mktemp -d)" && git init -q && git -c user.name=p -c user.email=p@p commit -q --allow-empty -m p && git push https://github.com/upiscium/kagari-mvi-sandbox.git HEAD:refs/heads/kagari-probe; echo push=$?'
+   ```
+
+   確認すること：`gh=` と `push=` がどちらも 0 以外になること。
 
 4. **テスト結果が runner によって記録される**：1〜3 の PR コメントが「recorded by the runner (not reported by Claude)」で始まっていること。
 

@@ -44,7 +44,8 @@ AGENT_TIMEOUT = 3600
 TEST_TIMEOUT = 1800
 AGENT_SCRIPT = 'cd "$1" && umask 002 && shift && exec "$@"'
 # Tests: no login shell (agent-written ~/.profile is ignored) and a throwaway HOME.
-TEST_SCRIPT = 'cd "$1" && umask 002 && HOME=$(mktemp -d) && export HOME && exec sh -c "$2" 2>&1'
+TEST_SCRIPT = ('cd "$1" && umask 002 && HOME=$(mktemp -d) && export HOME && '
+               'exec timeout -k 10 "$3" sh -c "$2" 2>&1')  # $2 command, $3 seconds
 TEST_HEADING = re.compile(r"^#{2,6}[ \t]*(?:テストコマンド|Test command)[ \t]*$", re.M | re.I)
 AUTH_PATTERN = re.compile(r"login expired|not logged in|invalid api key|authentication_error|"
                           r"oauth token|please run /login|api error:? *401\b|\b401 unauthorized", re.I)
@@ -368,6 +369,9 @@ class Worker:
     def run_agent(self, workdir: str, worktree: str, issue: Dict[str, Any],
                   test: str) -> Dict[str, Any]:
         number = issue["number"]
+        if os.path.lexists(os.path.join(worktree, ".claude", "settings.local.json")):
+            raise Blocked("The repository commits `.claude/settings.local.json`; it would widen "
+                          "Claude's permissions (hooks, allow rules, plugins). Remove it to proceed.")
         settings = {
             "permissions": {"allow": ["Read", "Glob", "Grep", "Edit(/%s/**)" % worktree,
                                       "Write(/%s/**)" % worktree, "Bash(%s)" % test],
@@ -382,7 +386,8 @@ class Worker:
         prompt = "Issue #%d: %s\n\n%s\n" % (number, issue["title"], issue.get("body") or "")
         failed = False
         try:
-            output = self.run(self.as_agent(worktree, argv), input=prompt, timeout=AGENT_TIMEOUT)
+            output = self.run(self.as_agent(worktree, bounded(AGENT_TIMEOUT) + argv), input=prompt,
+                              timeout=AGENT_TIMEOUT + 60)
         except CommandError as error:
             output, failed = error.output, True
         logs = os.path.join(workdir, "logs")
@@ -412,14 +417,15 @@ class Worker:
 
     def run_test(self, clone: str, worktree: str, number: int, test: str) -> Tuple[int, str]:
         """Re-run the test ourselves on a clean checkout of the commit (as the agent user)."""
-        self.run(self.as_agent(worktree, ["kill -KILL -1 2>/dev/null; true"], login=False))
+        self.run(self.as_agent(worktree, ["kill -KILL -1 2>/dev/null; true", "60"], login=False))
         verify = worktree + ".verify"  # no leftover processes may write here now
         shutil.rmtree(verify, ignore_errors=True)
         os.makedirs(verify)
         self.run(["git", "--git-dir", os.path.join(clone, ".git", "worktrees", "issue-%d" % number),
                   "--work-tree", verify] + SAFE_GIT + ["checkout", "-f", "HEAD", "--", "."])
         try:
-            return 0, self.run(self.as_agent(verify, [test], login=False), timeout=TEST_TIMEOUT)
+            return 0, self.run(self.as_agent(verify, [test, str(TEST_TIMEOUT)], login=False),
+                               timeout=TEST_TIMEOUT + 60)
         except CommandError as error:
             return error.code, error.output
 
@@ -430,6 +436,11 @@ class Worker:
             "title": issue["title"], "head": branch_name(number), "base": base,
             "body": body, "draft": True,
         })
+
+
+def bounded(seconds: int) -> List[str]:
+    """sudo does not relay SIGKILL: stop the agent-side process tree from inside."""
+    return ["timeout", "-k", "10", str(seconds)]
 
 
 def report(test: str, code: int, output: str, outcome: Dict[str, Any]) -> str:
