@@ -225,11 +225,13 @@ class Worker:
         detail = error.output if isinstance(error, CommandError) else "%s: %s" % (
             type(error).__name__, error)
         self.log("#%d failed at %s: %s" % (number, stage, tail(detail)))
+        # Add blocked before removing running: if adding fails, running stays
+        # and the Issue is not picked again.
+        self.add_labels(number, BLOCKED)
         try:
             self.remove_label(number, RUNNING)
-        except Exception as cleanup:  # noqa: BLE001 - still try to add blocked
+        except Exception as cleanup:  # noqa: BLE001 - still post the comment
             self.log("could not remove %s: %s" % (RUNNING, cleanup))
-        self.add_labels(number, BLOCKED)
         self.comment(number, "kagari-mvi: failed at stage `%s`.\n\n```\n%s\n```"
                      % (stage, tail(detail).replace("```", "'''")))
 

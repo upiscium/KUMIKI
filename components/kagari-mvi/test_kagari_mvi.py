@@ -137,6 +137,20 @@ class RunOnceTest(unittest.TestCase):
         self.assertIn("non-fast-forward", body)
         self.assertEqual(runner.api_calls("POST", "repos/o/r/pulls"), [])
 
+    def test_running_kept_when_blocked_cannot_be_added(self):
+        runner = FakeRunner(self.routes(), fail={"git push": "rejected"})
+
+        def call(args, cwd=None, input=None):
+            if input and mvi.BLOCKED in input:
+                raise mvi.CommandError(args, 1, "HTTP 503")
+            return runner(args, cwd=cwd, input=input)
+
+        worker = mvi.Worker("o/r", run=call, log=lambda _: None)
+        with tempfile.TemporaryDirectory() as workdir:
+            with self.assertRaises(mvi.CommandError):
+                worker.run_once(["upiscium"], workdir)
+        self.assertEqual(runner.removed_labels(), [])
+
     def test_success_creates_one_draft_pr(self):
         runner = FakeRunner(self.routes())
         with tempfile.TemporaryDirectory() as workdir:
