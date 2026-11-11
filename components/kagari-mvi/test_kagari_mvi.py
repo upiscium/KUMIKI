@@ -177,12 +177,16 @@ class RunOnceTest(unittest.TestCase):
         self.assertIn("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1", claude)
         self.assertIn("sh", claude)
         self.assertIn("-lc", claude)
-        for flag in ("--strict-mcp-config", "--setting-sources=local", "stream-json"):
+        self.assertEqual(claude[claude.index("--tools") + 1], "Bash,Read,Edit,Write,Glob,Grep")
+        for flag in ("--strict-mcp-config", "--restricted", "none", "stream-json"):
             self.assertIn(flag, claude)
         self.assertNotIn("--bare", claude)
         settings = json.loads(next(a for a in claude if a.startswith("--settings="))[11:])
         allow = settings["permissions"]["allow"]
-        self.assertIn("Bash(python3 -m unittest)", allow)
+        self.assertIn("Bash", allow)
+        deny = settings["permissions"]["deny"]
+        for rule in ("Bash(curl *)", "Bash(gh *)", "Bash(git push *)", "Bash(sudo)", "Agent"):
+            self.assertIn(rule, deny)
         self.assertTrue(any(rule.startswith("Edit(//") and rule.endswith("/wt/issue-7/**)") for rule in allow))
         self.assertNotIn("Edit", allow)
         # kill -1 must be the direct child of sudo: no timeout/env wrapper it would also kill.

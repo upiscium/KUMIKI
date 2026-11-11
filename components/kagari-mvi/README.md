@@ -150,12 +150,16 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - 出力：`--output-format stream-json` で受け取り、`<workdir>/logs/issue-N-claude.jsonl` に保存します。
    - 設定（D3 と #405 による）：
      - `--strict-mcp-config` を付け、MCP サーバーは空にします。
-     - `--setting-sources=local` を付けます。ユーザー設定と target リポジトリの `.claude/settings.json` は読み込みません。そのため、そこで有効にしたプラグイン・hooks・許可ルールは効きません。
-     - `local` の設定ファイル（`.claude/settings.local.json`）を target リポジトリが commit している場合は、それを読み込むと権限が広がります。そのため、Claude を起動せずに `blocked` にします。
+     - `--tools Bash,Read,Edit,Write,Glob,Grep` で、セッションで使えるツールをこの 6 つに限ります。Cron、RemoteTrigger、Skill などのツールは存在しません（LXC の記録で、指定しないと 20 個ほどのツールが使えることを確かめました）。
+     - `--restricted` を付けます。ユーザー・project・local の設定ファイル（`.claude/settings*.json`）を読み込まず、ファイルを扱うツールを worktree の中に限り、設定・git・ツール設定のファイルへの書き込みを承認なしでは許しません。そのため、target リポジトリで有効にしたプラグイン・hooks・許可ルールは効きません。
+     - 念のため、target リポジトリが `.claude/settings.local.json` を commit している場合は、Claude を起動せずに `blocked` にします。
+     - `--permission-prompts none` を付け、承認が必要な操作は自動で拒否します。
      - `--bare` は付けません。将来、`CLAUDE_CODE_OAUTH_TOKEN` に切り替えられるようにするためです。
      - 環境変数 `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` を設定します。
-     - 規則は `--append-system-prompt` で渡します。内容は「Issue の範囲だけを実装する」「git・gh・ネットワークは使わない」「最後に `status: COMPLETED` または `status: BLOCKED: 理由` を出力する」です。
-     - 許可するツールは `Read` `Glob` `Grep`、worktree の中に限った `Edit` `Write`、それに `Bash(<テストコマンド>)` だけです。`Agent` `WebFetch` `WebSearch` は拒否します。headless なので、許可されていない操作は確認を待たずに拒否されます。
+     - 規則は `--append-system-prompt` で渡します。内容は「Issue の範囲だけを実装する」「commit はしない」「最後に `status: COMPLETED` または `status: BLOCKED: 理由` を出力する」です。
+     - Bash は原則として許可します（User 判断 2026-11-11）。ビルド、lint、テストなどを自由に実行できます。Bash は `kagari-agent` として動き、GitHub の資格情報を持たないので、安全の境界は OS のユーザー分離に置きます。
+     - 拒否する操作：ネットワークや資格情報に関わるコマンド（`curl` `wget` `gh` `git push` `git remote` `ssh` `scp` `sudo` `su` `nc` `ncat` `socat` `telnet`）と、`Agent` `WebFetch` `WebSearch` `NotebookEdit` です。これは誤操作を防ぐためのもので、境界ではありません。
+     - `Edit` と `Write` は worktree の中に限ります。headless なので、許可されていない操作は確認を待たずに拒否されます。
    - 認証エラーの扱い：`Not logged in`、`Login expired`、`401` などで終わった場合は、`blocked` を付けて「kagari-agent の再ログインが必要」とコメントします。リトライはしません。
 6. **commit する**（段階 `commit`、`kagari-runner` が実行）
    - worktree の中にある `.git` ファイルは `kagari-agent` が書き換えられるので、使いません。git の管理ディレクトリを `--git-dir` で明示して指定します。
@@ -181,7 +185,9 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **承認後の本文の変更**：承認した後に Issue 本文が変わっても、検知しません。
 - **残ったブランチ**：PR を作る前に失敗した後で再実行すると、remote に `kagari/issue-N` が残っている場合があります。そのときは push が non-fast-forward で拒否され、`blocked` になります。force push はしません。再実行する前に、そのブランチを削除してください。
 - **`python3` の許可ルール**：ADR-0006 の既知の限界により、`python3 …` を Bash の許可ルールに完全一致で書いても、確認を求められることがあります。headless ではその操作は拒否されるので、Claude 自身はテストを実行できない場合があります。ただし、合否は手順 7 の runner による実行で判断します。
-- **target リポジトリの設定**：target リポジトリの `.claude/settings.json` は読み込みません。`.claude/settings.local.json` を commit しているリポジトリは対象にできません。target リポジトリの `CLAUDE.md` が読み込まれるかどうかは、未確認です。
+- **target リポジトリの設定**：`--restricted` により、target リポジトリの設定ファイルは読み込みません。`.claude/settings.local.json` を commit しているリポジトリは対象にできません。target リポジトリの `CLAUDE.md` が読み込まれるかどうかは、未確認です。
+- **Bash の広さ**：Bash は原則として許可しているので、拒否リストは回り道で越えられます（たとえば `python3 -c` でネットワークに接続する）。Claude は `kagari-agent` の Claude 資格情報（`~/.claude/.credentials.json`）を読めるので、Issue 本文で誘導されると、その資格情報を外部へ送られるおそれがあります。外部の人が作った Issue を承認するときは、本文を確認してください。
+- **読み取り専用のコマンド**：Claude Code は、`uname` のような読み取り専用のコマンドを、許可リストに無くても承認なしで実行します（LXC の #15 で確認）。実行するのは `kagari-agent` なので、GitHub の資格情報には届きません。
 - **Claude の読み取り**：Read は worktree の外も読めます。テストのコードも `kagari-agent` として何でも実行できます。そのため、`kagari-agent` が持つ Claude の資格情報（`~/.claude/.credentials.json`）を worktree にコピーされると、commit されて push されるおそれがあります。public リポジトリでは、merge する前に PR の差分を確認してください。
 - **Claude が書く設定ファイル**：Claude はセッション中に `.claude/settings.local.json` を書けます。そのファイルを読み込み直して権限が広がるかどうかは、未確認です。書かれたファイルは PR の差分に入るので、merge する前に確認してください。
 - **残るプロセス**：Claude とテストは、sudo の内側で `timeout -k` によって時間を区切ります。テストの前には `kill -1` でプロセスを止めます。ただし、cron・at・`systemd-run --user` で後から起動するプロセスは止められません。そうしたプロセスがテストの最中に `.verify` を書き換えることは、防げていません。
@@ -216,18 +222,18 @@ new_issue() {  # $1 = タイトル、$2 = 本文
 
 2. **許可リストに無いコマンドが拒否され、セッションが止まらずに終わる**
 
-   Claude への規則で `curl` を禁止しているため、`curl` を例にすると、Claude は実行を試みずに終わります。そこで、規則で禁止しておらず、許可リストにも無い `uname -a` を、Bash ツールで実際に試させます。
+   拒否リストにある `curl` を、Bash ツールで実際に試させます。`uname -a` のような読み取り専用のコマンドは、許可リストと関係なく実行されるため、確認には使えません。
 
    ````sh
    new_issue "MVI I-2: deny probe" "$(printf '%s\n' \
-     '権限の確認のため、実装の前に Bash ツールで `uname -a` の実行を必ず 1 回試みること（拒否されてよい）。' \
-     'その後、probe.txt に、実行できた場合はその出力を、拒否された場合は denied と書く。' \
+     '権限の確認のため、実装の前に Bash ツールで `curl -sI https://example.com` の実行を必ず 1 回試みること（拒否されてよい）。' \
+     'その後、probe.txt に、curl が成功した場合は reached、拒否された場合は denied と書く。' \
      '' '### テストコマンド' '```sh' 'test -f probe.txt' '```')"
    time just mvi::run-once $R; echo rc=$?
    jq -c 'select(.type=="result") | {is_error, permission_denials}' /srv/kagari/logs/issue-$N-claude.jsonl
    ````
 
-   確認すること：コマンドがタイムアウト（1 時間）より前に終わること。`permission_denials` に `uname -a` の Bash の拒否が入っていること。
+   確認すること：コマンドがタイムアウト（1 時間）より前に終わること。`permission_denials` に `curl` の Bash の拒否が入っていること。PR の差分で `probe.txt` が `denied` であること。
 
 3. **Claude の側（`kagari-agent`）では gh も git push も失敗する**
 

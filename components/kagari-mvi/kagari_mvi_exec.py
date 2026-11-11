@@ -21,6 +21,13 @@ SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] + GI
 # Build outputs that tests leave behind; never committed (pathspec excludes).
 ARTIFACTS = [":(exclude,glob)**/%s" % pattern for pattern in (
     "__pycache__/**", "*.pyc", ".pytest_cache/**", "node_modules/**", ".mypy_cache/**")]
+# Only these built-in tools exist in the session (no Cron, RemoteTrigger, Skill, ...).
+# --restricted also ignores user/project/local settings and confines file tools to the cwd.
+AGENT_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
+# Bash is allowed broadly (it runs as the agent user, without GitHub credentials, D3);
+# these are denied as a speed bump, not a boundary (python3 -c can still reach the network).
+DENIED_COMMANDS = ("curl", "wget", "gh", "git push", "git remote", "ssh", "scp", "sudo", "su",
+                   "nc", "ncat", "socat", "telnet")
 AGENT_TIMEOUT = 3600
 TEST_TIMEOUT = 1800
 AGENT_SCRIPT = 'cd "$1" && umask 002 && shift && exec "$@"'
@@ -32,9 +39,10 @@ AUTH_PATTERN = re.compile(r"login expired|not logged in|invalid api key|authenti
                           r"oauth token|please run /login|api error:? *401\b|\b401 unauthorized", re.I)
 AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worker.
 - Implement only what the Issue asks. Edit files in the current directory only.
-- Do not run git, gh, curl or other network commands, and do not commit.
-  The host commits and opens the pull request for you.
-- You may run this test command, exactly as written: {test}
+- You may run shell commands (build, lint, tests). Do not commit: the host commits
+  and opens the pull request for you.
+- The host denies network and credential commands (curl, wget, gh, git push, ssh, sudo, ...).
+- The Issue's test command, which the host re-runs to decide the result: {test}
 - End your last message with one line: `status: COMPLETED` if the Issue is done and the
   test command passes, otherwise `status: BLOCKED: <reason>`.
 """
@@ -142,13 +150,16 @@ class AgentSteps:
             raise Blocked("The repository commits `.claude/settings.local.json`; it would widen "
                           "Claude's permissions (hooks, allow rules, plugins). Remove it to proceed.")
         settings = {
-            "permissions": {"allow": ["Read", "Glob", "Grep", "Edit(/%s/**)" % worktree,
-                                      "Write(/%s/**)" % worktree, "Bash(%s)" % test],
-                            "deny": ["Agent", "WebFetch", "WebSearch", "NotebookEdit"]},
+            "permissions": {"allow": ["Bash", "Read", "Glob", "Grep", "Edit(/%s/**)" % worktree,
+                                      "Write(/%s/**)" % worktree],
+                            "deny": ["Agent", "WebFetch", "WebSearch", "NotebookEdit"] + [
+                                "Bash(%s)" % rule for name in DENIED_COMMANDS
+                                for rule in (name, name + " *")]},
             "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"},
         }
         argv = [self.claude, "-p", "--output-format", "stream-json", "--verbose",
-                "--no-session-persistence", "--setting-sources=local",
+                "--no-session-persistence", "--tools", AGENT_TOOLS, "--restricted",
+                "--permission-prompts", "none",
                 "--settings=" + json.dumps(settings), "--strict-mcp-config",
                 "--mcp-config=" + json.dumps({"mcpServers": {}}),
                 "--append-system-prompt", AGENT_RULES.format(test=test)]
