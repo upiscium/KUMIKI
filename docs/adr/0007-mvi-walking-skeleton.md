@@ -1,6 +1,6 @@
 # ADR-0007: Issue起点の最小E2E経路（MVI walking skeleton）をD8より先に通す
 
-- **Status:** Accepted（2026-11-11）; I-1〜I-2 実装済み、I-3 実装中（D7 追補 2026-11-12）
+- **Status:** Accepted（2026-11-11）; I-1・I-2 実装済み、I-3 は PR #410（D7 追補 2026-11-12）
 - **Human decision:** 案B（KUMIKI内に最小E2E経路を新設し、ADR-0006 D8より先に通す）を採用（2026-11-11 JST）。承認ラベルの付与をagentに許さないADR-0006の制約は維持する。
 - **Issues:** #403（I-0 LXC）、#404（I-1 骨格）、#405（I-2 Claude実装）、#406（I-3 レビュー）
 - **Related:** ADR-0001、ADR-0005、ADR-0006（D1〜D8）、#291、#340
@@ -56,7 +56,7 @@
   - `kagari-runner`：GitHubの資格情報（gh / git push）を持つ。workerのhostコードを動かす。
   - `kagari-agent`：Claude CodeのOAuth資格情報だけを持つ。Claude Codeのセッションを動かす。**GitHubの資格情報は持たせない。**
 - このため、Claudeのセッションはラベルを付けられず、pushもPR操作もできない。ADR-0006の既知の限界「承認ラベルの真正性」も、この分離で担保する。
-- Contractと照合する権限窓口（`--permission-prompt-tool`のMCP）は、MVIでは**作らない**。headless実行では、allowlistに無い操作は承認されずに拒否される。この性質とLXCという境界で代替する。ただし、この拒否動作は実機で確認する（受入条件）。
+- Contractと照合する権限窓口（`--permission-prompt-tool`のMCP）は、MVIでは**作らない**。headless実行では、allowlistに無い操作は承認されずに拒否される。この性質とLXCという境界で代替する。ただし、この拒否動作は実機で確認する（受入条件）。（Bash の許可範囲と起動設定は D7 で変更）
 - ADR-0006の実機確認で得た起動設定は流用する。
   - クリーンな環境変数で起動する
   - 規則は`--append-system-prompt`で渡し、Projectの`AGENTS.md`・`CLAUDE.md`は書き換えない
@@ -77,7 +77,7 @@
 | MVI（今回） | テストの実行結果、レビューコメント、Userによるmerge判断。この3つだけ |
 | 機能追加・再設計の周回 | 必要に応じて、Evidence、Contract固定、独立系統のレビューなどを足す。足すたびに、何の誤操作を防ぐのかを1行で書く |
 
-- MVI経路のコードは、**1モジュール（本体500行以内を目安）とREADME 1本**とする。phaseごとの文書は作らない。上限を超えそうになったら、実装を続けずに設計を見直す。
+- MVI経路のコードは、**1モジュール（本体500行以内を目安）とREADME 1本**とする。phaseごとの文書は作らない。上限を超えそうになったら、実装を続けずに設計を見直す。（行数の目安は D7 で変更）
 
 ### D6 — 独立レビュー
 
@@ -86,7 +86,7 @@
 
 ### D7 — 実装で確定した事項（追補 2026-11-12、Human 判断を含む）
 
-I-1〜I-3（#404〜#406、PR #408〜#410）の実装と LXC での実機確認を通じて、次のことを確定した。D3・D5・D6 の記述と食い違う点は、この節が優先する。
+I-1・I-2（#404・#405、PR #408・#409）の実装と LXC での実機確認を通じて、次のことを確定した。「（I-3）」と記した項目は、I-3（#406、PR #410）の merge と実機確認で確定する。D3・D5・D6 と Acceptance evidence の記述と食い違う点は、この節が優先する。
 
 - **commit は runner が行う（D3 の補足）**：Claude（`kagari-agent`）は worktree のファイルを編集するだけとし、git の管理ディレクトリには書き込めないようにする。`kagari-runner` が commit と push を行う。commit では git の管理ディレクトリを明示し（`--git-dir`）、hooks と fsmonitor を無効にする。
   - 理由：`kagari-agent` が `.git` の設定やフックに書き込めると、runner が git を実行したときに、GitHub の資格情報を持ったままそのコードが動くため。
@@ -95,25 +95,25 @@ I-1〜I-3（#404〜#406、PR #408〜#410）の実装と LXC での実機確認�
   - commit した内容だけを別の場所に checkout し、そこでテストを動かす
   - ログインシェルを使わず、HOME は使い捨てにする
   - `timeout -k` で時間を区切る
-- **Claude の起動設定（D3 の追加）**：`--tools`（実装は `Bash,Read,Edit,Write,Glob,Grep`、レビューは `Read,Grep,Glob`）、`--restricted`、`--permission-prompts none` を付ける。`--setting-sources` は使わない。
+- **Claude の起動設定（D3 の追加）**：`--tools`（実装は `Bash,Read,Edit,Write,Glob,Grep`、レビューは `Read,Grep,Glob`（I-3））、`--restricted`、`--permission-prompts none` を付ける。`--restricted` が user・project・local の設定ファイルを読まないので、`--setting-sources` は使わない。
   - 理由：実機で確かめたところ、`--tools` を付けないと 20 個ほどのツール（RemoteTrigger、CronCreate など）が使える状態だった。
 - **Bash の許可範囲（Human 判断 2026-11-11、D3 の変更）**：Bash は原則として許可する。ネットワークと資格情報に関わるコマンド（`curl`、`gh`、`git push`、`ssh`、`sudo` など）だけを拒否リストで拒否する。
   - 安全の境界は OS のユーザー分離であり、拒否リストは誤操作を防ぐためのものとする。
   - 読み取り専用のコマンド（`uname` など）は、許可リストに無くても承認なしで実行される。これは実機で確認した。
-- **ホストのセットアップはホストごとに 1 回（Human 判断）**：内容は、共有グループ 1 つ、sudoers に 1 行、`/srv/kagari` 以下のディレクトリ 4 つである。リポジトリごとの手作業は作らない。手順、削除の手順、NixOS での設定例は `components/kagari-mvi/README.md` に置く。
+- **ホストのセットアップはホストごとに 1 回（Human 判断）**：内容は、共有グループ 1 つ、sudoers に 1 行、`/srv/kagari` とその下の 3 つのディレクトリである。リポジトリごとの手作業は作らない。手順、削除の手順、NixOS での設定例は `components/kagari-mvi/README.md` に置く。
 - **行数の目安（Human 判断 2026-11-11、D5 の変更）**：本体は 2 ファイル（GitHub 側とプロセス側）で、合わせて 700 行以内とする。README は 1 本のままとする。
-- **独立レビューの起動（D6 の補足）**：`review-once` は `run-once` とは別のコマンドとする。FAIL があっても `blocked` にはせず、`kagari:reviewed` を付ける。merge するかどうかは User が判断する。
+- **独立レビューの起動（D6 の補足、I-3）**：`review-once` は `run-once` とは別のコマンドとする。FAIL があっても `blocked` にはせず、`kagari:reviewed` を付ける。merge するかどうかは User が判断する。
 - **認証エラー（#405 の追加要件）**：認証エラーは、実装の失敗と区別する。`blocked` を付けて再ログインを求め、リトライはしない。`--bare` は使わない。
 
 ## Acceptance evidence
 
 - 使い捨てのリポジトリを対象に、E2E-MVI-01を実モデルで一周させること。KUMIKI自身を対象にするのは、一周できた後とする。
 - `kagari-agent`のセッションから、`gh`とgit pushが失敗すること（資格情報が無いこと）。
-- headless実行で、allowlistに無いBashコマンドが拒否され、セッションが止まらずに続くか、BLOCKEDとして終わること。
+- headless実行で、拒否リストにあるBashコマンドが拒否され、セッションが止まらずに続くか、BLOCKEDとして終わること（D7 で allowlist 方式から変更）。
 - workerを途中で止めて再起動しても、`kagari:running`のIssueを二重に取得しないこと。取得しない代わりに`blocked`へ倒すことは許容する。
 - `upiscium`以外が付けた`kagari:approved`は処理されないこと。
 
-**実施状況（2026-11-12、LXC `kagari-mvi`、Claude CLI 2.1.322、対象 `upiscium/kagari-mvi-sandbox`）：**
+**実施状況（2026-11-11〜12、専用 LXC の `kagari-runner` ユーザー、対象 `upiscium/kagari-mvi-sandbox`。I-2 以降は Claude CLI 2.1.322）：** 各行の出力は PR #411 のコメントに記録する。
 
 | 項目 | 結果 |
 | --- | --- |
@@ -122,6 +122,7 @@ I-1〜I-3（#404〜#406、PR #408〜#410）の実装と LXC での実機確認�
 | `kagari:running` の Issue を二重に取得しない | PASS（I-1） |
 | `upiscium` 以外が付けた承認は処理されない | PASS（I-1、許可リストを変えて確認） |
 | I-2：Issue から、テストが通った Draft PR ができる | PASS（sandbox PR #17） |
+| 認証エラーで blocked にし、再ログインを求める | PASS（sandbox Issue #20） |
 | I-3：受入条件ごとの独立レビュー | 未確認（PR #410 の後に実施） |
 | E2E-MVI-01 の一周 | 未確認 |
 
