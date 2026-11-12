@@ -56,9 +56,11 @@ class FakeRunner:
                 raise mvi.CommandError(args, 1, output)
         if not is_api:
             return next((out for needle, out in self.outputs.items() if needle in joined), "")
-        method, path = args[3], args[6]
+        method, path = ("DIFF" if "diff" in args[5] else args[3]), args[6]
         for (route_method, prefix), response in self.routes.items():
             if route_method == method and path.startswith(prefix):
+                if isinstance(response, str):
+                    return response
                 return json.dumps(response) if response is not None else ""
         return ""
 
@@ -302,6 +304,84 @@ class RunOnceTest(unittest.TestCase):
     def test_no_candidate_is_a_noop(self):
         runner = FakeRunner({("GET", "repos/o/r/issues?"): [issue(1, [mvi.APPROVED, mvi.BLOCKED])]})
         self.assertEqual(self.run_worker(runner, "/nonexistent"), 0)
+        self.assertEqual(len(runner.calls), 1)
+
+
+REVIEW_BODY = ("add greet\n\n### 受入条件\n- [ ] greet() returns Hello\n- [x] tests added\n\n"
+               "### 非目標\n- nothing else\n")
+
+
+class ReviewParseTest(unittest.TestCase):
+    def test_acceptance_criteria_section_only(self):
+        self.assertEqual(ex.acceptance_criteria(REVIEW_BODY), ["greet() returns Hello", "tests added"])
+        self.assertEqual(ex.acceptance_criteria("no criteria"), [])
+
+    def test_verdicts_missing_line_is_unknown(self):
+        text = "notes\nAC1: PASS — greet.py:2\n**AC3**: FAIL - nope\n"
+        self.assertEqual(ex.review_verdicts(text, 3), [
+            ("PASS", "greet.py:2"), ("UNKNOWN", "(no verdict from the reviewer)"), ("FAIL", "nope")])
+
+
+class ReviewOnceTest(unittest.TestCase):
+    def routes(self, comments=None, body=REVIEW_BODY):
+        implemented = issue(7, [mvi.APPROVED, mvi.IMPLEMENTED])
+        implemented["body"] = body
+        return {
+            ("GET", "repos/o/r/issues?"): [implemented, issue(8, [mvi.APPROVED, mvi.IMPLEMENTED,
+                                                                 mvi.REVIEWED])],
+            ("GET", "repos/o/r/pulls?"): [{"number": 70}],
+            ("DIFF", "repos/o/r/pulls/70"): "diff --git a/greet.py b/greet.py\n+def greet(): ...\n",
+            ("GET", "repos/o/r/pulls/70"): {"number": 70, "head": {"sha": "abc123"}},
+            ("GET", "user"): {"login": "runner"},
+            ("GET", "repos/o/r/issues/70/comments"): comments if comments is not None else [
+                {"user": {"login": "runner"}, "body": mvi.TEST_REPORT_PREFIX + " ... exit code: 0"},
+                {"user": {"login": "outsider"}, "body": mvi.TEST_REPORT_PREFIX + " FAKE PASS"}],
+        }
+
+    def run_review(self, runner):
+        with tempfile.TemporaryDirectory() as workdir:
+            return mvi.Worker("o/r", run=runner, log=lambda _: None).review_once(workdir)
+
+    def test_review_posts_table_and_marks_reviewed(self):
+        runner = FakeRunner(self.routes(), outputs={
+            "stream-json": stream("AC1: PASS — greet.py:1\nAC2: FAIL — no test file")})
+        self.assertEqual(self.run_review(runner), 0)
+        claude = next(args for args, _, _ in runner.calls if "stream-json" in args)
+        self.assertEqual(claude[claude.index("--tools") + 1], "Read,Grep,Glob")
+        settings = json.loads(next(a for a in claude if a.startswith("--settings="))[11:])
+        for tool in ("Bash", "Edit", "Write", "WebFetch"):
+            self.assertIn(tool, settings["permissions"]["deny"])
+        prompt = next(inp for args, _, inp in runner.calls if "stream-json" in args)
+        self.assertIn("AC1: greet() returns Hello", prompt)
+        self.assertIn("+def greet()", prompt)
+        self.assertIn("exit code: 0", prompt)
+        self.assertNotIn("FAKE PASS", prompt)  # only the runner's own test comment is used
+        self.assertNotIn("nothing else", prompt)  # non-goals are not criteria
+        report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
+        self.assertIn("reviewed head: `abc123`", report)
+        self.assertIn("| AC2 | tests added | **FAIL** | no test file |", report)
+        self.assertIn("not PASS: 1 of 2", report)
+        self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.REVIEWED])
+        self.assertEqual(runner.removed_labels(), ["kagari%3Arunning"])
+        add = next(args for args, _, _ in runner.calls if "--detach" in args)
+        self.assertEqual(add[-1], "abc123")
+
+    def test_missing_criteria_blocks(self):
+        runner = FakeRunner(self.routes(body="no criteria here"))
+        self.assertEqual(self.run_review(runner), 1)
+        self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.BLOCKED])
+        self.assertFalse(any("stream-json" in args for args, _, _ in runner.calls))
+
+    def test_no_runner_test_comment_is_stated(self):
+        runner = FakeRunner(self.routes(comments=[]), outputs={"stream-json": stream("AC1: UNKNOWN — x")})
+        self.assertEqual(self.run_review(runner), 0)
+        prompt = next(inp for args, _, inp in runner.calls if "stream-json" in args)
+        self.assertIn("no runner test result", prompt)
+
+    def test_nothing_to_review(self):
+        runner = FakeRunner({("GET", "repos/o/r/issues?"): [issue(8, [mvi.APPROVED, mvi.IMPLEMENTED,
+                                                                         mvi.REVIEWED])]})
+        self.assertEqual(self.run_review(runner), 0)
         self.assertEqual(len(runner.calls), 1)
 
 

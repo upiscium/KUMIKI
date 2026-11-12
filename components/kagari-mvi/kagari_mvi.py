@@ -15,8 +15,11 @@ import sys
 import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from kagari_mvi_exec import (SAFE_GIT, AgentSteps, Blocked, CommandError, Runner, report,
-                             subprocess_runner, tail, test_command)
+from kagari_mvi_exec import (SAFE_GIT, AgentSteps, Blocked, CommandError, Runner,
+                             acceptance_criteria, report, review_report, subprocess_runner, tail,
+                             test_command)
+
+TEST_REPORT_PREFIX = "kagari-mvi: test result recorded by the runner"
 
 APPROVED = "kagari:approved"
 RUNNING = "kagari:running"
@@ -48,12 +51,22 @@ def is_candidate(issue: Dict[str, Any]) -> bool:
     return APPROVED in names and not any(name in names for name in EXCLUDED)
 
 
+def is_review_candidate(issue: Dict[str, Any]) -> bool:
+    """Open, approved and implemented, not a PR, not locked, reviewed or blocked."""
+    if "pull_request" in issue or issue.get("state") != "open":
+        return False
+    names = label_names(issue)
+    return (APPROVED in names and IMPLEMENTED in names
+            and not any(name in names for name in (RUNNING, REVIEWED, BLOCKED)))
+
+
+def oldest(issues: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    return min(issues, key=lambda issue: (issue["created_at"], issue["number"])) if issues else None
+
+
 def select_issue(issues: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The oldest candidate by created_at (then number), or None."""
-    candidates = [issue for issue in issues if is_candidate(issue)]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda issue: (issue["created_at"], issue["number"]))
+    return oldest([issue for issue in issues if is_candidate(issue)])
 
 
 def approval_actor(events: List[Dict[str, Any]]) -> Optional[str]:
@@ -104,6 +117,9 @@ class Worker(AgentSteps):
         out = self.run(args, input=stdin)
         return json.loads(out) if out.strip() else None
 
+    def api_text(self, path: str, accept: str) -> str:
+        return self.run(["gh", "api", "--method", "GET", "-H", "Accept: " + accept, path])
+
     def api_pages(self, path: str) -> List[Dict[str, Any]]:
         """GET every page of a list endpoint (manual paging, no --paginate)."""
         items: List[Dict[str, Any]] = []
@@ -144,9 +160,69 @@ class Worker(AgentSteps):
             created.append(name)
         return created
 
-    def list_open_approved(self) -> List[Dict[str, Any]]:
+    def list_open_labeled(self, label: str) -> List[Dict[str, Any]]:
         return self.api_pages(self.repo_path(
-            "/issues?state=open&labels=%s&sort=created&direction=asc" % quote_path(APPROVED)))
+            "/issues?state=open&labels=%s&sort=created&direction=asc" % quote_path(label)))
+
+    def review_once(self, workdir: str) -> int:
+        issue = oldest([i for i in self.list_open_labeled(IMPLEMENTED) if is_review_candidate(i)])
+        if issue is None:
+            self.log("no implemented Issue to review")
+            return 0
+        number = issue["number"]
+        self.log("reviewing #%d" % number)
+        self.add_labels(number, RUNNING)
+        stage = "find-pr"
+        try:
+            pr = self.find_open_pr(number)
+            if pr is None:
+                raise Blocked("No open PR for `%s` to review." % branch_name(number))
+            stage = "inputs"
+            criteria = acceptance_criteria(issue.get("body"))
+            if not criteria:
+                raise Blocked("The Issue body has no `### 受入条件` list to review against.")
+            pr = self.api("GET", self.repo_path("/pulls/%d" % pr["number"]))
+            head = pr["head"]["sha"]
+            diff = self.api_text(self.repo_path("/pulls/%d" % pr["number"]),
+                                 "application/vnd.github.diff")
+            test_report = self.runner_test_report(pr["number"])
+            stage = "checkout"
+            review_dir = self.prepare_review_dir(workdir, number, head)
+            stage = "review"
+            outcome = self.run_review(workdir, review_dir, number, criteria, diff, test_report)
+            stage = "report"
+            self.comment(pr["number"], review_report(head, criteria, outcome["verdicts"],
+                                                     outcome["denials"]))
+            stage = "labels"
+            self.add_labels(number, REVIEWED)
+            self.remove_label(number, RUNNING)
+        except Exception as error:  # noqa: BLE001 - every failure must end as blocked
+            self.block_after_failure(number, stage, error)
+            return 1
+        self.log("#%d reviewed: PR #%d" % (number, pr["number"]))
+        return 0
+
+    def runner_test_report(self, pr_number: int) -> str:
+        """The runner's own latest test comment; text that others post is ignored."""
+        me = self.api("GET", "user")["login"]
+        comments = self.api_pages(self.repo_path("/issues/%d/comments" % pr_number))
+        mine = [c["body"] for c in comments if (c.get("user") or {}).get("login") == me
+                and (c.get("body") or "").startswith(TEST_REPORT_PREFIX)]
+        return mine[-1] if mine else "(no runner test result was found on the PR)"
+
+    def prepare_review_dir(self, workdir: str, number: int, head: str) -> str:
+        clone = os.path.join(workdir, "repos", self.repo.replace("/", "__"))
+        review_dir = os.path.join(workdir, "wt", "issue-%d.review" % number)
+        self.kill_agent_processes()  # nothing left over may write into the review checkout
+        self.run(["git", "-C", clone] + SAFE_GIT + ["fetch", "--prune", "origin"])
+        if os.path.exists(review_dir):
+            self.run(["git", "-C", clone, "worktree", "remove", "--force", review_dir])
+        self.run(["git", "-C", clone, "worktree", "prune"])
+        self.run(["git", "-C", clone] + SAFE_GIT + ["worktree", "add", "--detach", review_dir, head])
+        return review_dir
+
+    def list_open_approved(self) -> List[Dict[str, Any]]:
+        return self.list_open_labeled(APPROVED)
 
     def run_once(self, allowed: Sequence[str], workdir: str) -> int:
         issue = select_issue(self.list_open_approved())
@@ -272,13 +348,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     labels = sub.add_parser("ensure-labels", help="create the five kagari:* labels if missing")
     labels.add_argument("--repo", required=True, help="OWNER/REPO")
     once = sub.add_parser("run-once", help="process at most one approved Issue")
-    once.add_argument("--repo", required=True, help="OWNER/REPO")
     once.add_argument("--allow-actor", action="append", required=True,
                       help="login allowed to add kagari:approved (repeat or comma-separate)")
-    once.add_argument("--workdir", required=True, help="directory for clones and worktrees")
-    once.add_argument("--agent-user", default="kagari-agent", help="user that runs Claude and tests")
-    once.add_argument("--claude", default="claude", help="claude executable for the agent user")
-    once.add_argument("--agent-config-dir", help="CLAUDE_CONFIG_DIR for the agent (testing only)")
+    review = sub.add_parser("review-once", help="review at most one implemented Issue's PR")
+    for command in (once, review):
+        command.add_argument("--repo", required=True, help="OWNER/REPO")
+        command.add_argument("--workdir", required=True, help="directory for clones and worktrees")
+        command.add_argument("--agent-user", default="kagari-agent",
+                             help="user that runs Claude and tests")
+        command.add_argument("--claude", default="claude", help="claude executable for the agent user")
+        command.add_argument("--agent-config-dir", help="CLAUDE_CONFIG_DIR for the agent (testing only)")
     return parser.parse_args(argv)
 
 
@@ -290,10 +369,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             created = worker.ensure_labels()
             print("created: %s" % (", ".join(created) if created else "(none)"))
             return 0
-        allowed = [name.strip() for value in args.allow_actor for name in value.split(",")
-                   if name.strip()]
         worker = Worker(args.repo, agent_user=args.agent_user, claude=args.claude,
                         agent_config_dir=args.agent_config_dir)
+        if args.command == "review-once":
+            return worker.review_once(os.path.abspath(args.workdir))
+        allowed = [name.strip() for value in args.allow_actor for name in value.split(",")
+                   if name.strip()]
         return worker.run_once(allowed, os.path.abspath(args.workdir))
     except CommandError as error:
         print("kagari_mvi: %s\n%s" % (error, tail(error.output)), file=sys.stderr)

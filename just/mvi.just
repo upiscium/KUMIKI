@@ -13,6 +13,10 @@ ensure-labels repo:
 run-once repo *args:
     {{python}} {{quote(worker)}} run-once --repo {{quote(repo)}} --allow-actor {{quote(allow_actor)}} --workdir {{quote(workdir)}} {{args}}
 
+# Review at most one implemented Issue's PR of OWNER/REPO (extra args go to kagari_mvi.py).
+review-once repo *args:
+    {{python}} {{quote(worker)}} review-once --repo {{quote(repo)}} --workdir {{quote(workdir)}} {{args}}
+
 # Run the unit tests (gh/git are faked).
 test:
     {{python}} {{quote(root / "components/kagari-mvi/test_kagari_mvi.py")}}

@@ -1,6 +1,6 @@
 # kagari-mvi — Issue 起点の最小 E2E worker（ADR-0007）
 
-ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります。
+ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります（`run-once`）。Draft PR ができた Issue は、別の Claude セッションが受入条件ごとにレビューします（`review-once`）。
 
 - **構成**：本体は 2 ファイルで、合わせて 700 行以内に保ちます（User 判断 2026-11-11。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は使いません。
 - **状態の持ち方**：状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata にも依存しません。
@@ -32,6 +32,8 @@ python3 -m unittest -v
 ````
 
 Claude に渡すのは、Issue のタイトルと本文だけです。コメントは取得しません（D4）。
+
+`review-once` は、`### 受入条件`（`### Acceptance criteria` でも可）の見出しの下にある箇条書き（`- [ ] ...` または `- ...`）を、受入条件として 1 つずつ判定します。次の見出しまでが対象です。この見出しが無い Issue は、レビューせずに `blocked` にします。
 
 ## ホストのセットアップ（ホストごとに 1 回）
 
@@ -109,6 +111,7 @@ sudo userdel -r kagari-agent; sudo userdel -r kagari-runner
 just mvi::ensure-labels OWNER/REPO   # 5 つのラベルを作る（既にあれば何もしない）
 just mvi::run-once OWNER/REPO        # 承認された Issue を最大 1 件処理する
 just mvi::run-once OWNER/REPO --agent-config-dir DIR   # 追加の引数は kagari_mvi.py に渡る
+just mvi::review-once OWNER/REPO     # implemented の Issue の PR を最大 1 件レビューする
 just mvi::test                       # 単体テスト（gh・git・sudo は偽物に差し替える）
 ```
 
@@ -179,6 +182,25 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 
 手順 4〜9 で失敗した場合は、`blocked` を付けてから `running` を外します。そのうえで、失敗した段階の名前とエラーの末尾を Issue にコメントします。
 
+## `review-once` の動作（I-3）
+
+1. **Issue を選ぶ**：対象は、open で、`kagari:approved` と `kagari:implemented` が付いていて、running / reviewed / blocked のどれも付いていない Issue です。その中で最も古い 1 件を選び、`kagari:running` を付けます。
+2. **入力を集める**：レビュアーに渡すのは、次の 3 つだけです。実装セッションの会話は渡しません。
+   - Issue の受入条件（`### 受入条件` の箇条書き）
+   - `kagari/issue-N` の open な PR の差分（REST の diff）。200,000 文字を超える部分は切り詰め、残りはファイルを読むよう伝えます。
+   - runner が投稿したテスト結果のコメント。認証済みの runner 自身が投稿し、「kagari-mvi: test result recorded by the runner」で始まるものだけを使います。他の人が同じ書き出しで投稿したコメントは使いません。
+3. **PR の先頭を checkout する**：`kagari-agent` のプロセスを止めます。そのうえで、PR の先頭の commit を `<workdir>/wt/issue-N.review` に detached worktree として checkout します。
+4. **レビューする**：`kagari-agent` として、新しい `claude -p` を起動します。
+   - 使えるツールは `--tools Read,Grep,Glob` だけで、Bash・Edit・Write・Web は存在しません。設定でも拒否します。
+   - `--restricted` で、読めるのは checkout の中だけになります。
+   - そのほかの起動設定は、実装と同じです（`--permission-prompts none`、MCP は空、subagent の深さは 1）。
+   - 規則：受入条件ごとに `AC<n>: PASS|FAIL|UNKNOWN — 根拠（file:line）` を 1 行ずつ出力し、根拠が足りなければ UNKNOWN にします。
+   - 記録は `<workdir>/logs/issue-N-review.jsonl` に残します。
+5. **PR にコメントする**：受入条件ごとの判定と根拠を表にして、PR にコメントします。コメントには、レビューした commit と、PASS 以外の件数も入れます。判定の行が無い受入条件は UNKNOWN と表示します。
+6. **ラベルを付ける**：判定の結果にかかわらず、`kagari:reviewed` を付けてから `running` を外します。merge するかどうかは User が決めます。
+
+途中で失敗した場合や、認証エラーの場合は、`run-once` と同じく `blocked` にします。
+
 ### 既知の限界（MVI の範囲外）
 
 - **止まった Issue**：`running` が付いたまま止まった Issue は、自動では復旧しません。
@@ -192,6 +214,8 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **残るプロセス**：Claude とテストは、sudo の内側で `timeout -k` によって時間を区切ります。テストの前には `kill -1` でプロセスを止めます。ただし、cron・at・`systemd-run --user` で後から起動するプロセスは止められません。そうしたプロセスがテストの最中に `.verify` を書き換えることは、防げていません。
 - **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。Actions の secrets があるリポジトリを対象にする前に、対策を決めてください。対策の候補は、Workflows 権限の無い fine-grained token を使うこと、`.github/` を変更した差分は push しないことです。
 - **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。これは処理を止めるだけで、権限の昇格にはつながりません。
+- **レビューの独立性**：レビュアーは実装者と同じモデル系統です（ADR-0007 D6）。受入条件と差分は Issue と PR から取るので、その文面でレビュアーを誘導することもできます。レビューの結果は参考として扱い、merge は User が判断してください。
+- **レビュー後の変更**：`reviewed` を付けた後に PR へ commit を足しても、もう一度はレビューしません。やり直す場合は、`kagari:reviewed` を外してください。
 - **一覧への反映の遅れ**：承認した直後の実行では、Issue が選ばれないことがあります。ラベルで絞り込む一覧 API への反映が遅れるためと推測しています。次の実行で拾われます。
 
 ## 実機での確認手順（I-2 / #405、LXC `kagari-runner`、対象 `upiscium/kagari-mvi-sandbox`）
@@ -270,3 +294,53 @@ new_issue() {  # $1 = タイトル、$2 = 本文
    ````
 
    確認すること：`rc=1` であること。Issue が `blocked` になり、「kagari-agent の再ログインが必要」のコメントが付いていること。PR が作られていないこと。
+
+## 実機での確認手順（I-3 / #406）
+
+前提と `new_issue` 関数は、I-2 の手順と同じです。
+
+1. **I-2 の Draft PR に、受入条件ごとの判定コメントが付く**
+
+   ````sh
+   new_issue "MVI I-3: greet2" "$(printf '%s\n' \
+     'greet2.py に greet2(name) を追加し、"Hi, <name>." を返すようにする。test_greet2.py に unittest のテストを追加する。' '' \
+     '### 受入条件' '- [ ] greet2("A") が "Hi, A." を返す' '- [ ] test_greet2.py にテストがある' '' \
+     '### テストコマンド' '```sh' 'python3 -m unittest -v' '```')"
+   just mvi::run-once $R; echo rc=$?          # implemented になる
+   just mvi::review-once $R; echo rc=$?       # reviewed になる
+   P=$(gh api "repos/$R/pulls?head=upiscium:kagari/issue-$N" --jq '.[0].number')
+   gh api repos/$R/issues/$P/comments --jq '.[-1].body'
+   gh issue view $N -R $R --json labels --jq '[.labels[].name]'
+   ````
+
+   確認すること：PR の最後のコメントが「independent review」で始まり、AC1 と AC2 の判定と根拠が表になっていること。Issue のラベルに `kagari:reviewed` が付いていること。
+
+2. **わざと満たしていない受入条件が FAIL か UNKNOWN になる**
+
+   実装させた後、レビューの前に、`kagari-runner` で PR からテストファイルを消す commit を push します。
+
+   ````sh
+   new_issue "MVI I-3: greet3" "$(printf '%s\n' \
+     'greet3.py に greet3() を追加し、"Yo" を返すようにする。test_greet3.py に unittest のテストを追加する。' '' \
+     '### 受入条件' '- [ ] greet3() が "Yo" を返す' '- [ ] test_greet3.py にテストがある' '' \
+     '### テストコマンド' '```sh' 'python3 -m unittest -v' '```')"
+   just mvi::run-once $R; echo rc=$?
+   d=$(mktemp -d) && git clone -q -b kagari/issue-$N https://github.com/$R.git $d && cd $d \
+     && git rm -q test_greet3.py && git -c user.name=u -c user.email=u@u commit -qm "drop test" && git push -q && cd ~/KUMIKI
+   just mvi::review-once $R; echo rc=$?
+   P=$(gh api "repos/$R/pulls?head=upiscium:kagari/issue-$N" --jq '.[0].number')
+   gh api repos/$R/issues/$P/comments --jq '.[-1].body'
+   ````
+
+   確認すること：AC2（テストがある）が FAIL か UNKNOWN になっていること。
+
+3. **レビューのセッションからファイルを編集できない**
+
+   ````sh
+   L=/srv/kagari/logs/issue-$N-review.jsonl
+   jq -c 'select(.type=="system" and .subtype=="init") | {tools}' $L
+   jq -c 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name' $L | sort | uniq -c
+   git -C /srv/kagari/wt/issue-$N.review status --porcelain   # 何も出ない
+   ````
+
+   確認すること：`tools` が `Read`・`Grep`・`Glob` の 3 つだけであること。使われたツールもこの 3 つだけであること。checkout に変更が無いこと。

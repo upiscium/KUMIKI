@@ -28,6 +28,8 @@ AGENT_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 # these are denied as a speed bump, not a boundary (python3 -c can still reach the network).
 DENIED_COMMANDS = ("curl", "wget", "gh", "git push", "git remote", "ssh", "scp", "sudo", "su",
                    "nc", "ncat", "socat", "telnet")
+REVIEW_TOOLS = "Read,Grep,Glob"  # no Bash, no editing, no Web (I-3)
+MAX_DIFF_CHARS = 200_000
 AGENT_TIMEOUT = 3600
 TEST_TIMEOUT = 1800
 AGENT_SCRIPT = 'cd "$1" && umask 002 && shift && exec "$@"'
@@ -124,6 +126,7 @@ def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
         "completed": not errored and bool(statuses) and statuses[-1] == "COMPLETED",
         "denials": len((result or {}).get("permission_denials") or []),
         "detail": tail("\n".join(plain + [text])),  # readable: no raw stream-json
+        "text": text,
     }
 
 
@@ -157,23 +160,43 @@ class AgentSteps:
                                 for rule in (name, name + " *")]},
             "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"},
         }
+        prompt = "Issue #%d: %s\n\n%s\n" % (number, issue["title"], issue.get("body") or "")
+        return self.launch_claude(workdir, worktree, "issue-%d-claude" % number, AGENT_TOOLS,
+                                  settings, AGENT_RULES.format(test=test), prompt)
+
+    def run_review(self, workdir: str, review_dir: str, number: int, criteria: List[str],
+                   diff: str, test_report: str) -> Dict[str, Any]:
+        settings = {"permissions": {"allow": ["Read", "Glob", "Grep"],
+                                    "deny": ["Bash", "Edit", "Write", "NotebookEdit", "Agent",
+                                             "WebFetch", "WebSearch"]},
+                    "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"}}
+        if len(diff) > MAX_DIFF_CHARS:
+            diff = diff[:MAX_DIFF_CHARS] + "\n[diff truncated; read the files for the rest]\n"
+        prompt = ("Acceptance criteria:\n%s\n\nRunner test result:\n%s\n\nPR diff:\n%s\n" % (
+            "\n".join("AC%d: %s" % (i, c) for i, c in enumerate(criteria, start=1)),
+            test_report, diff))
+        outcome = self.launch_claude(workdir, review_dir, "issue-%d-review" % number, REVIEW_TOOLS,
+                                     settings, REVIEW_RULES, prompt)
+        outcome["verdicts"] = review_verdicts(outcome["text"], len(criteria))
+        return outcome
+
+    def launch_claude(self, workdir: str, cwd: str, log_name: str, tools: str,
+                      settings: Dict[str, Any], rules: str, prompt: str) -> Dict[str, Any]:
         argv = [self.claude, "-p", "--output-format", "stream-json", "--verbose",
-                "--no-session-persistence", "--tools", AGENT_TOOLS, "--restricted",
+                "--no-session-persistence", "--tools", tools, "--restricted",
                 "--permission-prompts", "none",
                 "--settings=" + json.dumps(settings), "--strict-mcp-config",
                 "--mcp-config=" + json.dumps({"mcpServers": {}}),
-                "--append-system-prompt", AGENT_RULES.format(test=test)]
-        prompt = "Issue #%d: %s\n\n%s\n" % (number, issue["title"], issue.get("body") or "")
+                "--append-system-prompt", rules]
         failed = False
         try:
-            output = self.run(self.as_agent(worktree, bounded(AGENT_TIMEOUT) + argv), input=prompt,
+            output = self.run(self.as_agent(cwd, bounded(AGENT_TIMEOUT) + argv), input=prompt,
                               timeout=AGENT_TIMEOUT + 60)
         except CommandError as error:
             output, failed = error.output, True
         logs = os.path.join(workdir, "logs")
         os.makedirs(logs, mode=0o700, exist_ok=True)
-        with open(os.path.join(logs, "issue-%d-claude.jsonl" % number), "w",
-                  encoding="utf-8") as handle:
+        with open(os.path.join(logs, log_name + ".jsonl"), "w", encoding="utf-8") as handle:
             handle.write(output)
         outcome = agent_outcome(output, failed)
         if outcome["auth"]:
@@ -195,10 +218,13 @@ class AgentSteps:
                  cwd=worktree)
         return True
 
-    def run_test(self, clone: str, worktree: str, number: int, test: str) -> Tuple[int, str]:
-        """Re-run the test ourselves on a clean checkout of the commit (as the agent user)."""
+    def kill_agent_processes(self) -> None:
         # Not under timeout/as_agent: kill(-1) spares only the sending shell, not its parents.
         self.run(["sudo", "-n", "-u", self.agent_user, "-H", "--", "sh", "-c", "kill -KILL -1; true"])
+
+    def run_test(self, clone: str, worktree: str, number: int, test: str) -> Tuple[int, str]:
+        """Re-run the test ourselves on a clean checkout of the commit (as the agent user)."""
+        self.kill_agent_processes()
         verify = worktree + ".verify"  # no leftover processes may write here now
         shutil.rmtree(verify, ignore_errors=True)
         os.makedirs(verify)
@@ -209,6 +235,47 @@ class AgentSteps:
                                timeout=TEST_TIMEOUT + 60)
         except CommandError as error:
             return error.code, error.output
+
+REVIEW_RULES = """You are an independent reviewer of one pull request (KAGARI MVI).
+- You get the Issue's acceptance criteria, the PR diff and the runner's test result.
+  The current directory is a checkout of the PR head; you may only read it.
+- Judge each criterion on evidence in the diff, the files and the test result. If the
+  evidence is missing or unclear, answer UNKNOWN rather than PASS.
+- Output exactly one line per criterion, in order:
+  AC<n>: PASS|FAIL|UNKNOWN — <evidence as file:line, or the reason>
+"""
+CRITERIA_HEADING = re.compile(r"^#{2,6}[ \t]*(?:受入条件|Acceptance criteria)[ \t]*$", re.M | re.I)
+VERDICT_LINE = re.compile(r"^\W*AC(\d+)\W*?[:：]\s*(PASS|FAIL|UNKNOWN)\b\s*[-—–:：]*\s*(.*)$", re.M)
+
+
+def acceptance_criteria(body: Optional[str]) -> List[str]:
+    """List items (`- [ ] ...` or `- ...`) under a `### 受入条件` heading."""
+    heading = CRITERIA_HEADING.search(body or "")
+    if heading is None:
+        return []
+    section = re.split(r"^#{1,6}\s", (body or "")[heading.end():], maxsplit=1, flags=re.M)[0]
+    items = re.findall(r"^\s*[-*]\s+(?:\[[ xX]\]\s*)?(.+?)\s*$", section, re.M)
+    return [item for item in items if item]
+
+
+def review_verdicts(text: str, count: int) -> List[Tuple[str, str]]:
+    """(status, evidence) per criterion; a missing line counts as UNKNOWN."""
+    found = {int(n): (status, evidence.strip()) for n, status, evidence in VERDICT_LINE.findall(text)}
+    return [found.get(i, ("UNKNOWN", "(no verdict from the reviewer)")) for i in range(1, count + 1)]
+
+
+def review_report(head: str, criteria: List[str], verdicts: List[Tuple[str, str]],
+                  denials: int) -> str:
+    cell = lambda value: value.replace("|", "\\|").replace("\n", " ")  # noqa: E731
+    rows = ["| AC%d | %s | **%s** | %s |" % (i, cell(c), status, cell(evidence))
+            for i, (c, (status, evidence)) in enumerate(zip(criteria, verdicts), start=1)]
+    failing = sum(1 for status, _ in verdicts if status != "PASS")
+    return ("kagari-mvi: independent review (new `claude -p` session, tools %s only; same "
+            "model family as the implementer, ADR-0007 D6).\n\n- reviewed head: `%s`\n"
+            "- not PASS: %d of %d\n- permission denials: %d\n\n| # | 受入条件 | 判定 | 根拠 |\n"
+            "| --- | --- | --- | --- |\n%s\n" % (REVIEW_TOOLS, head, failing, len(verdicts),
+                                                  denials, "\n".join(rows)))
+
 
 def bounded(seconds: int) -> List[str]:
     """sudo does not relay SIGKILL: stop the agent-side process tree from inside."""
