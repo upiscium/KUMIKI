@@ -95,7 +95,7 @@ I-1〜I-3（#404〜#406、PR #408〜#410）の実装と LXC での実機確認�
   - commit した内容だけを別の場所に checkout し、そこでテストを動かす
   - ログインシェルを使わず、HOME は使い捨てにする
   - `timeout -k` で時間を区切る
-- **Claude の起動設定（D3 の追加・変更）**：`--tools`（実装は `Bash,Read,Edit,Write,Glob,Grep`、レビューは `Read,Grep,Glob`）、`--restricted`、`--permission-prompts none` を付ける。`--restricted` が user・project・local の設定ファイルを読まないので、`--setting-sources` は使わない。D3 の「プラグインの許可リストは空」は、この `--restricted` で代える。Claude は `kagari-agent` のログインシェルから起動するので、D3 の「クリーンな環境変数」は、sudo による環境変数のリセットと、`kagari-agent` の `~/.profile` を合わせたものになる。
+- **Claude の起動設定（D3 の追加・変更）**：`--tools`（実装は `Bash,Read,Edit,Write,Glob,Grep`、レビューは `Read,Grep,Glob`）、`--restricted`、`--permission-prompts none` を付ける。`--restricted` が user・project・local の設定ファイルを読まないので、`--setting-sources` は使わない。D3 の「プラグインの許可リストは空」は、この `--restricted` で代える（CLI の help による。プラグインが無効になることは実機では未確認）。Claude は `kagari-agent` のログインシェルから起動するので、D3 の「クリーンな環境変数」は、sudo による環境変数のリセットと、`kagari-agent` の `~/.profile` を合わせたものになる。
   - 理由：実機で確かめたところ、`--tools` を付けないと 20 個ほどのツール（RemoteTrigger、CronCreate など）が使える状態だった。
 - **Bash の許可範囲（Human 判断 2026-11-11、D3 の変更）**：Bash は原則として許可する。ネットワークと資格情報に関わるコマンド（`curl`、`gh`、`git push`、`ssh`、`sudo` など）だけを拒否リストで拒否する。
   - 安全の境界は OS のユーザー分離であり、拒否リストは誤操作を防ぐためのものとする。
@@ -119,7 +119,7 @@ I-1〜I-3（#404〜#406、PR #408〜#410）の実装と LXC での実機確認�
 | --- | --- |
 | `kagari-agent` から `gh` と git push が失敗する | PASS（本来の HOME とログインシェルで `gh=1`、`push=128`） |
 | 拒否するコマンドが拒否され、セッションが止まらない | PASS（`curl` が `permission_denials` に記録され、25 秒で終了） |
-| `kagari:running` の Issue を二重に取得しない | PASS（I-1。`running` の付いた Issue を選ばないことを確認。worker を途中で止めて再起動する場面は未確認） |
+| `kagari:running` の Issue を二重に取得しない | 一部確認（I-1。`running` の付いた Issue を選ばないことのみ。worker を途中で止めて再起動する場面は未確認） |
 | `upiscium` 以外が付けた承認は処理されない | PASS（I-1、許可リストを変えて確認） |
 | I-2：Issue から、テストが通った Draft PR ができる | PASS（sandbox PR #17） |
 | 認証エラーで blocked にし、再ログインを求める | PASS（sandbox Issue #20） |
@@ -134,7 +134,7 @@ I-1〜I-3（#404〜#406、PR #408〜#410）の実装と LXC での実機確認�
 - 1周目のレビューは同じモデル系統で行うため、独立性は限定的である。
 - 承認後にIssue本文が変わっても検知しない。
 - Bash を原則として許可しているため、Claude は `kagari-agent` の Claude 資格情報を読める。Issue 本文で誘導されると、その資格情報を外部へ送られうる。
-- レビュアーは実装者と同じ `kagari-agent` のログインシェルから起動する。そのため、実装者が `~/.profile` や `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがある（未確認）。これは D6 の独立性に関わる。`claude` を root が所有する場所に入れて絶対パスで指定すれば防げる。別のユーザーでレビューする方法は 2 周目で扱う。
+- レビュアーは実装者と同じ `kagari-agent` のログインシェルから起動する。そのため、実装者が `~/.profile` や `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがある（未確認）。これは D6 の独立性に関わる。`claude` を root が所有する場所に入れて絶対パスで指定すれば、指定したパスの本体がすり替わることは防げる。ただし、`~/.profile` はシェルスクリプトなので、その内容（環境変数の設定や、`exec` による別のプログラムへの置き換え、PATH から探す `timeout` や `node` の差し替えなど）による介入は残る。レビューをログインシェルなしで起動すれば防げると考えるが、未確認である。別のユーザーでレビューする方法は 2 周目で扱う。
 - runner が push すると、target リポジトリの GitHub Actions が、Claude の書いたコードを secrets 付きで実行しうる。secrets を持つリポジトリを対象にする前に、対策を決める。
 
 本ADRは、Merge、Release、本番適用、既存dispatch経路の変更を承認するものではない。
