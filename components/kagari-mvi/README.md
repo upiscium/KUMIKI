@@ -1,90 +1,272 @@
 # kagari-mvi — Issue 起点の最小 E2E worker（ADR-0007）
 
-ADR-0007 の MVI 経路の worker です。この README は I-1（#404）の骨格を説明します。I-1 では、Claude による実装をまだ行いません。代わりにスタブとして、Issue のタイトルと本文をファイルに書き出して commit します。
+ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります。
 
-- 本体：`kagari_mvi.py`（1 ファイル）。使うのは Python 標準ライブラリと、subprocess 経由の `gh api`（REST）と `git` です。GraphQL は使いません。
-- 状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata には依存しません。
-- 1 回の実行で処理する Issue は最大 1 件です。systemd timer などから定期的に呼ぶ前提です。
+- **構成**：本体は 2 ファイルで、合わせて 700 行以内に保ちます（User 判断 2026-11-11。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は使いません。
+- **状態の持ち方**：状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata にも依存しません。
+- **実行の単位**：1 回の実行で処理する Issue は最大 1 件です。systemd timer などから定期的に呼ぶ前提です。
+- **ユーザーの分担**（D3）：
+  - `kagari-runner`（GitHub の資格情報を持つ）が worker を動かします。
+  - `kagari-agent`（Claude の資格情報だけを持つ）が、Claude とテストコマンドを動かします。
+  - git の commit と push は `kagari-runner` が行います。
 
 ## ラベル
 
-| ラベル | 付与者 | 意味 |
+| ラベル | 付ける人 | 意味 |
 | --- | --- | --- |
-| `kagari:approved` | **User のみ** | 実装してよい |
-| `kagari:running` | worker | 実装中。二重に取得しないためのロックです |
-| `kagari:implemented` | worker | Draft PR を作成済み |
-| `kagari:reviewed` | worker | レビューコメントを投稿済み（I-3 で使います） |
-| `kagari:blocked` | worker | 失敗した、または判断を待っている。理由は Issue にコメントします |
+| `kagari:approved` | **User だけ** | 実装してよい |
+| `kagari:running` | worker | 実装中。二重に取得しないためのロック |
+| `kagari:implemented` | worker | Draft PR を作り、テストが通った |
+| `kagari:reviewed` | worker | レビューコメントを投稿した（I-3 で使う） |
+| `kagari:blocked` | worker | 失敗した、または判断を待っている。理由を Issue にコメントする |
+
+## Issue の書き方
+
+worker は、Issue 本文の `### テストコマンド` 見出し（`### Test command` でも可）のすぐ下にあるコードブロックを探し、その 1 行目をテストコマンドとして使います。この見出しが無い Issue は、Claude を起動する前に `blocked` にします。
+
+````markdown
+### テストコマンド
+```sh
+python3 -m unittest -v
+```
+````
+
+Claude に渡すのは、Issue のタイトルと本文だけです。コメントは取得しません（D4）。
+
+## ホストのセットアップ（ホストごとに 1 回）
+
+この作業はホストごとに 1 回だけです。リポジトリを追加しても、追加の作業はありません。`kagari-runner` と `kagari-agent` の 2 ユーザーは、I-0（#403）で作成済みとします。
+
+| パス | 所有者 | モード | 用途 |
+| --- | --- | --- | --- |
+| `/srv/kagari` | `kagari-runner:kagari` | `0750` | 作業ディレクトリの親 |
+| `/srv/kagari/wt` | `kagari-runner:kagari` | `3770` | 2 ユーザーが共有する worktree。setgid と sticky を付けます |
+| `/srv/kagari/repos` | `kagari-runner:kagari` | `0700` | runner だけが使う clone と git の管理ディレクトリ |
+| `/srv/kagari/logs` | `kagari-runner:kagari` | `0700` | runner だけが使う Claude の stream-json の記録 |
+
+- `kagari-agent` は git の管理ディレクトリに書き込めません。そのため、git の設定やフックを仕込んで runner の権限でコードを動かすことはできません。
+- `wt` に sticky を付けるのは、`kagari-agent` が worktree のディレクトリそのものを差し替えられないようにするためです。
+
+```sh
+sudo groupadd kagari
+sudo usermod -aG kagari kagari-runner
+sudo usermod -aG kagari kagari-agent
+sudo install -d -o kagari-runner -g kagari -m 0750 /srv/kagari
+sudo install -d -o kagari-runner -g kagari -m 3770 /srv/kagari/wt
+sudo install -d -o kagari-runner -g kagari -m 0700 /srv/kagari/repos /srv/kagari/logs
+t=$(mktemp) && echo 'kagari-runner ALL=(kagari-agent) NOPASSWD: ALL' > "$t"
+sudo visudo -cf "$t" && sudo install -m 0440 "$t" /etc/sudoers.d/kagari-mvi; rm -f "$t"
+```
+
+セットアップの後、`kagari-runner` で次のコマンドを実行して確かめます。`claude` のパスとバージョンが表示されれば完了です。
+
+```sh
+sudo -n -u kagari-agent -H -- sh -lc 'command -v claude && claude --version'
+```
+
+- `sudo` の権限は、`kagari-agent` として実行することに限ります。`kagari-agent` は `kagari-runner` より弱いユーザーです。
+- テストを実行する前に、worker は `kagari-agent` のプロセスをすべて止めます。前回の実行で残ったプロセスが、テストの結果を書き換えないようにするためです。そのため、`kagari-agent` で対話的な作業（`/login` など）をしているときは、`run-once` を動かさないでください。`run-once` を同時に 2 つ動かすこともしないでください。
+- テストは、ログインシェルを使わずに、sudo の `secure_path` で実行します。テストで使うコマンドは、`secure_path`（たとえば `/usr/bin`）に置くか、絶対パスで書いてください。
+- `claude` が見つからない場合は、`kagari-agent` の `~/.profile` で PATH を通すか、`run-once` に `--claude /絶対パス` を渡してください。
+- I-1 のときに作った `/srv/kagari` が残っている場合は、`sudo rm -rf /srv/kagari` で消してから作り直してください。中にあるのはテストの状態だけです。
+
+### 削除
+
+```sh
+sudo rm -f /etc/sudoers.d/kagari-mvi
+sudo rm -rf /srv/kagari
+sudo groupdel kagari
+# ユーザーも消す場合（I-0 で作ったもの）
+sudo userdel -r kagari-agent; sudo userdel -r kagari-runner
+```
+
+### NixOS の設定例（未確認：実機では試していません）
+
+```nix
+{
+  users.groups.kagari = { };
+  users.users.kagari-runner = { isNormalUser = true; extraGroups = [ "kagari" ]; };
+  users.users.kagari-agent = { isNormalUser = true; extraGroups = [ "kagari" ]; };
+  security.sudo.extraRules = [{
+    users = [ "kagari-runner" ];
+    runAs = "kagari-agent";
+    commands = [{ command = "ALL"; options = [ "NOPASSWD" ]; }];
+  }];
+  systemd.tmpfiles.rules = [
+    "d /srv/kagari 0750 kagari-runner kagari -"
+    "d /srv/kagari/wt 3770 kagari-runner kagari -"
+    "d /srv/kagari/repos 0700 kagari-runner kagari -"
+    "d /srv/kagari/logs 0700 kagari-runner kagari -"
+  ];
+}
+```
+
+この設定を外して `nixos-rebuild switch` を実行すれば、元に戻ります。ただし、`/srv/kagari` の中身は残るので、手で消してください。
 
 ## 使い方
 
 ```sh
-python3 components/kagari-mvi/kagari_mvi.py ensure-labels --repo OWNER/REPO
-python3 components/kagari-mvi/kagari_mvi.py run-once --repo OWNER/REPO \
-    --allow-actor upiscium --workdir /srv/kagari
-
-just mvi::ensure-labels OWNER/REPO
-just mvi::run-once OWNER/REPO   # KAGARI_MVI_WORKDIR（既定 /srv/kagari）と
-                                # KAGARI_MVI_ALLOW_ACTOR（既定 upiscium）で上書きできます
-just mvi::test                  # 単体テスト（gh と git は偽物に差し替えています）
+just mvi::ensure-labels OWNER/REPO   # 5 つのラベルを作る（既にあれば何もしない）
+just mvi::run-once OWNER/REPO        # 承認された Issue を最大 1 件処理する
+just mvi::run-once OWNER/REPO --agent-config-dir DIR   # 追加の引数は kagari_mvi.py に渡る
+just mvi::test                       # 単体テスト（gh・git・sudo は偽物に差し替える）
 ```
 
-`--allow-actor` は繰り返して指定するか、カンマで区切って複数を渡せます。
+`just mvi::run-once` の既定値は、次の環境変数で上書きできます。
+
+| 環境変数 | 既定値 | 意味 |
+| --- | --- | --- |
+| `KAGARI_MVI_WORKDIR` | `/srv/kagari` | 作業ディレクトリ |
+| `KAGARI_MVI_ALLOW_ACTOR` | `upiscium` | 承認ラベルを付けてよいユーザー |
+
+`kagari_mvi.py run-once` は、次の引数も受け付けます。
+
+| 引数 | 既定値 | 意味 |
+| --- | --- | --- |
+| `--agent-user` | `kagari-agent` | Claude とテストを実行するユーザー |
+| `--claude` | `claude` | `claude` コマンドの名前またはパス |
+| `--agent-config-dir` | なし | `CLAUDE_CONFIG_DIR`。テスト専用 |
 
 終了コードの意味は次のとおりです。
 
 | 終了コード | 意味 |
 | --- | --- |
-| 0 | 対象が無かった、処理が完了した、または actor の判定で blocked にした |
-| 1 | gh / git が失敗した。段階 4〜7 での失敗なら、Issue は blocked になっています |
+| 0 | 対象が無かった、処理が完了した、または処理を始める前に blocked にした |
+| 1 | 処理を始めた後に blocked にした、または gh / git が失敗した |
 | 2 | 引数が不正だった |
 
 ## `run-once` の動作
 
-1. 対象の Issue を選びます。条件は、open であること、`kagari:approved` が付いていること、running / implemented / reviewed / blocked のどれも付いていないこと、PR ではないことです。条件に合うもののうち、作成日時が最も古い 1 件を選びます。該当が無ければ、何もせずに終了します。
-2. timeline API（`GET /repos/O/R/issues/N/timeline`）で、`kagari:approved` を付けた最後の `labeled` イベントの `actor.login` を調べます。その actor が許可リストに無い場合は、`blocked` を付けて理由をコメントし、そこで終わります。
-3. `kagari:running` を付けます。
-4. `kagari/issue-N` の open な PR が既にあれば、手順 5 と 6 を飛ばしてその PR を使います。無ければ、`<workdir>/repos/O__R` を clone します（既にあれば fetch します）。続いて、`origin/<既定ブランチ>` から `<workdir>/wt/issue-N` にブランチ `kagari/issue-N` の worktree を作ります。前回の試行で作った worktree が残っていれば、作り直します。
-5. 【スタブ】`.kagari-mvi/issue-N.md` に、Issue のタイトルと本文を書き出して commit します。コメントは取得しません（D4）。
-6. `kagari/issue-N` を push し、Draft PR を作ります。タイトルには Issue のタイトルを使い、本文には Issue 本文の全文と `Closes #N` を入れます。
-7. `kagari:implemented` を付け、`running` を外します。implemented を先に付けるので、ロックの無い時間はできません。
+1. **Issue を選ぶ**：対象は、open で、`kagari:approved` が付いていて、running / implemented / reviewed / blocked のどれも付いていない Issue です（PR は除きます）。その中で作成日時が最も古い 1 件を選びます。
+2. **処理を始める前に確かめる**：次のどちらかに当たる場合は、`blocked` を付けて理由をコメントし、そこで終わります。
+   - timeline の最後の `labeled` イベントで `kagari:approved` を付けた actor が、許可リストに含まれない。
+   - テストコマンドが見つからない。
+3. **ロックを取る**：`kagari:running` を付けます。
+4. **worktree を用意する**：`kagari/issue-N` の open な PR が既にあれば、PR を増やさずに `blocked` にします。その PR のテストを確かめ直していないので、`implemented` にはしません。やり直す場合は、PR を close し、ブランチを削除してください。PR が無い場合は、次のように準備します。
+   - `<workdir>/repos/O__R` を clone します。既にあれば fetch します。
+   - `<workdir>/wt/issue-N` に、`origin/<既定ブランチ>` からブランチ `kagari/issue-N` の worktree を作ります。グループで書き込めるように umask は 002 にします。
+5. **Claude に実装させる**（段階 `claude`）：`kagari-agent` として `claude -p` を起動します。
+   - 起動のしかた：sudo で環境変数をリセットし、ログインシェルから起動します。
+   - 出力：`--output-format stream-json` で受け取り、`<workdir>/logs/issue-N-claude.jsonl` に保存します。
+   - 設定（D3 と #405 による）：
+     - `--strict-mcp-config` を付け、MCP サーバーは空にします。
+     - `--tools Bash,Read,Edit,Write,Glob,Grep` で、セッションで使えるツールをこの 6 つに限ります。Cron、RemoteTrigger、Skill などのツールは存在しません（LXC の記録で、指定しないと 20 個ほどのツールが使えることを確かめました）。
+     - `--restricted` を付けます。ユーザー・project・local の設定ファイル（`.claude/settings*.json`）を読み込まず、ファイルを扱うツールを worktree の中に限り、設定・git・ツール設定のファイルへの書き込みを承認なしでは許しません。そのため、target リポジトリで有効にしたプラグイン・hooks・許可ルールは効きません。
+     - 念のため、target リポジトリが `.claude/settings.local.json` を commit している場合は、Claude を起動せずに `blocked` にします。
+     - `--permission-prompts none` を付け、承認が必要な操作は自動で拒否します。
+     - `--bare` は付けません。将来、`CLAUDE_CODE_OAUTH_TOKEN` に切り替えられるようにするためです。
+     - 環境変数 `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` を設定します。
+     - 規則は `--append-system-prompt` で渡します。内容は「Issue の範囲だけを実装する」「commit はしない」「最後に `status: COMPLETED` または `status: BLOCKED: 理由` を出力する」です。
+     - Bash は原則として許可します（User 判断 2026-11-11）。ビルド、lint、テストなどを自由に実行できます。Bash は `kagari-agent` として動き、GitHub の資格情報を持たないので、安全の境界は OS のユーザー分離に置きます。
+     - 拒否する操作：ネットワークや資格情報に関わるコマンド（`curl` `wget` `gh` `git push` `git remote` `ssh` `scp` `sudo` `su` `nc` `ncat` `socat` `telnet`）と、`Agent` `WebFetch` `WebSearch` `NotebookEdit` です。これは誤操作を防ぐためのもので、境界ではありません。
+     - `Edit` と `Write` は worktree の中に限ります。headless なので、許可されていない操作は確認を待たずに拒否されます。
+   - 認証エラーの扱い：`Not logged in`、`Login expired`、`401` などで終わった場合は、`blocked` を付けて「kagari-agent の再ログインが必要」とコメントします。リトライはしません。
+6. **commit する**（段階 `commit`、`kagari-runner` が実行）
+   - worktree の中にある `.git` ファイルは `kagari-agent` が書き換えられるので、使いません。git の管理ディレクトリを `--git-dir` で明示して指定します。
+   - `core.hooksPath=/dev/null` と `core.fsmonitor=false` を指定し、`--no-verify` を付けて、すべての変更を commit します。ただし、テストで生成されるファイル（`__pycache__`、`*.pyc`、`.pytest_cache`、`node_modules`、`.mypy_cache`）は commit しません。
+   - 変更が無い場合は、PR を作らずに `blocked` にします。
+7. **テストを実行し直す**（段階 `test`）：合否を決めるのは、この結果だけです。Claude の自己申告では決めません。
+   - まず、`kagari-agent` のプロセスをすべて止めます。
+   - 次に、commit した内容だけを `<workdir>/wt/issue-N.verify` に checkout します。
+   - そのうえで、runner が `kagari-agent` としてテストコマンドを実行し、終了コードと出力を受け取ります。実行するときは、ログインシェルを使わず、HOME を使い捨てのディレクトリにします。
+   - こうすることで、commit に含まれないファイルや、Claude が `~/.profile` などに残した変更は、結果に影響しません。
+8. **PR を作る**：push して Draft PR を作ります。
+   - PR の本文には、Issue 本文の全文と `Closes #N` を入れます。
+   - runner が実行したテストの結果を、PR にコメントします。コメントに入れるのは、テストコマンド、終了コード、Claude の status、権限の拒否の件数、出力の末尾です。
+9. **ラベルを付ける**：
+   - テストが通り、status が `COMPLETED` の場合：`kagari:implemented` を付けてから `running` を外します。
+   - それ以外の場合：Draft PR は残したまま `blocked` にし、Issue に理由をコメントします。
 
-手順 4〜7 のどこかで失敗した場合は、`running` を外して `blocked` を付けます。そのうえで、失敗した段階の名前（`find-existing-pr` / `worktree` / `stub-commit` / `push` / `draft-pr` / `labels`）と、エラー出力の末尾 20 行を Issue にコメントします。
+手順 4〜9 で失敗した場合は、`blocked` を付けてから `running` を外します。そのうえで、失敗した段階の名前とエラーの末尾を Issue にコメントします。
 
 ### 既知の限界（MVI の範囲外）
 
-- `running` が付いたまま止まった Issue は、自動では復旧しません。User がラベルを確認して直してください。
-- 承認した後に Issue 本文が変わっても、検知しません。
-- PR を close した後に `kagari/issue-N` ブランチが remote に残っていると、push が non-fast-forward で拒否され、`blocked` になります。force push はしません。再実行する前に、そのブランチを削除してください。
+- **止まった Issue**：`running` が付いたまま止まった Issue は、自動では復旧しません。
+- **承認後の本文の変更**：承認した後に Issue 本文が変わっても、検知しません。
+- **残ったブランチ**：PR を作る前に失敗した後で再実行すると、remote に `kagari/issue-N` が残っている場合があります。そのときは push が non-fast-forward で拒否され、`blocked` になります。force push はしません。再実行する前に、そのブランチを削除してください。
+- **target リポジトリの設定**：`--restricted` により、target リポジトリの設定ファイルは読み込みません。`.claude/settings.local.json` を commit しているリポジトリは対象にできません。target リポジトリの `CLAUDE.md` が読み込まれるかどうかは、未確認です。
+- **Bash の広さ**：Bash は原則として許可しているので、拒否リストは回り道で越えられます。たとえば `python3 -c` でネットワークに接続できます。`env curl`、`/usr/bin/curl`、`bash -c "curl …"` のように書き方を変えた場合に拒否されるかは、Claude Code の照合の実装しだいで、未確認です。Claude は `kagari-agent` の Claude 資格情報（`~/.claude/.credentials.json`）を読めるので、Issue 本文で誘導されると、その資格情報を外部へ送られるおそれがあります。外部の人が作った Issue を承認するときは、本文を確認してください。
+- **読み取り専用のコマンド**：Claude Code は、`uname` のような読み取り専用のコマンドを、許可リストに無くても承認なしで実行します（LXC の #15 で確認）。実行するのは `kagari-agent` なので、GitHub の資格情報には届きません。
+- **Claude の読み取り**：Read・Edit・Write などのファイルツールは、`--restricted` によって worktree の中に限られます。ただし、Bash とテストのコードは `kagari-agent` として何でも読めます。そのため、`kagari-agent` が持つ Claude の資格情報（`~/.claude/.credentials.json`）を worktree にコピーされると、commit されて push されるおそれがあります。public リポジトリでは、merge する前に PR の差分を確認してください。
+- **設定ファイルと git の関連ファイル**：`--restricted` の下では、設定・git・ツール設定のファイルを Edit や Write で書くには承認が必要です。`--permission-prompts none` なので、その操作は自動で拒否されます。そのため、`.gitignore`、`.github/`、`.claude/` などを変える Issue では、Claude が Bash で書くか、`BLOCKED` で終わります。どのファイルが対象になるかは、未確認です。`--restricted` は local の設定ファイルも読まないので、Claude が `.claude/settings.local.json` を書いても権限は広がらないと推測しています（CLI の help の記述による。実機では未確認）。書かれたファイルは PR の差分に入ります。
+- **残るプロセス**：Claude とテストは、sudo の内側で `timeout -k` によって時間を区切ります。テストの前には `kill -1` でプロセスを止めます。ただし、cron・at・`systemd-run --user` で後から起動するプロセスは止められません。そうしたプロセスがテストの最中に `.verify` を書き換えることは、防げていません。
+- **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。Actions の secrets があるリポジトリを対象にする前に、対策を決めてください。対策の候補は、Workflows 権限の無い fine-grained token を使うこと、`.github/` を変更した差分は push しないことです。
+- **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。これは処理を止めるだけで、権限の昇格にはつながりません。
+- **一覧への反映の遅れ**：承認した直後の実行では、Issue が選ばれないことがあります。ラベルで絞り込む一覧 API への反映が遅れるためと推測しています。次の実行で拾われます。
 
-## 実機での確認手順（LXC `kagari-runner`、対象 `upiscium/kagari-mvi-sandbox`）
+## 実機での確認手順（I-2 / #405、LXC `kagari-runner`、対象 `upiscium/kagari-mvi-sandbox`）
 
-前提は次の 3 つです。
-
-- `kagari-runner` ユーザーで `gh auth status` が通ること
-- `gh auth setup-git` を実行済みで、HTTPS の push に gh の資格情報が使われること
-- `/srv/kagari` に書き込めること
+前提：「ホストのセットアップ」を済ませ、KUMIKI を checkout したディレクトリで実行します。Issue は 1 件ずつ作り、`run-once` で処理し終えてから次の Issue を作ってください。worker は古い Issue から順に選ぶためです。
 
 ```sh
 R=upiscium/kagari-mvi-sandbox
-
-# 1. ラベルを作る。2 回目の実行では created: (none) になる
-just mvi::ensure-labels $R
-just mvi::ensure-labels $R
-
-# 2. Issue を作る（タイトルと本文は自由）
-gh issue create -R $R --title "MVI smoke 1" --body "stub body"
-
-# 3. 承認する。User 本人（upiscium）が付ける
-gh issue edit <N> -R $R --add-label kagari:approved
-
-# 4. 1 件を処理する
-just mvi::run-once $R
+new_issue() {  # $1 = タイトル、$2 = 本文
+  N=$(gh issue create -R $R --title "$1" --body "$2" | grep -o '[0-9]*$')
+  gh issue edit $N -R $R --add-label kagari:approved; sleep 10; echo "#$N"
+}
 ```
 
-確認すること（ADR-0007 I-1 の受入条件）は次の 4 つです。
+1. **小さな機能が実装され、テストが通った Draft PR ができる**
 
-- [ ] Draft PR が 1 件できること。PR のタイトルが Issue のタイトルと同じで、本文に Issue 本文の全文と `Closes #N` が入っていること。差分は `.kagari-mvi/issue-N.md` だけであること。Issue のラベルが `approved` + `implemented` になっていること。
-- [ ] もう一度 `just mvi::run-once $R` を実行しても、PR が増えないこと。`implemented` が付いているので、Issue は選ばれません。さらに、`implemented` を手で外してから実行すると、既存の PR が再利用されて PR が増えないこと。
-- [ ] User 以外が承認したものとして扱われ、`blocked` になること。別アカウントでラベルを付けるか、許可リストを一時的に変えて確かめます。たとえば、新しい Issue を承認してから `KAGARI_MVI_ALLOW_ACTOR=nobody just mvi::run-once $R` を実行します。このとき、Issue が `blocked` になり、理由のコメントが付き、worktree が作られないこと。
-- [ ] 本体が 500 行以内であること（`wc -l components/kagari-mvi/kagari_mvi.py`）。
+   ````sh
+   new_issue "MVI I-2: hello" "$(printf '%s\n' \
+     'hello.py に hello() を追加し、"hello" を返すようにする。test_hello.py に unittest のテストを追加する。' \
+     '' '### テストコマンド' '```sh' 'python3 -m unittest -v' '```')"
+   just mvi::run-once $R; echo rc=$?
+   gh pr list -R $R --head kagari/issue-$N --json number,isDraft
+   gh pr view -R $R kagari/issue-$N --comments | tail -20   # runner の結果コメントで exit code: 0
+   ````
+
+   確認すること：`rc=0` であること。Draft PR が 1 件あること。PR に「recorded by the runner」のコメントがあり、`exit code: 0` になっていること。Issue のラベルが `implemented` になっていること。
+
+2. **許可リストに無いコマンドが拒否され、セッションが止まらずに終わる**
+
+   拒否リストにある `curl` を、Bash ツールで実際に試させます。`uname -a` のような読み取り専用のコマンドは、許可リストと関係なく実行されるため、確認には使えません。
+
+   ````sh
+   new_issue "MVI I-2: deny probe" "$(printf '%s\n' \
+     '権限の確認のため、実装の前に Bash ツールで `curl -sI https://example.com` の実行を必ず 1 回試みること（拒否されてよい）。' \
+     'その後、probe.txt に、curl が成功した場合は reached、拒否された場合は denied と書く。' \
+     '' '### テストコマンド' '```sh' 'test -f probe.txt' '```')"
+   time just mvi::run-once $R; echo rc=$?
+   jq -c 'select(.type=="result") | {is_error, permission_denials}' /srv/kagari/logs/issue-$N-claude.jsonl
+   ````
+
+   確認すること：コマンドがタイムアウト（1 時間）より前に終わること。`permission_denials` に `curl` の Bash の拒否が入っていること。PR の差分で `probe.txt` が `denied` であること。
+
+3. **Claude の側（`kagari-agent`）では gh も git push も失敗する**
+
+   テストコマンドは `kagari-agent` として実行されます。そこで、gh と git push をテストコマンドとして実行させます。git push は、使い捨てのリポジトリから sandbox へ push を試します。
+
+   ````sh
+   new_issue "MVI I-2: credential probe" "$(printf '%s\n' \
+     'probe2.txt に ok と書く。' '' '### テストコマンド' '```sh' \
+     'gh auth status; d=$(mktemp -d) && cd $d && git init -q && git -c user.name=p -c user.email=p@p commit -q --allow-empty -m p && git push https://github.com/upiscium/kagari-mvi-sandbox.git HEAD:refs/heads/kagari-probe' '```')"
+   just mvi::run-once $R; echo rc=$?
+   gh pr view -R $R kagari/issue-$N --comments | tail -20
+   ````
+
+   確認すること：PR の runner コメントに、gh の未ログインと git push の認証エラーが出ていること。終了コードが 0 以外になっていること。Issue が `blocked` になっていること（テストが失敗したため。期待どおりの結果です）。sandbox に `kagari-probe` ブランチができていないこと。
+
+   テストは使い捨ての HOME で実行されます。そのため上の確認だけでは、`kagari-agent` の本来の HOME に資格情報が無いことまでは確かめられません。Claude と同じ条件（本来の HOME とログインシェル）でも、次のコマンドで確かめてください。
+
+   ```sh
+   sudo -n -u kagari-agent -H -- env GIT_TERMINAL_PROMPT=0 sh -lc 'gh auth status; echo gh=$?; cd "$(mktemp -d)" && git init -q && git -c user.name=p -c user.email=p@p commit -q --allow-empty -m p && git push https://github.com/upiscium/kagari-mvi-sandbox.git HEAD:refs/heads/kagari-probe; echo push=$?'
+   ```
+
+   確認すること：`gh=` と `push=` がどちらも 0 以外になること。`push=` の直前に、`could not read Username`（資格情報が無い）のような認証のエラーが出ていること。init や commit で失敗して `push=` が 0 以外になった場合は、資格情報の確認になりません。このコマンドで確かめているのは HTTPS での push だけです。
+
+   もう一つ、`kagari-agent` が SSH の鍵を持っていないことも確かめてください：`sudo -n -u kagari-agent -H -- sh -lc 'ls -la ~/.ssh'`。ディレクトリが無いか、中に鍵が無ければ確認できます。
+
+4. **テスト結果が runner によって記録される**：1〜3 の PR コメントが「recorded by the runner (not reported by Claude)」で始まっていること。
+
+5. **認証エラーのとき、blocked にして再ログインを求める**
+
+   ````sh
+   sudo -n -u kagari-agent -H -- mkdir -p /tmp/kagari-empty-config
+   new_issue "MVI I-2: auth probe" "$(printf '%s\n' 'auth.txt に ok と書く。' '' '### テストコマンド' '```sh' 'true' '```')"
+   just mvi::run-once $R --agent-config-dir /tmp/kagari-empty-config; echo rc=$?
+   gh issue view $N -R $R --json labels,comments --jq '[.labels[].name], .comments[-1].body'
+   ````
+
+   確認すること：`rc=1` であること。Issue が `blocked` になり、「kagari-agent の再ログインが必要」のコメントが付いていること。PR が作られていないこと。

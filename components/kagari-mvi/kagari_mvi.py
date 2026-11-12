@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""KAGARI MVI worker (ADR-0007 I-1): Issue labels -> stub commit -> Draft PR.
+"""KAGARI MVI worker (ADR-0007 I-1/I-2): Issue labels -> Claude Code -> Draft PR.
 
 State lives only in GitHub Issue labels (ADR-0007 D2). One run handles at most
 one Issue. Only the Issue title and body are read; comments are never read (D4).
-Uses the Python standard library plus `gh api` (REST) and `git` via subprocess.
+Uses the Python standard library plus `gh api` (REST), `git`, `sudo` and `claude`.
+This file holds the GitHub side; kagari_mvi_exec.py runs the agent, tests and commit.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import subprocess
 import sys
 import urllib.parse
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from kagari_mvi_exec import (SAFE_GIT, AgentSteps, Blocked, CommandError, Runner, report,
+                             subprocess_runner, tail, test_command)
 
 APPROVED = "kagari:approved"
 RUNNING = "kagari:running"
@@ -31,45 +34,6 @@ LABELS = {
 }
 
 PER_PAGE = 100
-TAIL_LINES = 20
-TAIL_CHARS = 2000
-GIT_IDENTITY = ["-c", "user.name=kagari-mvi", "-c", "user.email=kagari-mvi@localhost"]
-
-
-class CommandError(Exception):
-    """A gh/git subprocess exited non-zero."""
-
-    def __init__(self, args: Sequence[str], code: int, output: str) -> None:
-        super().__init__("%s exited %d" % (" ".join(args[:3]), code))
-        self.args_list = list(args)
-        self.code = code
-        self.output = output
-
-
-Runner = Callable[..., str]
-
-
-def subprocess_runner(args: Sequence[str], cwd: Optional[str] = None,
-                      input: Optional[str] = None) -> str:
-    """Run a command and return stdout; raise CommandError with stdout+stderr."""
-    proc = subprocess.run(list(args), cwd=cwd, input=input, capture_output=True,
-                          text=True, env=_command_env())
-    if proc.returncode != 0:
-        raise CommandError(args, proc.returncode, (proc.stdout or "") + (proc.stderr or ""))
-    return proc.stdout
-
-
-def _command_env() -> Dict[str, str]:
-    env = dict(os.environ)
-    env["GH_PROMPT_DISABLED"] = "1"
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["NO_COLOR"] = "1"
-    return env
-
-
-def tail(text: str) -> str:
-    lines = text.strip().splitlines()[-TAIL_LINES:]
-    return "\n".join(lines)[-TAIL_CHARS:]
 
 
 def label_names(issue: Dict[str, Any]) -> List[str]:
@@ -111,18 +75,24 @@ def check_actor(actor: Optional[str], allowed: Sequence[str]) -> Optional[str]:
     return None
 
 
+
 def quote_path(value: str) -> str:
     return urllib.parse.quote(value, safe="")
 
 
-class Worker:
+class Worker(AgentSteps):
     def __init__(self, repo: str, run: Runner = subprocess_runner,
-                 log: Callable[[str], None] = lambda message: print(message, file=sys.stderr)) -> None:
+                 log: Callable[[str], None] = lambda message: print(message, file=sys.stderr),
+                 agent_user: str = "kagari-agent", claude: str = "claude",
+                 agent_config_dir: Optional[str] = None) -> None:
         if repo.count("/") != 1 or not all(repo.split("/")):
             raise ValueError("--repo must be OWNER/REPO: %r" % repo)
         self.repo = repo
         self.run = run
         self.log = log
+        self.agent_user = agent_user
+        self.claude = claude
+        self.agent_config_dir = agent_config_dir
 
     # --- GitHub REST via `gh api` -------------------------------------------
     def api(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Any:
@@ -188,31 +158,52 @@ class Worker:
 
         events = self.api_pages(self.repo_path("/issues/%d/timeline" % number))
         reason = check_actor(approval_actor(events), allowed)
+        test = test_command(issue.get("body"))
+        if reason is None and test is None:
+            reason = ("The Issue body has no test command. Add a `### テストコマンド` "
+                      "heading followed by a code block whose first line is the command.")
         if reason is not None:
             self.add_labels(number, BLOCKED)
             self.comment(number, "kagari-mvi: blocked before start.\n\n" + reason)
             self.log("#%d blocked: %s" % (number, reason))
             return 0
 
+        os.umask(0o002)  # worktree files must stay writable by the shared group
         self.add_labels(number, RUNNING)
         stage = "prepare"
         try:
             stage = "find-existing-pr"
             pr = self.find_open_pr(number)
+            problem = None
             if pr is None:
                 stage = "worktree"
                 base = self.api("GET", self.repo_path())["default_branch"]
-                worktree = self.prepare_worktree(workdir, number, base)
-                stage = "stub-commit"
-                self.stub_commit(worktree, issue)
+                clone, worktree = self.prepare_worktree(workdir, number, base)
+                stage = "claude"
+                outcome = self.run_agent(workdir, worktree, issue, test)
+                stage = "commit"
+                if not self.commit_changes(clone, worktree, number):
+                    raise Blocked("Claude made no changes (status: %s)." % outcome["status"])
+                stage = "test"
+                code, output = self.run_test(clone, worktree, number, test)
                 stage = "push"
-                self.run(["git", "push", "origin", "HEAD:refs/heads/%s" % branch_name(number)],
-                         cwd=worktree)
+                self.run(["git", "-C", clone] + SAFE_GIT + [
+                    "push", "origin", "refs/heads/%s" % branch_name(number)])
                 stage = "draft-pr"
                 pr = self.create_draft_pr(issue, base)
+                stage = "report"
+                self.comment(pr["number"], report(test, code, output, outcome))
+                if code != 0 or not outcome["completed"]:
+                    problem = ("Draft PR #%d was created, but status is `%s` and the test "
+                               "exit code is %d. See the PR comment." % (
+                                   pr["number"], outcome["status"], code))
             else:
-                self.log("#%d already has PR #%d; reusing it" % (number, pr["number"]))
+                problem = ("PR #%d for `%s` already exists and its test result is not re-checked. "
+                           "Review it, or close it and delete the branch to retry."
+                           % (pr["number"], branch_name(number)))
             stage = "labels"
+            if problem is not None:
+                raise Blocked(problem)
             self.add_labels(number, IMPLEMENTED)
             self.remove_label(number, RUNNING)
         except Exception as error:  # noqa: BLE001 - every failure must end as blocked
@@ -222,9 +213,14 @@ class Worker:
         return 0
 
     def block_after_failure(self, number: int, stage: str, error: Exception) -> None:
-        detail = error.output if isinstance(error, CommandError) else "%s: %s" % (
-            type(error).__name__, error)
-        self.log("#%d failed at %s: %s" % (number, stage, tail(detail)))
+        if isinstance(error, Blocked):
+            body = "kagari-mvi: blocked at stage `%s`.\n\n%s" % (stage, error)
+        else:
+            detail = error.output if isinstance(error, CommandError) else "%s: %s" % (
+                type(error).__name__, error)
+            body = "kagari-mvi: failed at stage `%s`.\n\n```\n%s\n```" % (
+                stage, tail(detail).replace("```", "'''"))
+        self.log("#%d %s" % (number, body))
         # Add blocked before removing running: if adding fails, running stays
         # and the Issue is not picked again.
         self.add_labels(number, BLOCKED)
@@ -232,8 +228,7 @@ class Worker:
             self.remove_label(number, RUNNING)
         except Exception as cleanup:  # noqa: BLE001 - still post the comment
             self.log("could not remove %s: %s" % (RUNNING, cleanup))
-        self.comment(number, "kagari-mvi: failed at stage `%s`.\n\n```\n%s\n```"
-                     % (stage, tail(detail).replace("```", "'''")))
+        self.comment(number, body)
 
     def find_open_pr(self, number: int) -> Optional[Dict[str, Any]]:
         owner = self.repo.split("/")[0]
@@ -241,34 +236,22 @@ class Worker:
         pulls = self.api("GET", self.repo_path("/pulls?state=open&head=%s" % head))
         return pulls[0] if pulls else None
 
-    def prepare_worktree(self, workdir: str, number: int, base: str) -> str:
+    def prepare_worktree(self, workdir: str, number: int, base: str) -> Tuple[str, str]:
         clone = os.path.join(workdir, "repos", self.repo.replace("/", "__"))
         worktree = os.path.join(workdir, "wt", "issue-%d" % number)
         if os.path.isdir(os.path.join(clone, ".git")):
-            self.run(["git", "-C", clone, "fetch", "--prune", "origin"])
+            self.run(["git", "-C", clone] + SAFE_GIT + ["fetch", "--prune", "origin"])
         else:
             os.makedirs(os.path.dirname(clone), exist_ok=True)
-            self.run(["git", "clone", "https://github.com/%s.git" % self.repo, clone])
+            self.run(["git"] + SAFE_GIT + ["clone", "https://github.com/%s.git" % self.repo, clone])
         if os.path.exists(worktree):
             # Leftover from an earlier attempt on this Issue: the worker owns it.
             self.run(["git", "-C", clone, "worktree", "remove", "--force", worktree])
         self.run(["git", "-C", clone, "worktree", "prune"])
         os.makedirs(os.path.dirname(worktree), exist_ok=True)
-        self.run(["git", "-C", clone, "worktree", "add", "-B", branch_name(number),
-                  worktree, "origin/%s" % base])
-        return worktree
-
-    def stub_commit(self, worktree: str, issue: Dict[str, Any]) -> None:
-        """Stub implementation: write the Issue title and body, then commit."""
-        number = issue["number"]
-        relative = os.path.join(".kagari-mvi", "issue-%d.md" % number)
-        path = os.path.join(worktree, relative)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write("# %s\n\n%s\n" % (issue["title"], issue.get("body") or ""))
-        self.run(["git", "add", "--", relative], cwd=worktree)
-        self.run(["git"] + GIT_IDENTITY + ["commit", "--no-verify", "-m",
-                  "kagari-mvi: stub for #%d" % number], cwd=worktree)
+        self.run(["git", "-C", clone] + SAFE_GIT + ["worktree", "add", "-B", branch_name(number),
+                                                     worktree, "origin/%s" % base])
+        return clone, worktree
 
     def create_draft_pr(self, issue: Dict[str, Any], base: str) -> Dict[str, Any]:
         number = issue["number"]
@@ -293,19 +276,24 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     once.add_argument("--allow-actor", action="append", required=True,
                       help="login allowed to add kagari:approved (repeat or comma-separate)")
     once.add_argument("--workdir", required=True, help="directory for clones and worktrees")
+    once.add_argument("--agent-user", default="kagari-agent", help="user that runs Claude and tests")
+    once.add_argument("--claude", default="claude", help="claude executable for the agent user")
+    once.add_argument("--agent-config-dir", help="CLAUDE_CONFIG_DIR for the agent (testing only)")
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        worker = Worker(args.repo)
         if args.command == "ensure-labels":
+            worker = Worker(args.repo)
             created = worker.ensure_labels()
             print("created: %s" % (", ".join(created) if created else "(none)"))
             return 0
         allowed = [name.strip() for value in args.allow_actor for name in value.split(",")
                    if name.strip()]
+        worker = Worker(args.repo, agent_user=args.agent_user, claude=args.claude,
+                        agent_config_dir=args.agent_config_dir)
         return worker.run_once(allowed, os.path.abspath(args.workdir))
     except CommandError as error:
         print("kagari_mvi: %s\n%s" % (error, tail(error.output)), file=sys.stderr)

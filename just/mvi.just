@@ -9,9 +9,9 @@ allow_actor := env("KAGARI_MVI_ALLOW_ACTOR", "upiscium")
 ensure-labels repo:
     {{python}} {{quote(worker)}} ensure-labels --repo {{quote(repo)}}
 
-# Process at most one approved Issue of OWNER/REPO.
-run-once repo:
-    {{python}} {{quote(worker)}} run-once --repo {{quote(repo)}} --allow-actor {{quote(allow_actor)}} --workdir {{quote(workdir)}}
+# Process at most one approved Issue of OWNER/REPO (extra args go to kagari_mvi.py).
+run-once repo *args:
+    {{python}} {{quote(worker)}} run-once --repo {{quote(repo)}} --allow-actor {{quote(allow_actor)}} --workdir {{quote(workdir)}} {{args}}
 
 # Run the unit tests (gh/git are faked).
 test:
