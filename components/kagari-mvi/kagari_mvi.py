@@ -336,7 +336,8 @@ class Worker(AgentSteps):
 
     def create_draft_pr(self, issue: Dict[str, Any], base: str) -> Dict[str, Any]:
         number = issue["number"]
-        body = "%s\n\n---\n\nCloses #%d\n" % (issue.get("body") or "", number)
+        body = "%s\n\n---\n\nBase branch: `%s` (the repository's default branch)\n\nCloses #%d\n" % (
+            issue.get("body") or "", base, number)
         return self.api("POST", self.repo_path("/pulls"), {
             "title": issue["title"], "head": branch_name(number), "base": base,
             "body": body, "draft": True,

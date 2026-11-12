@@ -1,6 +1,6 @@
 # ADR-0007: Issue起点の最小E2E経路（MVI walking skeleton）をD8より先に通す
 
-- **Status:** Accepted（2026-11-11）; I-1〜I-3 実装済み、E2E-MVI-01 は未実施（D7 追補 2026-11-12）
+- **Status:** Accepted（2026-11-11）; I-1〜I-3 実装済み、E2E-MVI-01 実施済み（2026-11-12）。D2 の「正とする経路」と D2a の凍結の扱いは未決定（D7 追補 2026-11-12）
 - **Human decision:** 案B（KUMIKI内に最小E2E経路を新設し、ADR-0006 D8より先に通す）を採用（2026-11-11 JST）。承認ラベルの付与をagentに許さないADR-0006の制約は維持する。
 - **Issues:** #403（I-0 LXC）、#404（I-1 骨格）、#405（I-2 Claude実装）、#406（I-3 レビュー）
 - **Related:** ADR-0001、ADR-0005、ADR-0006（D1〜D8）、#291、#340
@@ -126,7 +126,12 @@ I-1〜I-3（#404〜#406、PR #408〜#410）の実装と LXC での実機確認�
 | I-3：受入条件ごとの判定コメントが付く | PASS（sandbox PR #26、AC1・AC2 を file:line の根拠つきで判定） |
 | I-3：満たしていない受入条件が FAIL か UNKNOWN になる | PASS（sandbox PR #24、テストを消した後の AC2 が FAIL。古いテスト結果は根拠にしないと判定） |
 | I-3：レビューのセッションからファイルを編集できない | PASS（init の tools は `Glob,Grep,Read`、使ったのは Read だけ、checkout に変更なし） |
-| E2E-MVI-01 の一周 | 未確認 |
+| E2E-MVI-01 の一周 | PASS（2026-11-12。User の要求を、このセッションが設計して sandbox Issue #29 を起票した。User が承認し、`run-once` で PR #30 ができた。runner の再実行テストは 12 件 OK。`review-once` で AC1〜AC5 がすべて PASS。設計側が承認依頼にまとめ、User が merge した。記録は KUMIKI #414） |
+
+E2E-MVI-01 で分かったこと：
+- 設計者の役割は、D1 の claude.ai から実装セッションへ移した（User 判断 2026-11-12）。
+- sandbox の既定ブランチが `runner-test` だったため、merge したコードが `main` に無く、User が見つけられなかった。Draft PR の本文に向き先のブランチを書くようにした（#414）。
+- 題材の lanwatch は、受入条件をすべて満たしたが、実際に動かすとゲートウェイしか表示されなかった。設計の段階で能動的な探索を対象外にしたためで、受入条件とレビューでは見つからなかった。2 周目（sandbox #31）で扱う。
 
 ## Known limitations / unverified
 

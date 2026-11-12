@@ -212,6 +212,8 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(len(pulls), 1)
         self.assertTrue(pulls[0]["draft"])
         self.assertIn("Closes #7", pulls[0]["body"])
+        self.assertEqual(pulls[0]["base"], "main")
+        self.assertIn("Base branch: `main`", pulls[0]["body"])
         report = self.comments(runner, 70)[0]
         self.assertIn("exit code: 0", report)
         self.assertIn("tested commit: `abc123`", report)
