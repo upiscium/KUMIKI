@@ -157,7 +157,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - 設定（D3 と #405 による）：
      - `--strict-mcp-config` を付け、MCP サーバーは空にします。
      - `--tools Bash,Read,Edit,Write,Glob,Grep` で、セッションで使えるツールをこの 6 つに限ります。Cron、RemoteTrigger、Skill などのツールは存在しません（LXC の記録で、指定しないと 20 個ほどのツールが使えることを確かめました）。
-     - `--restricted` を付けます。ユーザー・project・local の設定ファイル（`.claude/settings*.json`）を読み込まず、ファイルを扱うツールを worktree の中に限り、設定・git・ツール設定のファイルへの書き込みを承認なしでは許しません。そのため、target リポジトリで有効にしたプラグイン・hooks・許可ルールは効きません。
+     - `--restricted` を付けます。ユーザー・project・local の設定ファイル（`.claude/settings*.json`）を読み込まず、ファイルを扱うツールを worktree の中に限り、設定・git・ツール設定のファイルへの書き込みを承認なしでは許しません。そのため、target リポジトリで有効にしたプラグイン・hooks・許可ルールは効きません（CLI の help による。実機では未確認）。
      - 念のため、target リポジトリが `.claude/settings.local.json` を commit している場合は、Claude を起動せずに `blocked` にします。
      - `--permission-prompts none` を付け、承認が必要な操作は自動で拒否します。
      - `--bare` は付けません。将来、`CLAUDE_CODE_OAUTH_TOKEN` に切り替えられるようにするためです。
@@ -220,7 +220,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。Actions の secrets があるリポジトリを対象にする前に、対策を決めてください。対策の候補は、Workflows 権限の無い fine-grained token を使うこと、`.github/` を変更した差分は push しないことです。
 - **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。レビュー用の `issue-N.review` も同じです。これは処理を止めるだけで、権限の昇格にはつながりません。
 - **レビューの独立性**：レビュアーは実装者と同じモデル系統です（ADR-0007 D6）。受入条件と差分は Issue と PR から取るので、その文面でレビュアーを誘導することもできます。レビューの結果は参考として扱い、merge は User が判断してください。
-- **レビュアーの起動の乗っ取り**：レビュアーは実装者と同じ `kagari-agent` で、ログインシェルから起動します。そのため、実装者が Bash で `~/.profile` の PATH や、`kagari-agent` の home に置いた `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがあります（未確認）。`claude` を root が所有する場所に入れ、`--claude` に絶対パスを渡せば、本体の差し替えは防げます。ただし、`~/.profile` で設定した環境変数による介入は残ります。レビューをログインシェルなしで起動すれば防げると考えていますが、未確認です。実装者と別のユーザーでレビューする方法は、2 周目で扱います。
+- **レビュアーの起動の乗っ取り**：レビュアーは実装者と同じ `kagari-agent` で、ログインシェルから起動します。そのため、実装者が Bash で `~/.profile` の PATH や、`kagari-agent` の home に置いた `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがあります（未確認）。`claude` を root が所有する場所に入れ、`--claude` に絶対パスを渡せば、指定したパスの本体がすり替わることは防げます。ただし、`~/.profile` はシェルスクリプトなので、その内容（環境変数の設定や、`exec` による別のプログラムへの置き換え、PATH から探す `timeout` や `node` の差し替えなど）による介入は残ります。レビューをログインシェルなしで起動すれば防げると考えていますが、未確認です。実装者と別のユーザーでレビューする方法は、2 周目で扱います。
 - **レビュー後の変更**：`reviewed` を付けた後に PR へ commit を足しても、もう一度はレビューしません。やり直す場合は、`kagari:reviewed` を外してください。
 - **一覧への反映の遅れ**：承認した直後の実行では、Issue が選ばれないことがあります。ラベルで絞り込む一覧 API への反映が遅れるためと推測しています。次の実行で拾われます。
 
