@@ -204,7 +204,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 5. **PR にコメントする**：受入条件ごとの判定と根拠を表にして、PR にコメントします。コメントには、レビューした commit と、PASS 以外の件数も入れます。判定の行が無い受入条件は UNKNOWN と表示します。
 6. **ラベルを付ける**：判定の結果にかかわらず、`kagari:reviewed` を付けてから `running` を外します。merge するかどうかは User が決めます。
 
-途中で失敗した場合や、認証エラーの場合は、`run-once` と同じく `blocked` にします。
+途中で失敗した場合や、認証エラーの場合は、`run-once` と同じく `blocked` にします。レビュアーが終了コード 0 で終わったのに、結果がエラーだった場合や、結果が無かった場合は、`blocked` にはしません。コメントに「reviewer session: ended with an error」と記録し、判定が無い受入条件を UNKNOWN にしたうえで、`reviewed` を付けます。
 
 ### 既知の限界（MVI の範囲外）
 

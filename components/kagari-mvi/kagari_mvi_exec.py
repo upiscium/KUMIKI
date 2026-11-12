@@ -246,8 +246,9 @@ REVIEW_RULES = """You are an independent reviewer of one pull request (KAGARI MV
   AC<n>: PASS|FAIL|UNKNOWN — <evidence as file:line, or the reason>
 """
 CRITERIA_HEADING = re.compile(r"^#{2,6}[ \t]*(?:受入条件|Acceptance criteria)[ \t]*$", re.M | re.I)
-VERDICT_LINE = re.compile(r"^\W*AC(\d+)\W*?[:：]\W*(PASS|FAIL|UNKNOWN)\b[*_]*\s*[-—–:：]*\s*(.*)$",
-                          re.M | re.I)
+# [^\w\n] / [ \t]: a verdict never spans lines (an empty evidence must not swallow the next line).
+VERDICT_LINE = re.compile(r"^[^\w\n]*AC(\d+)[^\w\n]*?[:：][^\w\n]*(PASS|FAIL|UNKNOWN)\b[*_]*[ \t]*"
+                          r"[-—–:：]*[ \t]*(.*)$", re.M | re.I)
 
 
 def acceptance_criteria(body: Optional[str]) -> List[str]:

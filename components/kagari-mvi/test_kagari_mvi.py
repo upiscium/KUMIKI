@@ -325,6 +325,12 @@ class ReviewParseTest(unittest.TestCase):
         self.assertEqual(ex.review_verdicts("AC1: **pass** — a.py:1", 1), [("PASS", "a.py:1")])
         self.assertEqual(ex.review_verdicts("AC1: FAIL — x\nAC1: PASS — y", 1),
                          [("UNKNOWN", "(conflicting verdicts from the reviewer)")])
+        # An empty evidence must not swallow the next line (which hid the conflict).
+        self.assertEqual(ex.review_verdicts("AC1: PASS\nAC1: FAIL — no test", 1),
+                         [("UNKNOWN", "(conflicting verdicts from the reviewer)")])
+        self.assertEqual(ex.review_verdicts("AC1: PASS\nAC2: PASS — y", 2), [("PASS", ""), ("PASS", "y")])
+        for text in ("AC1: PASSED", "AC1: not PASS", "AC1 PASS"):
+            self.assertEqual(ex.review_verdicts(text, 1)[0][0], "UNKNOWN", text)
 
 
 class ReviewOnceTest(unittest.TestCase):
@@ -388,6 +394,18 @@ class ReviewOnceTest(unittest.TestCase):
         self.assertIn("WARNING", prompt)
         report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
         self.assertIn("missing or for another commit", report)
+
+    def test_stale_test_result_and_errored_reviewer_are_reported(self):
+        stale = [{"user": {"login": "runner"},
+                  "body": mvi.TEST_REPORT_PREFIX + "\n- tested commit: `old999`\n- exit code: 0"}]
+        runner = FakeRunner(self.routes(comments=stale),
+                            outputs={"stream-json": stream("AC1: PASS — a", is_error=True)})
+        self.assertEqual(self.run_review(runner), 0)
+        prompt = next(inp for args, _, inp in runner.calls if "stream-json" in args)
+        self.assertIn("WARNING", prompt)
+        report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
+        self.assertIn("missing or for another commit", report)
+        self.assertIn("reviewer session: ended with an error", report)
 
     def test_nothing_to_review(self):
         runner = FakeRunner({("GET", "repos/o/r/issues?"): [issue(8, [mvi.APPROVED, mvi.IMPLEMENTED,
