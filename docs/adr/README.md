@@ -11,6 +11,7 @@ KUMIKI（組木）/ KAGARI（篝）の合意済み設計判断を記録します
 | [0005 — v0.1.0優先と耐障害性拡張の凍結](0005-v010-delivery-and-resilience-freeze.md) | Accepted; v0.1.0 bounded GA released | 最小実モデルTask・基本着脱・公開順序 |
 | [0006 — Claude主体の実行構成とv3廃止](0006-claude-primary-execution-topology.md) | Accepted (PR #392, 2026-11-09); addendum 2026-11-09 | 実行構成・host所有のMain・Ask二分類・Leaf実行・承認ラベル・v3廃止・次期リリース条件 |
 | [0007 — Issue起点の最小E2E経路（MVI walking skeleton）](0007-mvi-walking-skeleton.md) | Accepted (2026-11-11); I-1〜I-3 実装済み、E2E-MVI-01 実施済み、D7 追補 (2026-11-12) | ADR-0006 D8より先に通す最小経路・ラベル状態機械・LXC/ユーザー分離・W1〜W5凍結・実装で確定した起動設定と権限 |
+| [0008 — MVI を正とし、D8 経路の部品は必要時に取り込む](0008-mvi-mainline-and-d8-parts.md) | Proposed (2026-11-12) | 正とする経路・部品の取り込み規則・W1〜W5 の処置・KUMIKI を対象にする前提条件・設計者の役割 |
 
 **Decision tracking:** [Issue #254](https://github.com/upiscium/KUMIKI/issues/254)。既存の v4 [Issue #189](https://github.com/upiscium/KUMIKI/issues/189)、KUMIKI/KAGARI 改名 [#242](https://github.com/upiscium/KUMIKI/issues/242)、#221 / Draft PR #224、#250 と整合させる。
 
