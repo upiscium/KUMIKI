@@ -33,7 +33,10 @@ python3 -m unittest -v
 
 Claude に渡すのは、Issue のタイトルと本文だけです。コメントは取得しません（D4）。
 
-`review-once` は、`### 受入条件`（`### Acceptance criteria` でも可）の見出しの下にある箇条書き（`- [ ] ...` または `- ...`）を、受入条件として 1 つずつ判定します。次の見出しまでが対象です。この見出しが無い Issue は、レビューせずに `blocked` にします。
+`review-once` は、`### 受入条件`（`### Acceptance criteria` でも可）の見出しの下にある箇条書きを、受入条件として 1 つずつ判定します。次の見出しまでが対象です。この見出しが無い Issue は、レビューせずに `blocked` にします。受入条件は、次の決まりで書いてください。
+- `- [ ] ...` または `- ...` で始まる 1 行を、1 つの受入条件として読みます。
+- 続きの行は読みません。入れ子の箇条書きは、別の受入条件として数えます。
+- 番号付きの一覧（`1.`）は読みません。
 
 ## ホストのセットアップ（ホストごとに 1 回）
 
@@ -67,7 +70,7 @@ sudo -n -u kagari-agent -H -- sh -lc 'command -v claude && claude --version'
 ```
 
 - `sudo` の権限は、`kagari-agent` として実行することに限ります。`kagari-agent` は `kagari-runner` より弱いユーザーです。
-- テストを実行する前に、worker は `kagari-agent` のプロセスをすべて止めます。前回の実行で残ったプロセスが、テストの結果を書き換えないようにするためです。そのため、`kagari-agent` で対話的な作業（`/login` など）をしているときは、`run-once` を動かさないでください。`run-once` を同時に 2 つ動かすこともしないでください。
+- テストを実行する前に、worker は `kagari-agent` のプロセスをすべて止めます。前回の実行で残ったプロセスが、テストの結果を書き換えないようにするためです。そのため、`kagari-agent` で対話的な作業（`/login` など）をしているときは、`run-once` と `review-once` を動かさないでください。`run-once` と `review-once` は、どの組み合わせでも同時に動かさず、1 つの timer から順に呼んでください。
 - テストは、ログインシェルを使わずに、sudo の `secure_path` で実行します。テストで使うコマンドは、`secure_path`（たとえば `/usr/bin`）に置くか、絶対パスで書いてください。
 - `claude` が見つからない場合は、`kagari-agent` の `~/.profile` で PATH を通すか、`run-once` に `--claude /絶対パス` を渡してください。
 - I-1 のときに作った `/srv/kagari` が残っている場合は、`sudo rm -rf /srv/kagari` で消してから作り直してください。中にあるのはテストの状態だけです。
@@ -185,10 +188,12 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 ## `review-once` の動作（I-3）
 
 1. **Issue を選ぶ**：対象は、open で、`kagari:approved` と `kagari:implemented` が付いていて、running / reviewed / blocked のどれも付いていない Issue です。その中で最も古い 1 件を選び、`kagari:running` を付けます。
-2. **入力を集める**：レビュアーに渡すのは、次の 3 つだけです。実装セッションの会話は渡しません。
+2. **入力を集める**：レビュアーに渡すのは、次の 3 つと、PR の先頭の checkout（手順 3）です。実装セッションの会話は渡しません。
+   - checkout を渡すのは、#406 の文面（入力は 3 つだけ）から外れます。根拠をファイルと行で示せるようにするためで、この判断は実装時に決めました。
    - Issue の受入条件（`### 受入条件` の箇条書き）
    - `kagari/issue-N` の open な PR の差分（REST の diff）。200,000 文字を超える部分は切り詰め、残りはファイルを読むよう伝えます。
    - runner が投稿したテスト結果のコメント。認証済みの runner 自身が投稿し、「kagari-mvi: test result recorded by the runner」で始まるものだけを使います。他の人が同じ書き出しで投稿したコメントは使いません。
+   - テスト結果には、テストした commit が入っています。その commit がレビューする PR の先頭と違う場合、またはテスト結果が無い場合は、「根拠にしない」という警告を付けて渡します。レビューのコメントにも、そのことを記録します。
 3. **PR の先頭を checkout する**：`kagari-agent` のプロセスを止めます。そのうえで、PR の先頭の commit を `<workdir>/wt/issue-N.review` に detached worktree として checkout します。
 4. **レビューする**：`kagari-agent` として、新しい `claude -p` を起動します。
    - 使えるツールは `--tools Read,Grep,Glob` だけで、Bash・Edit・Write・Web は存在しません。設定でも拒否します。
@@ -213,8 +218,9 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **設定ファイルと git の関連ファイル**：`--restricted` の下では、設定・git・ツール設定のファイルを Edit や Write で書くには承認が必要です。`--permission-prompts none` なので、その操作は自動で拒否されます。そのため、`.gitignore`、`.github/`、`.claude/` などを変える Issue では、Claude が Bash で書くか、`BLOCKED` で終わります。どのファイルが対象になるかは、未確認です。`--restricted` は local の設定ファイルも読まないので、Claude が `.claude/settings.local.json` を書いても権限は広がらないと推測しています（CLI の help の記述による。実機では未確認）。書かれたファイルは PR の差分に入ります。
 - **残るプロセス**：Claude とテストは、sudo の内側で `timeout -k` によって時間を区切ります。テストの前には `kill -1` でプロセスを止めます。ただし、cron・at・`systemd-run --user` で後から起動するプロセスは止められません。そうしたプロセスがテストの最中に `.verify` を書き換えることは、防げていません。
 - **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。Actions の secrets があるリポジトリを対象にする前に、対策を決めてください。対策の候補は、Workflows 権限の無い fine-grained token を使うこと、`.github/` を変更した差分は push しないことです。
-- **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。これは処理を止めるだけで、権限の昇格にはつながりません。
+- **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。レビュー用の `issue-N.review` も同じです。これは処理を止めるだけで、権限の昇格にはつながりません。
 - **レビューの独立性**：レビュアーは実装者と同じモデル系統です（ADR-0007 D6）。受入条件と差分は Issue と PR から取るので、その文面でレビュアーを誘導することもできます。レビューの結果は参考として扱い、merge は User が判断してください。
+- **レビュアーの起動の乗っ取り**：レビュアーは実装者と同じ `kagari-agent` で、ログインシェルから起動します。そのため、実装者が Bash で `~/.profile` の PATH や、`kagari-agent` の home に置いた `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがあります（未確認）。これを防ぐには、`claude` を root が所有する場所に入れ、`--claude` に絶対パスを渡すことです。実装者と別のユーザーでレビューする方法は、2 周目で扱います。
 - **レビュー後の変更**：`reviewed` を付けた後に PR へ commit を足しても、もう一度はレビューしません。やり直す場合は、`kagari:reviewed` を外してください。
 - **一覧への反映の遅れ**：承認した直後の実行では、Issue が選ばれないことがあります。ラベルで絞り込む一覧 API への反映が遅れるためと推測しています。次の実行で拾われます。
 
@@ -332,7 +338,7 @@ new_issue() {  # $1 = タイトル、$2 = 本文
    gh api repos/$R/issues/$P/comments --jq '.[-1].body'
    ````
 
-   確認すること：AC2（テストがある）が FAIL か UNKNOWN になっていること。
+   確認すること：AC2（テストがある）が FAIL か UNKNOWN になっていること。テストした commit が PR の先頭と違うので、レビューのコメントに「runner test result: missing or for another commit」と出ていること。
 
 3. **レビューのセッションからファイルを編集できない**
 

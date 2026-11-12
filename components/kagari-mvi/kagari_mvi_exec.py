@@ -121,6 +121,7 @@ def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
     statuses = re.findall(r"status:\s*(COMPLETED|BLOCKED[^\n]*)", text)
     return {
         # Only the final result and stderr: file contents and ids may contain "401".
+        "errored": errored,
         "auth": errored and bool(AUTH_PATTERN.search("\n".join(plain + [text]))),
         "status": statuses[-1].strip() if statuses else "(none)",
         "completed": not errored and bool(statuses) and statuses[-1] == "COMPLETED",
@@ -207,16 +208,16 @@ class AgentSteps:
             raise CommandError(argv, 1, output)
         return outcome
 
-    def commit_changes(self, clone: str, worktree: str, number: int) -> bool:
+    def commit_changes(self, clone: str, worktree: str, number: int) -> Optional[str]:
         # Explicit --git-dir: the `.git` file in the worktree is agent-writable.
         git = ["git", "--git-dir", os.path.join(clone, ".git", "worktrees", "issue-%d" % number),
                "--work-tree", worktree] + SAFE_GIT
         self.run(git + ["add", "--all", "--", "."] + ARTIFACTS, cwd=worktree)
         if not self.run(git + ["diff", "--cached", "--name-only"], cwd=worktree).strip():
-            return False
+            return None
         self.run(git + ["commit", "--no-verify", "-m", "kagari-mvi: implement #%d" % number],
                  cwd=worktree)
-        return True
+        return self.run(git + ["rev-parse", "HEAD"], cwd=worktree).strip()
 
     def kill_agent_processes(self) -> None:
         # Not under timeout/as_agent: kill(-1) spares only the sending shell, not its parents.
@@ -245,7 +246,8 @@ REVIEW_RULES = """You are an independent reviewer of one pull request (KAGARI MV
   AC<n>: PASS|FAIL|UNKNOWN — <evidence as file:line, or the reason>
 """
 CRITERIA_HEADING = re.compile(r"^#{2,6}[ \t]*(?:受入条件|Acceptance criteria)[ \t]*$", re.M | re.I)
-VERDICT_LINE = re.compile(r"^\W*AC(\d+)\W*?[:：]\s*(PASS|FAIL|UNKNOWN)\b\s*[-—–:：]*\s*(.*)$", re.M)
+VERDICT_LINE = re.compile(r"^\W*AC(\d+)\W*?[:：]\W*(PASS|FAIL|UNKNOWN)\b[*_]*\s*[-—–:：]*\s*(.*)$",
+                          re.M | re.I)
 
 
 def acceptance_criteria(body: Optional[str]) -> List[str]:
@@ -260,21 +262,29 @@ def acceptance_criteria(body: Optional[str]) -> List[str]:
 
 def review_verdicts(text: str, count: int) -> List[Tuple[str, str]]:
     """(status, evidence) per criterion; a missing line counts as UNKNOWN."""
-    found = {int(n): (status, evidence.strip()) for n, status, evidence in VERDICT_LINE.findall(text)}
+    found: Dict[int, Tuple[str, str]] = {}
+    for n, status, evidence in VERDICT_LINE.findall(text):
+        verdict = (status.upper(), evidence.strip())
+        if int(n) in found and found[int(n)][0] != verdict[0]:
+            verdict = ("UNKNOWN", "(conflicting verdicts from the reviewer)")
+        found[int(n)] = verdict
     return [found.get(i, ("UNKNOWN", "(no verdict from the reviewer)")) for i in range(1, count + 1)]
 
 
-def review_report(head: str, criteria: List[str], verdicts: List[Tuple[str, str]],
-                  denials: int) -> str:
+def review_report(head: str, criteria: List[str], outcome: Dict[str, Any], fresh: bool) -> str:
+    verdicts, denials = outcome["verdicts"], outcome["denials"]
     cell = lambda value: value.replace("|", "\\|").replace("\n", " ")  # noqa: E731
     rows = ["| AC%d | %s | **%s** | %s |" % (i, cell(c), status, cell(evidence))
             for i, (c, (status, evidence)) in enumerate(zip(criteria, verdicts), start=1)]
     failing = sum(1 for status, _ in verdicts if status != "PASS")
     return ("kagari-mvi: independent review (new `claude -p` session, tools %s only; same "
             "model family as the implementer, ADR-0007 D6).\n\n- reviewed head: `%s`\n"
-            "- not PASS: %d of %d\n- permission denials: %d\n\n| # | 受入条件 | 判定 | 根拠 |\n"
-            "| --- | --- | --- | --- |\n%s\n" % (REVIEW_TOOLS, head, failing, len(verdicts),
-                                                  denials, "\n".join(rows)))
+            "- not PASS: %d of %d\n- permission denials: %d\n- reviewer session: %s\n"
+            "- runner test result: %s\n\n| # | 受入条件 | 判定 | 根拠 |\n| --- | --- | --- | --- |\n%s\n"
+            % (REVIEW_TOOLS, head, failing, len(verdicts), denials,
+               "ended with an error" if outcome["errored"] else "ok",
+               "for this head" if fresh else "missing or for another commit (not evidence)",
+               "\n".join(rows)))
 
 
 def bounded(seconds: int) -> List[str]:
@@ -282,8 +292,9 @@ def bounded(seconds: int) -> List[str]:
     return ["timeout", "-k", "10", str(seconds)]
 
 
-def report(test: str, code: int, output: str, outcome: Dict[str, Any]) -> str:
+def report(test: str, code: int, output: str, outcome: Dict[str, Any], sha: str) -> str:
     return ("kagari-mvi: test result recorded by the runner (not reported by Claude).\n\n"
+            "- tested commit: `%s`\n" % sha +
             "- test command: `%s` (run by the runner as the agent user)\n- exit code: %d\n"
             "- Claude status: `%s`\n- permission denials: %d\n\n```\n%s\n```" % (
                 test, code, outcome["status"], outcome["denials"],

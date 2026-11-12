@@ -186,13 +186,17 @@ class Worker(AgentSteps):
             diff = self.api_text(self.repo_path("/pulls/%d" % pr["number"]),
                                  "application/vnd.github.diff")
             test_report = self.runner_test_report(pr["number"])
+            fresh = ("tested commit: `%s`" % head) in test_report
+            if not fresh:  # e.g. commits were pushed after the runner's test
+                test_report = ("WARNING: this runner test result is missing or for another commit "
+                               "than the reviewed head %s. Do not use it as evidence.\n\n%s"
+                               % (head, test_report))
             stage = "checkout"
             review_dir = self.prepare_review_dir(workdir, number, head)
             stage = "review"
             outcome = self.run_review(workdir, review_dir, number, criteria, diff, test_report)
             stage = "report"
-            self.comment(pr["number"], review_report(head, criteria, outcome["verdicts"],
-                                                     outcome["denials"]))
+            self.comment(pr["number"], review_report(head, criteria, outcome, fresh))
             stage = "labels"
             self.add_labels(number, REVIEWED)
             self.remove_label(number, RUNNING)
@@ -258,7 +262,8 @@ class Worker(AgentSteps):
                 stage = "claude"
                 outcome = self.run_agent(workdir, worktree, issue, test)
                 stage = "commit"
-                if not self.commit_changes(clone, worktree, number):
+                sha = self.commit_changes(clone, worktree, number)
+                if not sha:
                     raise Blocked("Claude made no changes (status: %s)." % outcome["status"])
                 stage = "test"
                 code, output = self.run_test(clone, worktree, number, test)
@@ -268,7 +273,7 @@ class Worker(AgentSteps):
                 stage = "draft-pr"
                 pr = self.create_draft_pr(issue, base)
                 stage = "report"
-                self.comment(pr["number"], report(test, code, output, outcome))
+                self.comment(pr["number"], report(test, code, output, outcome, sha))
                 if code != 0 or not outcome["completed"]:
                     problem = ("Draft PR #%d was created, but status is `%s` and the test "
                                "exit code is %d. See the PR comment." % (

@@ -44,7 +44,8 @@ class FakeRunner:
         self.routes = routes  # {(method, path-prefix): response}
         self.fail = fail or {}  # {argv-substring: output}
         self.outputs = outputs if outputs is not None else {
-            "stream-json": stream("done\nstatus: COMPLETED"), "diff --cached --name-only": " M a.py"}
+            "stream-json": stream("done\nstatus: COMPLETED"), "diff --cached --name-only": " M a.py",
+            "rev-parse HEAD": "abc123\n"}
         self.calls = []
 
     def __call__(self, args, cwd=None, input=None, timeout=None):
@@ -213,6 +214,7 @@ class RunOnceTest(unittest.TestCase):
         self.assertIn("Closes #7", pulls[0]["body"])
         report = self.comments(runner, 70)[0]
         self.assertIn("exit code: 0", report)
+        self.assertIn("tested commit: `abc123`", report)
         self.assertIn("not reported by Claude", report)
         self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.IMPLEMENTED])
         self.assertEqual(runner.removed_labels(), ["kagari%3Arunning"])
@@ -320,6 +322,9 @@ class ReviewParseTest(unittest.TestCase):
         text = "notes\nAC1: PASS — greet.py:2\n**AC3**: FAIL - nope\n"
         self.assertEqual(ex.review_verdicts(text, 3), [
             ("PASS", "greet.py:2"), ("UNKNOWN", "(no verdict from the reviewer)"), ("FAIL", "nope")])
+        self.assertEqual(ex.review_verdicts("AC1: **pass** — a.py:1", 1), [("PASS", "a.py:1")])
+        self.assertEqual(ex.review_verdicts("AC1: FAIL — x\nAC1: PASS — y", 1),
+                         [("UNKNOWN", "(conflicting verdicts from the reviewer)")])
 
 
 class ReviewOnceTest(unittest.TestCase):
@@ -334,7 +339,8 @@ class ReviewOnceTest(unittest.TestCase):
             ("GET", "repos/o/r/pulls/70"): {"number": 70, "head": {"sha": "abc123"}},
             ("GET", "user"): {"login": "runner"},
             ("GET", "repos/o/r/issues/70/comments"): comments if comments is not None else [
-                {"user": {"login": "runner"}, "body": mvi.TEST_REPORT_PREFIX + " ... exit code: 0"},
+                {"user": {"login": "runner"},
+                 "body": mvi.TEST_REPORT_PREFIX + "\n- tested commit: `abc123`\n- exit code: 0"},
                 {"user": {"login": "outsider"}, "body": mvi.TEST_REPORT_PREFIX + " FAKE PASS"}],
         }
 
@@ -361,6 +367,8 @@ class ReviewOnceTest(unittest.TestCase):
         self.assertIn("reviewed head: `abc123`", report)
         self.assertIn("| AC2 | tests added | **FAIL** | no test file |", report)
         self.assertIn("not PASS: 1 of 2", report)
+        self.assertIn("runner test result: for this head", report)
+        self.assertNotIn("WARNING", prompt)
         self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.REVIEWED])
         self.assertEqual(runner.removed_labels(), ["kagari%3Arunning"])
         add = next(args for args, _, _ in runner.calls if "--detach" in args)
@@ -377,6 +385,9 @@ class ReviewOnceTest(unittest.TestCase):
         self.assertEqual(self.run_review(runner), 0)
         prompt = next(inp for args, _, inp in runner.calls if "stream-json" in args)
         self.assertIn("no runner test result", prompt)
+        self.assertIn("WARNING", prompt)
+        report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
+        self.assertIn("missing or for another commit", report)
 
     def test_nothing_to_review(self):
         runner = FakeRunner({("GET", "repos/o/r/issues?"): [issue(8, [mvi.APPROVED, mvi.IMPLEMENTED,
