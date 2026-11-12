@@ -184,12 +184,11 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **止まった Issue**：`running` が付いたまま止まった Issue は、自動では復旧しません。
 - **承認後の本文の変更**：承認した後に Issue 本文が変わっても、検知しません。
 - **残ったブランチ**：PR を作る前に失敗した後で再実行すると、remote に `kagari/issue-N` が残っている場合があります。そのときは push が non-fast-forward で拒否され、`blocked` になります。force push はしません。再実行する前に、そのブランチを削除してください。
-- **`python3` の許可ルール**：ADR-0006 の既知の限界により、`python3 …` を Bash の許可ルールに完全一致で書いても、確認を求められることがあります。headless ではその操作は拒否されるので、Claude 自身はテストを実行できない場合があります。ただし、合否は手順 7 の runner による実行で判断します。
 - **target リポジトリの設定**：`--restricted` により、target リポジトリの設定ファイルは読み込みません。`.claude/settings.local.json` を commit しているリポジトリは対象にできません。target リポジトリの `CLAUDE.md` が読み込まれるかどうかは、未確認です。
-- **Bash の広さ**：Bash は原則として許可しているので、拒否リストは回り道で越えられます（たとえば `python3 -c` でネットワークに接続する）。Claude は `kagari-agent` の Claude 資格情報（`~/.claude/.credentials.json`）を読めるので、Issue 本文で誘導されると、その資格情報を外部へ送られるおそれがあります。外部の人が作った Issue を承認するときは、本文を確認してください。
+- **Bash の広さ**：Bash は原則として許可しているので、拒否リストは回り道で越えられます。たとえば `python3 -c` でネットワークに接続できます。`env curl`、`/usr/bin/curl`、`bash -c "curl …"` のように書き方を変えた場合に拒否されるかは、Claude Code の照合の実装しだいで、未確認です。Claude は `kagari-agent` の Claude 資格情報（`~/.claude/.credentials.json`）を読めるので、Issue 本文で誘導されると、その資格情報を外部へ送られるおそれがあります。外部の人が作った Issue を承認するときは、本文を確認してください。
 - **読み取り専用のコマンド**：Claude Code は、`uname` のような読み取り専用のコマンドを、許可リストに無くても承認なしで実行します（LXC の #15 で確認）。実行するのは `kagari-agent` なので、GitHub の資格情報には届きません。
-- **Claude の読み取り**：Read は worktree の外も読めます。テストのコードも `kagari-agent` として何でも実行できます。そのため、`kagari-agent` が持つ Claude の資格情報（`~/.claude/.credentials.json`）を worktree にコピーされると、commit されて push されるおそれがあります。public リポジトリでは、merge する前に PR の差分を確認してください。
-- **Claude が書く設定ファイル**：Claude はセッション中に `.claude/settings.local.json` を書けます。そのファイルを読み込み直して権限が広がるかどうかは、未確認です。書かれたファイルは PR の差分に入るので、merge する前に確認してください。
+- **Claude の読み取り**：Read・Edit・Write などのファイルツールは、`--restricted` によって worktree の中に限られます。ただし、Bash とテストのコードは `kagari-agent` として何でも読めます。そのため、`kagari-agent` が持つ Claude の資格情報（`~/.claude/.credentials.json`）を worktree にコピーされると、commit されて push されるおそれがあります。public リポジトリでは、merge する前に PR の差分を確認してください。
+- **設定ファイルと git の関連ファイル**：`--restricted` の下では、設定・git・ツール設定のファイルを Edit や Write で書くには承認が必要です。`--permission-prompts none` なので、その操作は自動で拒否されます。そのため、`.gitignore`、`.github/`、`.claude/` などを変える Issue では、Claude が Bash で書くか、`BLOCKED` で終わります。どのファイルが対象になるかは、未確認です。`--restricted` は local の設定ファイルも読まないので、Claude が `.claude/settings.local.json` を書いても権限は広がらないと推測しています（CLI の help の記述による。実機では未確認）。書かれたファイルは PR の差分に入ります。
 - **残るプロセス**：Claude とテストは、sudo の内側で `timeout -k` によって時間を区切ります。テストの前には `kill -1` でプロセスを止めます。ただし、cron・at・`systemd-run --user` で後から起動するプロセスは止められません。そうしたプロセスがテストの最中に `.verify` を書き換えることは、防げていません。
 - **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。Actions の secrets があるリポジトリを対象にする前に、対策を決めてください。対策の候補は、Workflows 権限の無い fine-grained token を使うこと、`.github/` を変更した差分は push しないことです。
 - **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。これは処理を止めるだけで、権限の昇格にはつながりません。
