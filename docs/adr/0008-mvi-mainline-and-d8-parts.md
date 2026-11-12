@@ -1,10 +1,10 @@
 # ADR-0008: MVI の外側の流れを正とし、D8 経路の部品は必要が示されたときだけ取り込む
 
-- **Status:** Proposed（2026-11-12）
-- **Human decision:** 案C＋統合を採用（2026-11-12）。ADR-0007 D2「正とする経路」と D2a「W1〜W5 の凍結」の扱いを、ここで決める。
-- **Related:** ADR-0006（D1〜D8、W1〜W5）、ADR-0007（D2、D2a、D5、D7）
+- **Status:** Accepted（2026-11-12、User 判断）
+- **Human decision:** 案C＋統合を採用（2026-11-12）。案C は「外側の流れは `kagari-mvi`、中身は必要が示されたときだけ D8 経路の部品を使う」、統合は「凍結中の作業のうち必要な部品だけを `kagari-mvi` に取り込み、残りは閉じる」を指す。ほかに検討したのは、案A（`kagari-mvi` を育てる）と案B（D8 経路へ戻す）である。ADR-0007 D2「正とする経路」と D2a「凍結の扱い」を、ここで決める。
+- **Related:** ADR-0006（D5〜D8）、ADR-0007（D1〜D7）、#393〜#397（ADR-0006 の実装 Issue W1〜W5。ADR-0007 D2a で凍結）
 - **Issue:** #416
-- **Amends:** ADR-0006 D8 の実施経路、ADR-0007 D1（設計者の役割）。ADR-0007 D2・D2a の未決事項を解消する
+- **Amends:** ADR-0006 D8（実施経路とリリース定義を保留）、ADR-0006 D5（設計と議論の場）、ADR-0007 D1（設計者の役割）、ADR-0007 D5・D7（行数の上限は取り込みのたびに見直す）。ADR-0007 D2・D2a の未決事項を解消する
 
 ## Context
 
@@ -31,24 +31,26 @@
 
 | 項目 | 処置 | 理由 |
 | --- | --- | --- |
-| W1 #393 / Draft PR #399（headless 起動） | close（ブランチは残す） | 実機確認で得た知見は、ADR-0007 D7 の起動設定に取り込み済み |
+| W1 #393 / Draft PR #399（headless 起動） | #393 と #399 を close する（ブランチは残す） | 実機確認で得た知見は、ADR-0007 D7 の起動設定に取り込み済み |
 | W2 #394 / Draft PR #402（Contract 権限窓口） | 統合する。取り込み用の Issue を新しく起票した時点で、#394 と #402 を close する | KUMIKI 自身を対象にする前提条件（D4）になる |
 | W3 #395（OpenCode + TSUMGI のレビュー窓口） | close する。2 周目のレビュー（ADR-0007 D6）として、`review-once` の選択肢という形で起票し直す | 外側の流れは `kagari-mvi` で、レビューの実体だけを差し替えればよい |
 | W4 #396（v1 dispatch の OpenCode 依存を Claude 起動に置き換え） | close | D1 により、dispatch 経路は育てない |
-| W5 #397（Claude 経路の E2E-01） | close | E2E-MVI-01 で代替した |
+| W5 #397（Claude 経路の E2E-01 と 2 件目の順次処理） | close | D1 で D8 のリリース定義を保留したため、検証する対象が無くなった。E2E-MVI-01 は 1 件の処理しか確かめておらず、W5 の代わりにはならない |
 
 ### D4 — KUMIKI 自身を対象にする前の前提条件
 - Contract 権限窓口を取り込む（W2）。
 - GitHub Actions の secrets への対策を決める（ADR-0007 の Known limitations）。
 - レビュアーの起動を乗っ取られる件への対策を決める。候補は、レビュアーを別のユーザーで動かすことか、ログインシェルを使わずに起動することである。
 - 既存の dispatch 経路を削除するかどうかを決める（D1）。
+- ADR-0007 の Known limitations のうち、残りの項目を KUMIKI の前に決めるかどうかを判断する。対象は、Bash を広く許可したことによる資格情報の流出、承認後の本文の変更を検知しないこと、OAuth を長く使い続けられるか、再起動したときに二重に取得しないこと（一部確認）である。
 
 ### D5 — ADR-0007 D1 の改訂（設計者の役割）
-- ADR-0007 D1 の手順 1・2・6（要求を聞く、設計して Issue を起票する、PR とレビューを承認依頼の 4 点にまとめる）は、claude.ai の設計者 Claude ではなく、実装と同じ Claude Code のセッションが担う（User 判断 2026-11-12）。
+- ADR-0007 D1 の手順 1・2・6（要求を聞く、設計して Issue を起票する、PR とレビューを承認依頼の 4 点にまとめる）は、claude.ai の設計者 Claude ではなく、Adam 上で User と対話している Claude Code のセッションが担う。ここで言うセッションは、LXC の worker が `kagari-agent` として起動する Claude ではない（User 判断 2026-11-12）。ADR-0006 D5 の「設計と議論は claude.ai Project で行う」も、これに合わせて変わる。
 - 承認ラベル `kagari:approved` を付けるのは、引き続き User だけとする。Issue の起票、commit、push には User の承認が要る。merge は User が行う。
 
 ## Consequences
-- W1〜W5 の Issue と Draft PR を閉じる作業は、この ADR が merge された後に、User の承認を得て行う。
-- ADR-0006 の Status に「D8 は ADR-0008 で保留」と追記する。
+- #393〜#397 と Draft PR #399・#402 を閉じる作業は、この ADR が merge された後に、User の承認を得て行う。
+- ADR-0006 と ADR-0007 の Status に、この ADR を参照する追記をした。
+- D8 を保留したので、ADR-0006 の D6（同時実行数を 2 に上げる条件「Claude 経路で E2E-01 が通る」）と D7-3（v3 からの移行を始める条件「D8 のリリース」）は、条件として宙に浮く。E2E-MVI-01 が通ったことは、D6 の条件を満たしたことにはならない。どちらも、次のリリースを定義する ADR で決め直す。
 
 本 ADR は、Merge、Release、本番適用、既存 dispatch 経路の削除を承認するものではない。
