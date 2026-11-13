@@ -221,6 +221,70 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.IMPLEMENTED])
         self.assertEqual(runner.removed_labels(), ["kagari%3Arunning"])
 
+    def run_contract(self, runner, body=None):
+        routes = runner.routes
+        if body is not None:
+            changed = issue(7, [mvi.APPROVED])
+            changed["body"] = body
+            routes[("GET", "repos/o/r/issues?")] = [changed]
+        with tempfile.TemporaryDirectory() as workdir:
+            worker = mvi.Worker("o/r", run=runner, log=lambda _: None, permission="contract")
+            return worker.run_once(["upiscium"], workdir), workdir
+
+    def test_contract_mode_launches_claude_with_the_window(self):
+        runner = FakeRunner(self.routes())
+        code, workdir = self.run_contract(runner)
+        self.assertEqual(code, 0)
+        claude = next(args for args, _, _ in runner.calls if "stream-json" in args)
+        self.assertEqual(claude[claude.index("--permission-prompt-tool") + 1], "mcp__kagari__decide")
+        self.assertNotIn("--permission-prompts", claude)
+        settings = json.loads(next(a for a in claude if a.startswith("--settings="))[11:])
+        self.assertEqual(settings["permissions"]["allow"], ["Read", "Glob", "Grep"])
+        server = json.loads(next(a for a in claude if a.startswith("--mcp-config="))[13:])["mcpServers"]["kagari"]
+        self.assertTrue(server["args"][0].endswith("/run/issue-7/policy.py"))
+        self.assertIn("--contract", server["args"])
+        rules = next(args[-1] for args, _, _ in runner.calls if "--append-system-prompt" in args)
+        self.assertIn("one plain command per Bash", rules)
+        report = self.comments(runner, 70)[0]
+        self.assertIn("Contract window (`--permission contract`): allowed 0, denied 0", report)
+
+    def test_broad_mode_is_unchanged(self):
+        runner = FakeRunner(self.routes())
+        self.assertEqual(self.run_worker(runner), 0)
+        claude = next(args for args, _, _ in runner.calls if "stream-json" in args)
+        self.assertIn("--permission-prompts", claude)
+        self.assertNotIn("--permission-prompt-tool", claude)
+        self.assertEqual(json.loads(next(a for a in claude if a.startswith("--mcp-config="))[13:]),
+                         {"mcpServers": {}})
+        self.assertNotIn("Contract window", self.comments(runner, 70)[0])
+
+    def test_contract_mode_rejects_shell_syntax_test_command(self):
+        body = "x\n\n### テストコマンド\n```sh\nmake test && make lint\n```\n"
+        runner = FakeRunner(self.routes())
+        code, _ = self.run_contract(runner, body)
+        self.assertEqual(code, 1)
+        self.assertFalse(any("stream-json" in args for args, _, _ in runner.calls))
+        self.assertIn("--permission contract", self.comments(runner, 7)[0])
+
+    def test_contract_mode_human_decision_request_blocks_after_pr(self):
+        runner = FakeRunner(self.routes())
+
+        def call_with_log(args, cwd=None, input=None, timeout=None):
+            if "stream-json" in args:
+                server = json.loads(next(a for a in args if a.startswith("--mcp-config="))[13:])
+                log = server["mcpServers"]["kagari"]["args"][-1]
+                with open(log, "a") as handle:
+                    handle.write(json.dumps({"behavior": "deny", "code": "MERGE_NEEDS_HUMAN", "block": True}) + "\n")
+            return runner(args, cwd=cwd, input=input, timeout=timeout)
+
+        with tempfile.TemporaryDirectory() as workdir:
+            worker = mvi.Worker("o/r", run=call_with_log, log=lambda _: None, permission="contract")
+            self.assertEqual(worker.run_once(["upiscium"], workdir), 1)
+        self.assertEqual(len(runner.api_calls("POST", "repos/o/r/pulls")), 1)
+        self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.BLOCKED])
+        self.assertIn("MERGE_NEEDS_HUMAN", self.comments(runner, 7)[0])
+        self.assertIn("needs Human: MERGE_NEEDS_HUMAN", self.comments(runner, 70)[0])
+
     def test_failing_test_creates_pr_then_blocks(self):
         runner = FakeRunner(self.routes(), fail={".verify python3 -m unittest 1800": "FAILED (failures=1)"})
         self.assertEqual(self.run_worker(runner), 1)

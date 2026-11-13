@@ -2,7 +2,7 @@
 
 ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります（`run-once`）。Draft PR ができた Issue は、別の Claude セッションが受入条件ごとにレビューします（`review-once`）。
 
-- **構成**：本体は 2 ファイルで、合わせて 700 行以内に保ちます（User 判断 2026-11-11。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は使いません。
+- **構成**：本体は 3 ファイルで、合わせて 1,200 行以内に保ちます（User 判断 2026-11-13。ADR-0008 D2 による見直し）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理、`kagari_mvi_policy.py` が Contract と照合する権限窓口（`--permission contract`）を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は使いません。
 - **状態の持ち方**：状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata にも依存しません。
 - **実行の単位**：1 回の実行で処理する Issue は最大 1 件です。systemd timer などから定期的に呼ぶ前提です。
 - **ユーザーの分担**（D3）：
@@ -185,6 +185,24 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 
 手順 4〜9 で失敗した場合は、`blocked` を付けてから `running` を外します。そのうえで、失敗した段階の名前とエラーの末尾を Issue にコメントします。
 
+## `--permission contract`（Contract と照合する権限窓口、#418）
+
+`run-once --permission contract` を付けると、Claude の要求を Issue の Contract と照合して許可・拒否します。付けなければ（既定の `broad`）、これまでどおり Bash を原則として許可し、拒否リストだけを使います。KUMIKI 自身のように、範囲の外の操作を防ぎたいリポジトリで使います（ADR-0008 D4）。
+
+- **防ぐ誤操作**：Claude が Contract の範囲の外の操作をすることです。たとえば、指示ファイル（`AGENTS.md`・`CLAUDE.md`・`CLAUDE.local.md`）や `.claude/` を書き換えること、承認されていないコマンドを実行すること、人間の判断が要る操作をすることです。
+- **Contract のコマンド**：`### テストコマンド` の 1 行目（完全一致）と、```` ```kagari-commands ```` ブロックの各行が対象です。ブロックでは、行末を `...` にすると、それ以降の引数を自由に付けられます。どちらにも、シェルの演算子・環境変数の代入・`git`・`gh` は書けません。書いてあれば、Claude を起動する前に `blocked` にします。
+- **判定**（`kagari_mvi_policy.decide`、#402 から取り込み）：
+  - Read・Glob・Grep：worktree の中なら許可します。
+  - Edit・Write：worktree の中なら許可します。ただし、指示ファイル・`.claude/`・`.git` は拒否します。
+  - Bash：シェルの演算子を含まない 1 つのコマンドだけを受け付けます。worktree の外を指す引数は拒否します。そのうえで、読み取り系のコマンドと、worktree の中でのファイル操作（`mkdir` `cp` `mv` `rm` など）と、Contract のコマンドを許可します。
+  - `git`・`gh`：すべて拒否します。git の操作は runner が行うためです。merge・タグ・ラベル・`gh pr ready`・release・force push・履歴の破棄は、拒否したうえで「人間の判断が要る」という信号を残します。
+  - それ以外のツールと Web は拒否します。
+- **起動のしかた**：
+  - runner は、`<workdir>/run/issue-N/` に窓口のコード（`policy.py`）と Contract（`contract.json`）を写します。`kagari-agent` は読めますが、書き換えられません。
+  - Claude は、この窓口を MCP サーバ（`mcp__kagari__decide`）として `--permission-prompt-tool` に指定して起動します。`--permission-prompts none` は付けません。
+  - 設定で許可するのは Read・Glob・Grep だけです。それ以外の要求は窓口に届きます。
+- **記録**：判定はすべて `<workdir>/wt/issue-N.policy.jsonl` に、1 行 1 件で残ります。runner はこの記録を読み、許可と拒否の件数、人間の判断が要った操作を、PR のテスト結果のコメントに書きます。人間の判断が要った操作があれば、Draft PR を作ったうえで `blocked` にします。
+
 ## `review-once` の動作（I-3）
 
 1. **Issue を選ぶ**：対象は、open で、`kagari:approved` と `kagari:implemented` が付いていて、running / reviewed / blocked のどれも付いていない Issue です。その中で最も古い 1 件を選び、`kagari:running` を付けます。
@@ -220,6 +238,8 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。Actions の secrets があるリポジトリを対象にする前に、対策を決めてください。対策の候補は、Workflows 権限の無い fine-grained token を使うこと、`.github/` を変更した差分は push しないことです。
 - **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。レビュー用の `issue-N.review` も同じです。これは処理を止めるだけで、権限の昇格にはつながりません。
 - **レビューの独立性**：レビュアーは実装者と同じモデル系統です（ADR-0007 D6）。受入条件と差分は Issue と PR から取るので、その文面でレビュアーを誘導することもできます。レビューの結果は参考として扱い、merge は User が判断してください。
+- **権限窓口の記録**（`--permission contract`）：記録のファイルと窓口のプロセスは、`kagari-agent` の権限で動きます。そのため、Claude が Bash で記録を書き換えたり、窓口のプロセスを止めたりできます（User 判断 1-3a。2 周目以降で扱います）。窓口が応答しない、または異常終了した場合に操作が実行されないこと（fail-closed）は、未確認です。
+- **権限窓口と読み取り専用のコマンド**：Claude Code は、読み取り専用のコマンド（`uname` など）を窓口に問い合わせずに実行することがあります。
 - **レビュアーの起動の乗っ取り**：レビュアーは実装者と同じ `kagari-agent` で、ログインシェルから起動します。そのため、実装者が Bash で `~/.profile` の PATH や、`kagari-agent` の home に置いた `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがあります（未確認）。`claude` を root が所有する場所に入れ、`--claude` に絶対パスを渡せば、指定したパスの本体がすり替わることは防げます。ただし、`~/.profile` はシェルスクリプトなので、その内容（環境変数の設定や、`exec` による別のプログラムへの置き換え、PATH から探す `timeout` や `node` の差し替えなど）による介入は残ります。レビューをログインシェルなしで起動すれば防げると考えていますが、未確認です。実装者と別のユーザーでレビューする方法は、2 周目で扱います。
 - **レビュー後の変更**：`reviewed` を付けた後に PR へ commit を足しても、もう一度はレビューしません。やり直す場合は、`kagari:reviewed` を外してください。
 - **一覧への反映の遅れ**：承認した直後の実行では、Issue が選ばれないことがあります。ラベルで絞り込む一覧 API への反映が遅れるためと推測しています。次の実行で拾われます。
@@ -350,3 +370,25 @@ new_issue() {  # $1 = タイトル、$2 = 本文
    ````
 
    確認すること：`tools` が `Read`・`Grep`・`Glob` の 3 つだけであること。使われたツールもこの 3 つだけであること。checkout に変更が無いこと。
+
+## 実機での確認手順（#418 `--permission contract`）
+
+前提と `new_issue` 関数は、I-2 の手順と同じです。
+
+````sh
+new_issue "MVI contract: greet4" "$(printf '%s\n' \
+  '権限の確認のため、実装の前に Bash ツールで `curl -sI https://example.com` と `git status` の実行を、それぞれ 1 回ずつ試みること（拒否されてよい）。' \
+  'その後、greet4.py に greet4() を追加して "ok" を返すようにし、test_greet4.py に unittest のテストを追加する。' '' \
+  '### 受入条件' '- [ ] greet4() が "ok" を返す' '- [ ] test_greet4.py にテストがある' '' \
+  '### テストコマンド' '```sh' 'python3 -m unittest -v' '```')"
+just mvi::run-once $R --permission contract; echo rc=$?
+jq -c '{behavior, code, block}' /srv/kagari/wt/issue-$N.policy.jsonl | sort | uniq -c
+jq -c 'select(.type=="result") | {is_error, permission_denials}' /srv/kagari/logs/issue-$N-claude.jsonl
+P=$(gh api "repos/$R/pulls?head=upiscium:kagari/issue-$N" --jq '.[0].number'); gh api repos/$R/issues/$P/comments --jq '.[-1].body'
+````
+
+確認すること：
+- 記録に、許可（`WRITE_IN_WORKTREE` や `CONTRACT_COMMAND`）と拒否（`OUT_OF_CONTRACT` と `GIT_HOST_OWNED`）の両方が残ること。
+- stream-json の `permission_denials` に、`curl` と `git status` の拒否が入ること。
+- PR のテスト結果のコメントに、「Contract window」の件数が出ること。
+- テストが通り、Issue が `implemented` になること。

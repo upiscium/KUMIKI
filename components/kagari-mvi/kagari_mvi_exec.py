@@ -13,6 +13,8 @@ import shutil
 import subprocess
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import kagari_mvi_policy as policy_mod
+
 TAIL_LINES = 20
 TAIL_CHARS = 2000
 GIT_IDENTITY = ["-c", "user.name=kagari-mvi", "-c", "user.email=kagari-mvi@localhost"]
@@ -153,6 +155,8 @@ class AgentSteps:
         if os.path.lexists(os.path.join(worktree, ".claude", "settings.local.json")):
             raise Blocked("The repository commits `.claude/settings.local.json`; it would widen "
                           "Claude's permissions (hooks, allow rules, plugins). Remove it to proceed.")
+        if getattr(self, "permission", "broad") == "contract":
+            return self.run_agent_contract(workdir, worktree, issue, test)
         settings = {
             "permissions": {"allow": ["Bash", "Read", "Glob", "Grep", "Edit(/%s/**)" % worktree,
                                       "Write(/%s/**)" % worktree],
@@ -164,6 +168,41 @@ class AgentSteps:
         prompt = "Issue #%d: %s\n\n%s\n" % (number, issue["title"], issue.get("body") or "")
         return self.launch_claude(workdir, worktree, "issue-%d-claude" % number, AGENT_TOOLS,
                                   settings, AGENT_RULES.format(test=test), prompt)
+
+    def run_agent_contract(self, workdir: str, worktree: str, issue: Dict[str, Any],
+                           test: str) -> Dict[str, Any]:
+        """--permission contract: every non-read request goes to the Contract window (#418)."""
+        number = issue["number"]
+        try:
+            rules = policy_mod.contract_commands(issue.get("body") or "", test)
+        except policy_mod.PolicyError as error:
+            raise Blocked("The Contract commands cannot be used with `--permission contract` "
+                          "(one plain command per line, no git/gh): %s" % error)
+        group = os.stat(workdir).st_gid
+        run_dir = os.path.join(workdir, "run", "issue-%d" % number)  # agent may read, not write
+        os.makedirs(run_dir, mode=0o750, exist_ok=True)
+        script, contract = os.path.join(run_dir, "policy.py"), os.path.join(run_dir, "contract.json")
+        shutil.copyfile(policy_mod.__file__, script)
+        policy_mod.write_contract(contract, "%s#%d" % (getattr(self, "repo", "?"), number), rules)
+        log = worktree + ".policy.jsonl"  # in the shared wt/: the agent can edit it (1-3a)
+        open(log, "w").close()
+        for path, mode in ((run_dir, 0o750), (script, 0o640), (contract, 0o640), (log, 0o660)):
+            os.chown(path, -1, group)
+            os.chmod(path, mode)
+        settings = {"permissions": {"allow": ["Read", "Glob", "Grep"],
+                                    "deny": ["Agent", "WebFetch", "WebSearch", "NotebookEdit"]},
+                    "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"}}
+        server = {"type": "stdio", "command": "python3",
+                  "args": [script, "serve", "--worktree", worktree, "--contract", contract, "--log", log]}
+        prompt = "Issue #%d: %s\n\n%s\n" % (number, issue["title"], issue.get("body") or "")
+        outcome = self.launch_claude(workdir, worktree, "issue-%d-claude" % number, AGENT_TOOLS,
+                                     settings, AGENT_RULES.format(test=test) + CONTRACT_RULES, prompt,
+                                     mcp={policy_mod.SERVER_NAME: server})
+        records = policy_mod.read_log(log)
+        blocks = sorted({r.get("code", "?") for r in records if r.get("block")})
+        outcome["policy"] = {"allow": sum(r.get("behavior") == "allow" for r in records),
+                             "deny": sum(r.get("behavior") == "deny" for r in records), "block": blocks}
+        return outcome
 
     def run_review(self, workdir: str, review_dir: str, number: int, criteria: List[str],
                    diff: str, test_report: str) -> Dict[str, Any]:
@@ -182,12 +221,15 @@ class AgentSteps:
         return outcome
 
     def launch_claude(self, workdir: str, cwd: str, log_name: str, tools: str,
-                      settings: Dict[str, Any], rules: str, prompt: str) -> Dict[str, Any]:
+                      settings: Dict[str, Any], rules: str, prompt: str,
+                      mcp: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        # With a Contract window, prompts go to it; otherwise anything that would prompt is denied.
+        prompts = (["--permission-prompt-tool", policy_mod.PROMPT_TOOL] if mcp
+                   else ["--permission-prompts", "none"])
         argv = [self.claude, "-p", "--output-format", "stream-json", "--verbose",
-                "--no-session-persistence", "--tools", tools, "--restricted",
-                "--permission-prompts", "none",
+                "--no-session-persistence", "--tools", tools, "--restricted"] + prompts + [
                 "--settings=" + json.dumps(settings), "--strict-mcp-config",
-                "--mcp-config=" + json.dumps({"mcpServers": {}}),
+                "--mcp-config=" + json.dumps({"mcpServers": mcp or {}}),
                 "--append-system-prompt", rules]
         failed = False
         try:
@@ -237,6 +279,11 @@ class AgentSteps:
         except CommandError as error:
             return error.code, error.output
 
+CONTRACT_RULES = """- Permissions are checked against the Issue's Contract: run one plain command per Bash
+  call (no pipes, `&&`, redirection or `$`). Allowed: the test command, the Issue's
+  `kagari-commands`, read-only commands and file commands inside the current directory.
+  Do not edit AGENTS.md, CLAUDE.md, CLAUDE.local.md or .claude/.
+"""
 REVIEW_RULES = """You are an independent reviewer of one pull request (KAGARI MVI).
 - You get the Issue's acceptance criteria, the PR diff and the runner's test result.
   The current directory is a checkout of the PR head; you may only read it.
@@ -297,6 +344,14 @@ def report(test: str, code: int, output: str, outcome: Dict[str, Any], sha: str)
     return ("kagari-mvi: test result recorded by the runner (not reported by Claude).\n\n"
             "- tested commit: `%s`\n" % sha +
             "- test command: `%s` (run by the runner as the agent user)\n- exit code: %d\n"
-            "- Claude status: `%s`\n- permission denials: %d\n\n```\n%s\n```" % (
-                test, code, outcome["status"], outcome["denials"],
+            "- Claude status: `%s`\n- permission denials: %d\n%s\n```\n%s\n```" % (
+                test, code, outcome["status"], outcome["denials"], policy_line(outcome),
                 tail(output).replace("```", "'''")))
+
+
+def policy_line(outcome: Dict[str, Any]) -> str:
+    policy = outcome.get("policy")
+    if policy is None:
+        return ""
+    return ("- Contract window (`--permission contract`): allowed %d, denied %d, needs Human: %s\n"
+            % (policy["allow"], policy["deny"], ", ".join(policy["block"]) or "none"))

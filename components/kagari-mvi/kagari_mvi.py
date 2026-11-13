@@ -97,7 +97,7 @@ class Worker(AgentSteps):
     def __init__(self, repo: str, run: Runner = subprocess_runner,
                  log: Callable[[str], None] = lambda message: print(message, file=sys.stderr),
                  agent_user: str = "kagari-agent", claude: str = "claude",
-                 agent_config_dir: Optional[str] = None) -> None:
+                 agent_config_dir: Optional[str] = None, permission: str = "broad") -> None:
         if repo.count("/") != 1 or not all(repo.split("/")):
             raise ValueError("--repo must be OWNER/REPO: %r" % repo)
         self.repo = repo
@@ -106,6 +106,7 @@ class Worker(AgentSteps):
         self.agent_user = agent_user
         self.claude = claude
         self.agent_config_dir = agent_config_dir
+        self.permission = permission  # "broad" (default) or "contract" (#418)
 
     # --- GitHub REST via `gh api` -------------------------------------------
     def api(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Any:
@@ -278,6 +279,9 @@ class Worker(AgentSteps):
                     problem = ("Draft PR #%d was created, but status is `%s` and the test "
                                "exit code is %d. See the PR comment." % (
                                    pr["number"], outcome["status"], code))
+                if (outcome.get("policy") or {}).get("block"):
+                    problem = ("Draft PR #%d was created, but Claude asked for operations that need "
+                               "a Human decision: %s." % (pr["number"], ", ".join(outcome["policy"]["block"])))
             else:
                 problem = ("PR #%d for `%s` already exists and its test result is not re-checked. "
                            "Review it, or close it and delete the branch to retry."
@@ -354,6 +358,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     labels = sub.add_parser("ensure-labels", help="create the five kagari:* labels if missing")
     labels.add_argument("--repo", required=True, help="OWNER/REPO")
     once = sub.add_parser("run-once", help="process at most one approved Issue")
+    once.add_argument("--permission", choices=("broad", "contract"), default="broad",
+                      help="contract: check Claude's requests against the Issue's Contract (#418)")
     once.add_argument("--allow-actor", action="append", required=True,
                       help="login allowed to add kagari:approved (repeat or comma-separate)")
     review = sub.add_parser("review-once", help="review at most one implemented Issue's PR")
@@ -376,7 +382,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("created: %s" % (", ".join(created) if created else "(none)"))
             return 0
         worker = Worker(args.repo, agent_user=args.agent_user, claude=args.claude,
-                        agent_config_dir=args.agent_config_dir)
+                        agent_config_dir=args.agent_config_dir,
+                        permission=getattr(args, "permission", "broad"))
         if args.command == "review-once":
             return worker.review_once(os.path.abspath(args.workdir))
         allowed = [name.strip() for value in args.allow_actor for name in value.split(",")

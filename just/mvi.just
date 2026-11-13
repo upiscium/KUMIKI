@@ -20,3 +20,4 @@ review-once repo *args:
 # Run the unit tests (gh/git are faked).
 test:
     {{python}} {{quote(root / "components/kagari-mvi/test_kagari_mvi.py")}}
+    {{python}} {{quote(root / "components/kagari-mvi/test_kagari_mvi_policy.py")}}
