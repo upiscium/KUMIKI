@@ -1,6 +1,6 @@
 # ADR-0001: Trusted AgentTeam と Human Decision / Ask の境界
 
-- **Status:** Accepted (2026-10-10); implementation partial
+- **Status:** Accepted (2026-10-10); implementation partial。#1 の守る範囲は ADR-0009 D1 で拡張（外部からの入力による誘導）
 - **Decision:** [#254](https://github.com/upiscium/Templates/issues/254)
 - **Related:** #189, #194, #195, #215, #221
 
