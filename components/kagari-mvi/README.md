@@ -2,13 +2,25 @@
 
 ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります（`run-once`）。Draft PR ができた Issue は、別の Claude セッションが受入条件ごとにレビューします（`review-once`）。
 
-- **構成**：本体は 2 ファイルで、合わせて 700 行以内に保ちます（User 判断 2026-11-11。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は使いません。
+- **構成**：本体は 2 ファイルで、合わせて 800 行以内に保ちます（User 判断 2026-11-11 の 700 行を、2026-11-14 に変更。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は使いません。
 - **状態の持ち方**：状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata にも依存しません。
 - **実行の単位**：1 回の実行で処理する Issue は最大 1 件です。systemd timer などから定期的に呼ぶ前提です。
 - **ユーザーの分担**（D3）：
   - `kagari-runner`（GitHub の資格情報を持つ）が worker を動かします。
   - `kagari-agent`（Claude の資格情報だけを持つ）が、Claude とテストコマンドを動かします。
   - git の commit と push は `kagari-runner` が行います。
+- **実行環境の前提**：同じホスト上の OS のユーザー分離（上の 2 ユーザー）だけです。2 つのユーザーは KAGARI 専用にしてください。LXC は MVI の実機確認に使った環境で、必須ではありません（ADR-0009 D2）。
+
+## KAGARI が責任を持つこと（ADR-0009 D1）
+
+KAGARI の目的は、簡単かつ安全に Agent 開発をすることです。攻撃への防御は目的にしません。
+
+- **責任を持つこと**：
+  - 人間の判断の関門。承認ラベルを付けるのも、merge するのも人間です。
+  - GitHub の資格情報の分離。Claude は GitHub の資格情報を持たず、commit・push・PR・ラベルは runner が扱います。
+  - 誤操作の防止。指示ファイル（`CLAUDE.md`、`CLAUDE.local.md`、`AGENTS.md`）、`.claude/`、`.github/workflows/` の変更は、Issue で許していなければ push せずに止めます。
+  - 検証。runner がテストを実行し直し、別のセッションがレビューします。
+- **責任を持たないこと**：プロンプトインジェクションや、悪意ある入力・agent への防御です。**Issue の中身が安全かどうかは、承認する人が判断してください。** 外部の人が書いた Issue は、本文を読んでから承認してください。下の「既知の限界」も、この前提で書いています。
 
 ## ラベル
 
@@ -30,6 +42,16 @@ worker は、Issue 本文の `### テストコマンド` 見出し（`### Test c
 python3 -m unittest -v
 ```
 ````
+
+保護するファイル（下の「`run-once` の動作」の 6）を変える必要がある Issue では、`### 変更する保護ファイル`（`### Protected files to change` でも可）の見出しの下に、変えてよいパスを箇条書きで書きます。パスはリポジトリの直下から書き、末尾が `/` ならその下すべてを指します。承認することで、この変更も許したことになります。
+
+````markdown
+### 変更する保護ファイル
+- .github/workflows/ci.yml
+- .claude/
+````
+
+ワークフローのファイルを push するには、`kagari-runner` の GitHub トークンに、ワークフローを書き換える権限（classic token の `workflow`、fine-grained token の Workflows: Read and write）が要ります。権限が無いと、push の段階で `blocked` になります。
 
 Claude に渡すのは、Issue のタイトルと本文だけです。コメントは取得しません（D4）。
 
@@ -166,11 +188,14 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
      - Bash は原則として許可します（User 判断 2026-11-11）。ビルド、lint、テストなどを自由に実行できます。Bash は `kagari-agent` として動き、GitHub の資格情報を持たないので、安全の境界は OS のユーザー分離に置きます。
      - 拒否する操作：ネットワークや資格情報に関わるコマンド（`curl` `wget` `gh` `git push` `git remote` `ssh` `scp` `sudo` `su` `nc` `ncat` `socat` `telnet`）と、`Agent` `WebFetch` `WebSearch` `NotebookEdit` です。これは誤操作を防ぐためのもので、境界ではありません。
      - `Edit` と `Write` は worktree の中に限ります。headless なので、許可されていない操作は確認を待たずに拒否されます。
+     - 保護するファイル（指示ファイル、`.claude/`、`.github/workflows/`）への `Edit` と `Write` は拒否します。うっかりの書き換えを減らすためのもので、Bash で書いた場合は次の commit の段階で止めます。Issue に `### 変更する保護ファイル` がある場合は、この拒否ルールを付けず、commit の段階の確認だけで判定します。
    - 認証エラーの扱い：`Not logged in`、`Login expired`、`401` などで終わった場合は、`blocked` を付けて「kagari-agent の再ログインが必要」とコメントします。リトライはしません。
 6. **commit する**（段階 `commit`、`kagari-runner` が実行）
    - worktree の中にある `.git` ファイルは `kagari-agent` が書き換えられるので、使いません。git の管理ディレクトリを `--git-dir` で明示して指定します。
    - `core.hooksPath=/dev/null` と `core.fsmonitor=false` を指定し、`--no-verify` を付けて、すべての変更を commit します。ただし、テストで生成されるファイル（`__pycache__`、`*.pyc`、`.pytest_cache`、`node_modules`、`.mypy_cache`）は commit しません。
    - 変更が無い場合は、PR を作らずに `blocked` にします。
+   - 保護するファイルが変わっていて、Issue の `### 変更する保護ファイル` に書かれていない場合は、commit を worktree に残したまま、push も PR の作成もせずに `blocked` にします。コメントには、そのファイルを列挙します。保護するのは、どの階層にある `CLAUDE.md`・`CLAUDE.local.md`・`AGENTS.md`・`.claude/` と、リポジトリ直下の `.github/workflows/` です。
+   - Issue で許した保護ファイルが変わった場合は、push し、PR のテスト結果のコメントにそのファイルを列挙します。merge するときに確かめてください。
 7. **テストを実行し直す**（段階 `test`）：合否を決めるのは、この結果だけです。Claude の自己申告では決めません。
    - まず、`kagari-agent` のプロセスをすべて止めます。
    - 次に、commit した内容だけを `<workdir>/wt/issue-N.verify` に checkout します。
@@ -206,7 +231,9 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 
 途中で失敗した場合や、認証エラーの場合は、`run-once` と同じく `blocked` にします。レビュアーが終了コード 0 で終わったのに、結果がエラーだった場合や、結果が無かった場合は、`blocked` にはしません。コメントに「reviewer session: ended with an error」と記録し、判定が無い受入条件を UNKNOWN にしたうえで、`reviewed` を付けます。
 
-### 既知の限界（MVI の範囲外）
+### 既知の限界
+
+KAGARI が責任を持たないもの（上の「KAGARI が責任を持つこと」）と、MVI でまだ扱っていないものです。
 
 - **止まった Issue**：`running` が付いたまま止まった Issue は、自動では復旧しません。
 - **承認後の本文の変更**：承認した後に Issue 本文が変わっても、検知しません。
@@ -215,9 +242,9 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **Bash の広さ**：Bash は原則として許可しているので、拒否リストは回り道で越えられます。たとえば `python3 -c` でネットワークに接続できます。`env curl`、`/usr/bin/curl`、`bash -c "curl …"` のように書き方を変えた場合に拒否されるかは、Claude Code の照合の実装しだいで、未確認です。Claude は `kagari-agent` の Claude 資格情報（`~/.claude/.credentials.json`）を読めるので、Issue 本文で誘導されると、その資格情報を外部へ送られるおそれがあります。外部の人が作った Issue を承認するときは、本文を確認してください。
 - **読み取り専用のコマンド**：Claude Code は、`uname` のような読み取り専用のコマンドを、許可リストに無くても承認なしで実行します（LXC の #15 で確認）。実行するのは `kagari-agent` なので、GitHub の資格情報には届きません。
 - **Claude の読み取り**：Read・Edit・Write などのファイルツールは、`--restricted` によって worktree の中に限られます。ただし、Bash とテストのコードは `kagari-agent` として何でも読めます。そのため、`kagari-agent` が持つ Claude の資格情報（`~/.claude/.credentials.json`）を worktree にコピーされると、commit されて push されるおそれがあります。public リポジトリでは、merge する前に PR の差分を確認してください。
-- **設定ファイルと git の関連ファイル**：`--restricted` の下では、設定・git・ツール設定のファイルを Edit や Write で書くには承認が必要です。`--permission-prompts none` なので、その操作は自動で拒否されます。そのため、`.gitignore`、`.github/`、`.claude/` などを変える Issue では、Claude が Bash で書くか、`BLOCKED` で終わります。どのファイルが対象になるかは、未確認です。`--restricted` は local の設定ファイルも読まないので、Claude が `.claude/settings.local.json` を書いても権限は広がらないと推測しています（CLI の help の記述による。実機では未確認）。書かれたファイルは PR の差分に入ります。
+- **設定ファイルと git の関連ファイル**：`--restricted` の下では、設定・git・ツール設定のファイルを Edit や Write で書くには承認が必要です。`--permission-prompts none` なので、その操作は自動で拒否されます。そのため、`.gitignore` や `.github/` などを変える Issue では、Claude が Bash で書くか、`BLOCKED` で終わります。保護するファイルを Bash で書いた場合は、commit の段階で止まります。どのファイルが対象になるかは、未確認です。`--restricted` は local の設定ファイルも読まないので、Claude が `.claude/settings.local.json` を書いても権限は広がらないと推測しています（CLI の help の記述による。実機では未確認）。書かれたファイルは PR の差分に入ります。
 - **残るプロセス**：Claude とテストは、sudo の内側で `timeout -k` によって時間を区切ります。テストの前には `kill -1` でプロセスを止めます。ただし、cron・at・`systemd-run --user` で後から起動するプロセスは止められません。そうしたプロセスがテストの最中に `.verify` を書き換えることは、防げていません。
-- **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。Actions の secrets があるリポジトリを対象にする前に、対策を決めてください。対策の候補は、Workflows 権限の無い fine-grained token を使うこと、`.github/` を変更した差分は push しないことです。
+- **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。KAGARI は、`.github/workflows/` の変更は push せずに止めますが、既存のワークフローが Claude のコードを実行することは防ぎません。これは target リポジトリの設定の問題です。secrets があるリポジトリを対象にする場合は、fork からの PR と同じ扱い（secrets を渡さない、承認してから実行する）になるよう、ワークフローを設定してください。
 - **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。レビュー用の `issue-N.review` も同じです。これは処理を止めるだけで、権限の昇格にはつながりません。
 - **レビューの独立性**：レビュアーは実装者と同じモデル系統です（ADR-0007 D6）。受入条件と差分は Issue と PR から取るので、その文面でレビュアーを誘導することもできます。レビューの結果は参考として扱い、merge は User が判断してください。
 - **レビュアーの起動の乗っ取り**：レビュアーは実装者と同じ `kagari-agent` で、ログインシェルから起動します。そのため、実装者が Bash で `~/.profile` の PATH や、`kagari-agent` の home に置いた `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがあります（未確認）。`claude` を root が所有する場所に入れ、`--claude` に絶対パスを渡せば、指定したパスの本体がすり替わることは防げます。ただし、`~/.profile` はシェルスクリプトなので、その内容（環境変数の設定や、`exec` による別のプログラムへの置き換え、PATH から探す `timeout` や `node` の差し替えなど）による介入は残ります。レビューをログインシェルなしで起動すれば防げると考えていますが、未確認です。実装者と別のユーザーでレビューする方法は、2 周目で扱います。

@@ -192,6 +192,8 @@ class RunOnceTest(unittest.TestCase):
             self.assertIn(rule, deny)
         self.assertTrue(any(rule.startswith("Edit(//") and rule.endswith("/wt/issue-7/**)") for rule in allow))
         self.assertNotIn("Edit", allow)
+        self.assertTrue(any(rule.startswith("Write(//") and rule.endswith("/wt/issue-7/**/.claude/**)")
+                            for rule in deny))
         # kill -1 must be the direct child of sudo: no timeout/env wrapper it would also kill.
         self.assertEqual(kill, ["sudo", "-n", "-u", "kagari-agent", "-H", "--", "sh", "-c", "kill -KILL -1; true"])
         self.assertNotIn("-lc", test)  # no login shell: agent-written ~/.profile is ignored
@@ -254,6 +256,52 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(self.run_worker(runner), 1)
         self.assertEqual(runner.api_calls("POST", "repos/o/r/pulls"), [])
         self.assertIn("no changes", self.comments(runner, 7)[0])
+
+    def test_protected_change_blocks_before_push(self):
+        runner = FakeRunner(self.routes())
+        runner.outputs["diff --cached --name-only"] = "src/a.py\0docs/CLAUDE.md\0"
+        self.assertEqual(self.run_worker(runner), 1)
+        self.assertFalse(any("push" in args for args, _, _ in runner.calls))
+        self.assertEqual(runner.api_calls("POST", "repos/o/r/pulls"), [])
+        self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.BLOCKED])
+        comment = self.comments(runner, 7)[0]
+        self.assertIn("`docs/CLAUDE.md`", comment)
+        self.assertNotIn("src/a.py", comment)
+
+    def test_protected_change_listed_in_issue_is_pushed_and_reported(self):
+        routes = self.routes()
+        allowed = issue(7, [mvi.APPROVED])
+        allowed["body"] += "\n### 変更する保護ファイル\n- `.github/workflows/`\n- ./CLAUDE.md\n"
+        routes[("GET", "repos/o/r/issues?")] = [allowed]
+        runner = FakeRunner(routes)
+        runner.outputs["diff --cached --name-only"] = ".github/workflows/ci.yml\0CLAUDE.md\0a.py\0"
+        self.assertEqual(self.run_worker(runner), 0)
+        self.assertTrue(any("push" in args for args, _, _ in runner.calls))
+        claude = next(args for args, _, _ in runner.calls if "stream-json" in args)
+        settings = json.loads(next(a for a in claude if a.startswith("--settings="))[11:])
+        self.assertFalse(any("CLAUDE.md" in rule for rule in settings["permissions"]["deny"]))
+        report = self.comments(runner, 70)[0]
+        self.assertIn("allowed by the Issue): `.github/workflows/ci.yml`", report)
+        self.assertIn("allowed by the Issue): `CLAUDE.md`", report)
+
+    def test_protected_change_not_listed_still_blocks(self):
+        routes = self.routes()
+        allowed = issue(7, [mvi.APPROVED])
+        allowed["body"] += "\n### 変更する保護ファイル\n- .github/workflows/ci.yml\n"
+        routes[("GET", "repos/o/r/issues?")] = [allowed]
+        runner = FakeRunner(routes)
+        runner.outputs["diff --cached --name-only"] = ".github/workflows/ci.yml\0.github/workflows/x.yml\0"
+        self.assertEqual(self.run_worker(runner), 1)
+        self.assertFalse(any("push" in args for args, _, _ in runner.calls))
+        comment = self.comments(runner, 7)[0]
+        self.assertIn("`.github/workflows/x.yml`", comment)
+        self.assertNotIn("ci.yml", comment)
+
+    def test_protected_paths(self):
+        changed = ["AGENTS.md", "pkg/CLAUDE.local.md", "a/.claude/settings.json", ".claude/x",
+                   ".github/workflows/ci.yml", "src/claude.md", "docs/.github/workflows/x",
+                   ".github/CODEOWNERS", "src/main.py"]
+        self.assertEqual(ex.protected_paths(changed), changed[:5])
 
     def test_committed_settings_local_blocks_before_claude(self):
         runner = FakeRunner(self.routes())
