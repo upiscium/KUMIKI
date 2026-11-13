@@ -42,7 +42,11 @@ READ_ONLY_FORBIDDEN_OPTIONS = {
     "grep": ("-R", "--dereference-recursive"),
     "rg": ("--pre", "--search-zip", "-z", "-L", "--follow"),
     "ls": ("-L", "--dereference"),
+    "diff": ("-r", "--recursive"),  # recursion follows symlinks to files outside the worktree
 }
+# cp/mv options that follow or create links (a repository symlink could point outside).
+LINK_LONG_OPTIONS = ("--dereference", "--symbolic-link", "--link")
+LINK_SHORT_FLAGS = frozenset("LHsl")
 WORKTREE_FILE_COMMANDS = frozenset(("cp", "mkdir", "mv", "rm", "rmdir", "touch"))
 GIT_DESTRUCTIVE = frozenset(("filter-branch", "filter-repo", "reflog", "gc", "prune",
                              "update-ref", "replace", "clean"))
@@ -153,8 +157,7 @@ def _protected(policy: Policy, raw: str) -> bool:
     if not _inside(policy, raw):
         return True
     parts = _resolve(policy, raw).relative_to(policy.worktree).parts
-    return (not parts or ".git" in parts or parts[0] == ".claude"
-            or (len(parts) == 1 and parts[0] in INSTRUCTION_FILES))
+    return (not parts or ".git" in parts or ".claude" in parts or parts[-1] in INSTRUCTION_FILES)
 
 
 def _decide_read(policy: Policy, tool: str, tool_input: Mapping[str, Any]) -> Decision:
@@ -191,6 +194,25 @@ def _operands(arg: str) -> List[str]:
     return [value for value in values if value]
 
 
+def _has_option(name: str, arg: str, option: str) -> bool:
+    """``option`` given as ``arg``, also inside a short cluster (``-rN``) except for find."""
+    if arg == option or arg.startswith(option + "="):
+        return True
+    short = len(option) == 2 and option[0] == "-" and option[1] != "-"
+    return (name != "find" and short and arg.startswith("-") and not arg.startswith("--")
+            and option[1] in arg[1:])
+
+
+def _link_option(arg: str) -> bool:
+    """A cp/mv option that follows or creates links (-L -H -s -l, also inside -rL)."""
+    if arg.startswith("--"):
+        return arg.split("=", 1)[0] in LINK_LONG_OPTIONS
+    if not arg.startswith("-"):
+        return False
+    flags = re.split(r"[tTS]", arg[1:], maxsplit=1)[0]  # letters after -t/-T/-S are a value
+    return bool(LINK_SHORT_FLAGS & set(flags))
+
+
 def _git_decision(argv: List[str]) -> Decision:
     """The runner owns git in the MVI: deny all, and block on Human-decision operations."""
     sub = argv[1] if len(argv) > 1 else ""
@@ -201,7 +223,8 @@ def _git_decision(argv: List[str]) -> Decision:
     if sub in ("merge", "tag"):
         return _deny("%s_NEEDS_HUMAN" % sub.upper(), block=True)
     if (sub in GIT_DESTRUCTIVE or (sub == "reset" and "--hard" in rest)
-            or (sub == "branch" and any(a in ("-D", "--delete", "-d") for a in rest))):
+            or (sub == "branch" and any(a in ("-D", "--delete", "-d") for a in rest))
+            or (sub == "worktree" and rest[:1] in (["remove"], ["prune"]))):
         return _deny("HISTORY_DESTRUCTION_NEEDS_HUMAN", "git %s" % sub, True)
     return _deny("GIT_HOST_OWNED", "the runner commits and pushes")
 
@@ -227,7 +250,7 @@ def _decide_bash(policy: Policy, tool_input: Mapping[str, Any]) -> Decision:
         argv = shlex.split(command)
     except ValueError:
         return _deny("SHELL_SYNTAX_NOT_ALLOWED", "unbalanced quotes")
-    # git/gh first, so a Human-decision operation blocks even inside shell syntax.
+    # git/gh first, so a Human-decision operation blocks even when a path argument leaves the worktree.
     name = PurePosixPath(argv[0]).name if argv else ""
     if name in ("git", "gh") and _shell_text_ok(command):
         return _git_decision(argv) if name == "git" else _gh_decision(argv)
@@ -242,12 +265,15 @@ def _decide_bash(policy: Policy, tool_input: Mapping[str, Any]) -> Decision:
             return _deny("PATH_OUTSIDE_WORKTREE", value)
     if name in READ_ONLY_COMMANDS:
         forbidden = READ_ONLY_FORBIDDEN_OPTIONS.get(name, ())
-        if any(arg == option or arg.startswith(option + "=") for arg in argv[1:] for option in forbidden):
+        if any(_has_option(name, arg, option) for arg in argv[1:] for option in forbidden):
             return _deny("COMMAND_OPTION_NOT_ALLOWED", name)
         return _allow("READ_ONLY_COMMAND", tool_input)
     if name in WORKTREE_FILE_COMMANDS:
-        operands = [arg for arg in argv[1:] if not arg.startswith("-")]
-        if not operands or any(_protected(policy, arg) for arg in operands):
+        if name in ("cp", "mv") and any(_link_option(a) for a in argv[1:]):
+            return _deny("COMMAND_OPTION_NOT_ALLOWED", name)
+        # Every operand and option value (-t DIR, --target-directory=DIR) is a possible target.
+        targets = [v for a in argv[1:] for v in _operands(a) if not v.startswith("-")]
+        if not targets or any(_protected(policy, value) for value in targets):
             return _deny("PROTECTED_PATH", name)
         return _allow("WORKTREE_FILE_COMMAND", tool_input)
     if any(rule.matches(argv) for rule in policy.commands):
@@ -329,9 +355,12 @@ def handle(policy: Policy, message: Any, log: Optional[IO[str]]) -> Optional[Dic
         result = {"tools": [{"name": TOOL_NAME, "inputSchema": TOOL_SCHEMA,
                              "description": "Decide a permission request against the Contract."}]}
     elif method == "tools/call":
-        params = message.get("params") or {}
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
         request = params.get("arguments") if params.get("name") == TOOL_NAME else None
-        decision = decide(policy, request) if request is not None else _deny("UNKNOWN_TOOL")
+        try:
+            decision = decide(policy, request) if request is not None else _deny("UNKNOWN_TOOL")
+        except Exception as error:  # noqa: BLE001 - fail closed on any input (e.g. NUL in a path)
+            decision = _deny("MALFORMED_REQUEST", type(error).__name__)
         if log is not None:
             log.write(json.dumps({"contract_id": policy.contract_id, "request": request,
                                   "behavior": decision.behavior, "code": decision.code,

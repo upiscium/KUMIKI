@@ -48,6 +48,7 @@ Claude に渡すのは、Issue のタイトルと本文だけです。コメン�
 | `/srv/kagari/wt` | `kagari-runner:kagari` | `3770` | 2 ユーザーが共有する worktree。setgid と sticky を付けます |
 | `/srv/kagari/repos` | `kagari-runner:kagari` | `0700` | runner だけが使う clone と git の管理ディレクトリ |
 | `/srv/kagari/logs` | `kagari-runner:kagari` | `0700` | runner だけが使う Claude の stream-json の記録 |
+| `/srv/kagari/run` | `kagari-runner:kagari` | `0750` | 権限窓口のコードと Contract（`--permission contract`）。`kagari-agent` は読めるが書けない。無ければ runner が作る |
 
 - `kagari-agent` は git の管理ディレクトリに書き込めません。そのため、git の設定やフックを仕込んで runner の権限でコードを動かすことはできません。
 - `wt` に sticky を付けるのは、`kagari-agent` が worktree のディレクトリそのものを差し替えられないようにするためです。
@@ -59,6 +60,7 @@ sudo usermod -aG kagari kagari-agent
 sudo install -d -o kagari-runner -g kagari -m 0750 /srv/kagari
 sudo install -d -o kagari-runner -g kagari -m 3770 /srv/kagari/wt
 sudo install -d -o kagari-runner -g kagari -m 0700 /srv/kagari/repos /srv/kagari/logs
+sudo install -d -o kagari-runner -g kagari -m 0750 /srv/kagari/run
 t=$(mktemp) && echo 'kagari-runner ALL=(kagari-agent) NOPASSWD: ALL' > "$t"
 sudo visudo -cf "$t" && sudo install -m 0440 "$t" /etc/sudoers.d/kagari-mvi; rm -f "$t"
 ```
@@ -102,6 +104,7 @@ sudo userdel -r kagari-agent; sudo userdel -r kagari-runner
     "d /srv/kagari/wt 3770 kagari-runner kagari -"
     "d /srv/kagari/repos 0700 kagari-runner kagari -"
     "d /srv/kagari/logs 0700 kagari-runner kagari -"
+    "d /srv/kagari/run 0750 kagari-runner kagari -"
   ];
 }
 ```
@@ -192,8 +195,8 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **防ぐ誤操作**：Claude が Contract の範囲の外の操作をすることです。たとえば、指示ファイル（`AGENTS.md`・`CLAUDE.md`・`CLAUDE.local.md`）や `.claude/` を書き換えること、承認されていないコマンドを実行すること、人間の判断が要る操作をすることです。
 - **Contract のコマンド**：`### テストコマンド` の 1 行目（完全一致）と、```` ```kagari-commands ```` ブロックの各行が対象です。ブロックでは、行末を `...` にすると、それ以降の引数を自由に付けられます。どちらにも、シェルの演算子・環境変数の代入・`git`・`gh` は書けません。書いてあれば、Claude を起動する前に `blocked` にします。
 - **判定**（`kagari_mvi_policy.decide`、#402 から取り込み）：
-  - Read・Glob・Grep：worktree の中なら許可します。
-  - Edit・Write：worktree の中なら許可します。ただし、指示ファイル・`.claude/`・`.git` は拒否します。
+  - Read・Glob・Grep：設定で許可するので、窓口には届きません。worktree の外を読めないことは、`--restricted`（ファイルのツールを作業ディレクトリに限る）に頼っています。
+  - Edit・Write：worktree の中なら許可します。ただし、指示ファイル（`AGENTS.md`・`CLAUDE.md`・`CLAUDE.local.md`）・`.claude/`・`.git` は、どの階層にあっても拒否します。
   - Bash：シェルの演算子を含まない 1 つのコマンドだけを受け付けます。worktree の外を指す引数は拒否します。そのうえで、読み取り系のコマンドと、worktree の中でのファイル操作（`mkdir` `cp` `mv` `rm` など）と、Contract のコマンドを許可します。
   - `git`・`gh`：すべて拒否します。git の操作は runner が行うためです。merge・タグ・ラベル・`gh pr ready`・release・force push・履歴の破棄は、拒否したうえで「人間の判断が要る」という信号を残します。
   - それ以外のツールと Web は拒否します。
@@ -240,6 +243,9 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 - **レビューの独立性**：レビュアーは実装者と同じモデル系統です（ADR-0007 D6）。受入条件と差分は Issue と PR から取るので、その文面でレビュアーを誘導することもできます。レビューの結果は参考として扱い、merge は User が判断してください。
 - **権限窓口の記録**（`--permission contract`）：記録のファイルと窓口のプロセスは、`kagari-agent` の権限で動きます。そのため、Claude が Bash で記録を書き換えたり、窓口のプロセスを止めたりできます（User 判断 1-3a。2 周目以降で扱います）。窓口が応答しない、または異常終了した場合に操作が実行されないこと（fail-closed）は、未確認です。
 - **権限窓口と読み取り専用のコマンド**：Claude Code は、読み取り専用のコマンド（`uname` など）を窓口に問い合わせずに実行することがあります。
+- **Contract のコマンドが実行するコード**（`--permission contract`）：テストコマンドなどの Contract のコマンドは、Claude が書いたコード（例：`test_*.py`）をそのまま実行します。そのコードは、窓口を通さずに通信したり、worktree の外を読み書きしたりできます。窓口では防げません。末尾が `...` の規則（例：`python3 ...`）は、任意のコードを許すのと同じです。Contract には、できるだけ狭い形を書いてください。
+- **窓口の判定の残り**（`--permission contract`）：Bash は 1 つのコマンドを、引数の形で判定します。そのため、ディレクトリごと `cp -r` するときに、中にある指示ファイルまでは見ません。`git -C . merge` や `env git tag` のように書き方を変えた git や gh の操作は、拒否はしますが、「人間の判断が要る」という印が付かないことがあります。窓口は `python3` をログインシェルの PATH から起動します。Claude は窓口のツールを直接呼んで、偽の記録を残せます。
+- **Human 判断の印とテスト失敗が重なった場合**：Issue のコメントには、人間の判断が要る操作のほうだけが出ます。テストの結果は、PR のコメントで確かめてください。
 - **レビュアーの起動の乗っ取り**：レビュアーは実装者と同じ `kagari-agent` で、ログインシェルから起動します。そのため、実装者が Bash で `~/.profile` の PATH や、`kagari-agent` の home に置いた `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがあります（未確認）。`claude` を root が所有する場所に入れ、`--claude` に絶対パスを渡せば、指定したパスの本体がすり替わることは防げます。ただし、`~/.profile` はシェルスクリプトなので、その内容（環境変数の設定や、`exec` による別のプログラムへの置き換え、PATH から探す `timeout` や `node` の差し替えなど）による介入は残ります。レビューをログインシェルなしで起動すれば防げると考えていますが、未確認です。実装者と別のユーザーでレビューする方法は、2 周目で扱います。
 - **レビュー後の変更**：`reviewed` を付けた後に PR へ commit を足しても、もう一度はレビューしません。やり直す場合は、`kagari:reviewed` を外してください。
 - **一覧への反映の遅れ**：承認した直後の実行では、Issue が選ばれないことがあります。ラベルで絞り込む一覧 API への反映が遅れるためと推測しています。次の実行で拾われます。
@@ -377,7 +383,7 @@ new_issue() {  # $1 = タイトル、$2 = 本文
 
 ````sh
 new_issue "MVI contract: greet4" "$(printf '%s\n' \
-  '権限の確認のため、実装の前に Bash ツールで `curl -sI https://example.com` と `git status` の実行を、それぞれ 1 回ずつ試みること（拒否されてよい）。' \
+  '権限の確認のため、実装の前に Bash ツールで `curl -sI https://example.com` と `git commit --allow-empty -m probe` の実行を、それぞれ 1 回ずつ試みること（拒否されてよい）。' \
   'その後、greet4.py に greet4() を追加して "ok" を返すようにし、test_greet4.py に unittest のテストを追加する。' '' \
   '### 受入条件' '- [ ] greet4() が "ok" を返す' '- [ ] test_greet4.py にテストがある' '' \
   '### テストコマンド' '```sh' 'python3 -m unittest -v' '```')"
@@ -389,6 +395,6 @@ P=$(gh api "repos/$R/pulls?head=upiscium:kagari/issue-$N" --jq '.[0].number'); g
 
 確認すること：
 - 記録に、許可（`WRITE_IN_WORKTREE` や `CONTRACT_COMMAND`）と拒否（`OUT_OF_CONTRACT` と `GIT_HOST_OWNED`）の両方が残ること。
-- stream-json の `permission_denials` に、`curl` と `git status` の拒否が入ること。
+- stream-json の `permission_denials` に、`curl` と `git commit` の拒否が入ること。（読み取り専用の `git status` は窓口を通らずに実行されることがあるため、書き込みを伴う `git commit` で確かめます。）
 - PR のテスト結果のコメントに、「Contract window」の件数が出ること。
 - テストが通り、Issue が `implemented` になること。

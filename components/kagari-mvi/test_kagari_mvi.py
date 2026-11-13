@@ -248,6 +248,21 @@ class RunOnceTest(unittest.TestCase):
         report = self.comments(runner, 70)[0]
         self.assertIn("Contract window (`--permission contract`): allowed 0, denied 0", report)
 
+    def test_contract_mode_replaces_a_planted_log_symlink(self):
+        runner = FakeRunner(self.routes())
+        with tempfile.TemporaryDirectory() as workdir:
+            os.makedirs(os.path.join(workdir, "wt"))
+            victim = os.path.join(workdir, "victim")
+            with open(victim, "w") as handle:
+                handle.write("keep")
+            os.symlink(victim, os.path.join(workdir, "wt", "issue-7.policy.jsonl"))
+            worker = mvi.Worker("o/r", run=runner, log=lambda _: None, permission="contract")
+            worker.run_once(["upiscium"], workdir)
+            with open(victim) as handle:
+                self.assertEqual(handle.read(), "keep")
+            self.assertFalse(os.path.islink(os.path.join(workdir, "wt", "issue-7.policy.jsonl")))
+            self.assertEqual(oct(os.stat(os.path.join(workdir, "run")).st_mode & 0o777), "0o750")
+
     def test_broad_mode_is_unchanged(self):
         runner = FakeRunner(self.routes())
         self.assertEqual(self.run_worker(runner), 0)

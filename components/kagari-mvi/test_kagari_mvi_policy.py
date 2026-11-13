@@ -83,6 +83,21 @@ class DecisionTableTest(PolicyCase):
             (self.bash("gh issue view 3"), "deny", "GITHUB_HOST_OWNED", False),
             (self.decide("WebFetch", url="https://example.com"), "deny", "NETWORK_NOT_ALLOWED", False),
             (self.decide("Agent", prompt="x"), "deny", "TOOL_NOT_ALLOWED", False),
+            # #419 review: option values as targets, link-following options, nested instruction files
+            (self.bash("cp --target-directory=.claude a"), "deny", "PROTECTED_PATH", False),
+            (self.bash("cp -t.claude a"), "deny", "PROTECTED_PATH", False),
+            (self.bash("mv --target-directory=. src/AGENTS.md"), "deny", "PROTECTED_PATH", False),
+            (self.bash("cp -t src a"), "allow", "WORKTREE_FILE_COMMAND", False),
+            (self.bash("cp -rL src copy"), "deny", "COMMAND_OPTION_NOT_ALLOWED", False),
+            (self.bash("cp -r --dereference src copy"), "deny", "COMMAND_OPTION_NOT_ALLOWED", False),
+            (self.bash("cp -s a b"), "deny", "COMMAND_OPTION_NOT_ALLOWED", False),
+            (self.bash("cp -r src copy"), "allow", "WORKTREE_FILE_COMMAND", False),
+            (self.bash("diff -rN src empty"), "deny", "COMMAND_OPTION_NOT_ALLOWED", False),
+            (self.bash("ls -lL"), "deny", "COMMAND_OPTION_NOT_ALLOWED", False),
+            (self.decide("Write", file_path=root + "/src/CLAUDE.md"), "deny", "PROTECTED_PATH", False),
+            (self.decide("Write", file_path=root + "/src/.claude/settings.json"), "deny", "PROTECTED_PATH", False),
+            (self.bash("mkdir src/.claude"), "deny", "PROTECTED_PATH", False),
+            (self.bash("git worktree remove x"), "deny", "HISTORY_DESTRUCTION_NEEDS_HUMAN", True),
         ]
         for decision, behavior, code, block in cases:
             self.assertEqual((decision.behavior, decision.code, decision.block), (behavior, code, block),
@@ -139,19 +154,22 @@ class ServerTest(PolicyCase):
                 "tool_name": "Bash", "input": {"command": "git merge main"}, "tool_use_id": "u"}}},
             {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "decide", "arguments": "x"}},
             {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "other", "arguments": {}}},
-            {"jsonrpc": "2.0", "id": 6, "method": "nope"})
+            {"jsonrpc": "2.0", "id": 6, "method": "nope"},
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": ["not", "a", "dict"]},
+            {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "decide", "arguments": {
+                "tool_name": "Bash", "input": {"command": "cat a\u0000b"}}}})
         by_id = {r.get("id"): r for r in responses}
         self.assertEqual(by_id[1]["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual(by_id[2]["result"]["tools"][0]["name"], "decide")
         reply = json.loads(by_id[3]["result"]["content"][0]["text"])
         self.assertEqual(reply, {"behavior": "deny", "message": "MERGE_NEEDS_HUMAN"})
-        for mid in (4, 5):
+        for mid in (4, 5, 7, 8):  # malformed input never crashes the window: it denies
             self.assertEqual(json.loads(by_id[mid]["result"]["content"][0]["text"])["behavior"], "deny")
         self.assertEqual(by_id[6]["error"]["code"], -32601)
         self.assertEqual(by_id[None]["error"]["code"], -32700)  # the non-JSON line
-        self.assertEqual(len(responses), 7)  # the notification gets no response
+        self.assertEqual(len(responses), 9)  # the notification gets no response
         records = [json.loads(line) for line in log.splitlines()]
-        self.assertEqual(len(records), 3)
+        self.assertEqual(len(records), 5)  # every tools/call is denied or decided, and logged
         self.assertEqual((records[0]["code"], records[0]["block"]), ("MERGE_NEEDS_HUMAN", True))
 
     def test_read_log_skips_garbage(self):

@@ -179,14 +179,22 @@ class AgentSteps:
             raise Blocked("The Contract commands cannot be used with `--permission contract` "
                           "(one plain command per line, no git/gh): %s" % error)
         group = os.stat(workdir).st_gid
-        run_dir = os.path.join(workdir, "run", "issue-%d" % number)  # agent may read, not write
+        run_root = os.path.join(workdir, "run")
+        run_dir = os.path.join(run_root, "issue-%d" % number)  # agent may read, not write
         os.makedirs(run_dir, mode=0o750, exist_ok=True)
+        os.chown(run_root, -1, group)
+        os.chmod(run_root, 0o750)
         script, contract = os.path.join(run_dir, "policy.py"), os.path.join(run_dir, "contract.json")
         shutil.copyfile(policy_mod.__file__, script)
         policy_mod.write_contract(contract, "%s#%d" % (getattr(self, "repo", "?"), number), rules)
         log = worktree + ".policy.jsonl"  # in the shared wt/: the agent can edit it (1-3a)
-        open(log, "w").close()
-        for path, mode in ((run_dir, 0o750), (script, 0o640), (contract, 0o640), (log, 0o660)):
+        if os.path.lexists(log):
+            os.unlink(log)  # never follow a symlink someone left here
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o660)
+        os.fchown(fd, -1, group)
+        os.fchmod(fd, 0o660)
+        os.close(fd)
+        for path, mode in ((run_dir, 0o750), (script, 0o640), (contract, 0o640)):
             os.chown(path, -1, group)
             os.chmod(path, mode)
         settings = {"permissions": {"allow": ["Read", "Glob", "Grep"],
