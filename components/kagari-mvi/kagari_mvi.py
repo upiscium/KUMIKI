@@ -138,8 +138,11 @@ class Worker(AgentSteps):
         out = self.run(["gh", "api", "--method", "POST", "-H", "Accept: application/vnd.github+json",
                         "graphql", "-f", "query=query($o:String!,$n:String!,$i:Int!){repository("
                         "owner:$o,name:$n){issue(number:$i){lastEditedAt}}}",
-                        "-F", "o=" + owner, "-F", "n=" + name, "-F", "i=%d" % number])
-        return json.loads(out)["data"]["repository"]["issue"]["lastEditedAt"]
+                        "-f", "o=" + owner, "-f", "n=" + name, "-F", "i=%d" % number])
+        found = ((json.loads(out).get("data") or {}).get("repository") or {}).get("issue")
+        if not found:
+            raise ValueError("GraphQL did not return Issue #%d: %s" % (number, out.strip()))
+        return found["lastEditedAt"]
 
     def api_text(self, path: str, accept: str) -> str:
         return self.run(["gh", "api", "--method", "GET", "-H", "Accept: " + accept, path])

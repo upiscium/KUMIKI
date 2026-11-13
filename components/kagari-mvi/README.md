@@ -2,7 +2,7 @@
 
 ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります（`run-once`）。Draft PR ができた Issue は、別の Claude セッションが受入条件ごとにレビューします（`review-once`）。
 
-- **構成**：本体は 2 ファイルで、合わせて 750 行以内に保ちます（User 判断 2026-11-11 の 700 行を、2026-11-14 に変更。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は、Issue 本文を最後に編集した時刻を取る 1 か所だけで使います（REST では取れないため。User 判断 2026-11-14）。
+- **構成**：本体は 2 ファイルで、合わせて 800 行以内に保ちます（User 判断 2026-11-11 の 700 行を、2026-11-14 に変更。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は、Issue 本文を最後に編集した時刻を取る 1 か所だけで使います（REST では取れないため。User 判断 2026-11-14）。
 - **状態の持ち方**：状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata にも依存しません。
 - **実行の単位**：1 回の実行で処理する Issue は最大 1 件です。systemd timer などから定期的に呼ぶ前提です。
 - **ユーザーの分担**（D3）：
@@ -146,7 +146,8 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 1. **Issue を選ぶ**：対象は、open で、`kagari:approved` が付いていて、running / implemented / reviewed / blocked のどれも付いていない Issue です（PR は除きます）。その中で作成日時が最も古い 1 件を選びます。
 2. **処理を始める前に確かめる**：次のどれかに当たる場合は、`blocked` を付けて理由をコメントし、そこで終わります。
    - timeline の最後の `labeled` イベントで `kagari:approved` を付けた actor が、許可リストに含まれない。
-   - Issue 本文を最後に編集した時刻（GraphQL の `lastEditedAt`）が、その `labeled` イベントより後である。承認した内容と違う本文で動かないためです（#422）。本文を確かめたうえで、`kagari:approved` を外して付け直すと、新しい時刻で比べるので処理が進みます。   - テストコマンドが見つからない。
+   - Issue 本文を最後に編集した時刻（GraphQL の `lastEditedAt`）が、その `labeled` イベントより後である。承認した内容と違う本文で動かないためです（#422）。本文を確かめたうえで、`kagari:approved` を外して付け直すと、新しい時刻で比べるので処理が進みます。
+   - テストコマンドが見つからない。
 3. **ロックを取る**：`kagari:running` を付けます。
 4. **worktree を用意する**：`kagari/issue-N` の open な PR が既にあれば、PR を増やさずに `blocked` にします。その PR のテストを確かめ直していないので、`implemented` にはしません。やり直す場合は、PR を close し、ブランチを削除してください。PR が無い場合は、次のように準備します。
    - `<workdir>/repos/O__R` を clone します。既にあれば fetch します。
