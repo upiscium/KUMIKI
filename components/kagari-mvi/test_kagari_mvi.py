@@ -297,6 +297,12 @@ class RunOnceTest(unittest.TestCase):
         self.assertIn("`.github/workflows/x.yml`", comment)
         self.assertNotIn("ci.yml", comment)
 
+    def test_allowed_protected(self):
+        body = ("### Protected files to change\n- `CLAUDE.md` — 理由\n* ./.claude/\n- /AGENTS.md\n"
+                "### テストコマンド\n- not.this\n")
+        self.assertEqual(ex.allowed_protected(body), ["CLAUDE.md", ".claude/", "AGENTS.md"])
+        self.assertEqual(ex.allowed_protected("no heading\n- CLAUDE.md\n"), [])
+
     def test_protected_paths(self):
         changed = ["AGENTS.md", "pkg/CLAUDE.local.md", "a/.claude/settings.json", ".claude/x",
                    ".github/workflows/ci.yml", "src/claude.md", "docs/.github/workflows/x",

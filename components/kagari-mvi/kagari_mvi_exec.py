@@ -49,7 +49,7 @@ AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worke
 - You may run shell commands (build, lint, tests). Do not commit: the host commits
   and opens the pull request for you.
 - The host denies network and credential commands (curl, wget, gh, git push, ssh, sudo, ...).
-- Do not change CLAUDE.md, AGENTS.md, `.claude/` or `.github/workflows/` unless the Issue
+- Do not change CLAUDE.md, CLAUDE.local.md, AGENTS.md, `.claude/` or `.github/workflows/` unless the Issue
   lists the path under `### 変更する保護ファイル`. Other changes there stop the run before push.
 - The Issue's test command, which the host re-runs to decide the result: {test}
 - End your last message with one line: `status: COMPLETED` if the Issue is done and the
@@ -291,8 +291,8 @@ def acceptance_criteria(body: Optional[str]) -> List[str]:
 
 def allowed_protected(body: Optional[str]) -> List[str]:
     """Protected paths the approved Issue lets Claude change; a trailing `/` covers a directory."""
-    items = [item.strip("`") for item in section_items(body, ALLOWED_HEADING)]
-    return [item[2:] if item.startswith("./") else item for item in items]
+    paths = [re.match(r"`([^`]+)`|(\S+)", item) for item in section_items(body, ALLOWED_HEADING)]
+    return [re.sub(r"^(\./|/)+", "", match.group(1) or match.group(2)) for match in paths if match]
 
 
 def section_items(body: Optional[str], pattern: "re.Pattern[str]") -> List[str]:
