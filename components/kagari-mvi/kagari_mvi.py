@@ -9,6 +9,7 @@ This file holds the GitHub side; kagari_mvi_exec.py runs the agent, tests and co
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -69,13 +70,27 @@ def select_issue(issues: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return oldest([issue for issue in issues if is_candidate(issue)])
 
 
-def approval_actor(events: List[Dict[str, Any]]) -> Optional[str]:
-    """Login of the actor of the last `labeled` event for kagari:approved."""
-    actor = None
+def last_approval(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The last `labeled` event for kagari:approved ({} if none)."""
+    found: Dict[str, Any] = {}
     for event in events:
         if event.get("event") == "labeled" and (event.get("label") or {}).get("name") == APPROVED:
-            actor = (event.get("actor") or {}).get("login")
-    return actor
+            found = event
+    return found
+
+
+def approval_actor(events: List[Dict[str, Any]]) -> Optional[str]:
+    """Login of the actor of the last `labeled` event for kagari:approved."""
+    return (last_approval(events).get("actor") or {}).get("login")
+
+
+def check_body_unchanged(edited_at: Optional[str], approved_at: Optional[str]) -> Optional[str]:
+    """None if the body was not edited after approval, else the reason to block (#422)."""
+    when = lambda value: datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))  # noqa: E731
+    if edited_at is None or (approved_at is not None and when(edited_at) <= when(approved_at)):
+        return None
+    return ("The Issue body was edited after `%s` was added (edited %s, approved %s). Check the "
+            "body, then remove and add `%s` again." % (APPROVED, edited_at, approved_at, APPROVED))
 
 
 def check_actor(actor: Optional[str], allowed: Sequence[str]) -> Optional[str]:
@@ -116,6 +131,15 @@ class Worker(AgentSteps):
             stdin = json.dumps(body)
         out = self.run(args, input=stdin)
         return json.loads(out) if out.strip() else None
+
+    def body_edited_at(self, number: int) -> Optional[str]:
+        """lastEditedAt of the Issue body. REST has no edit time, so GraphQL here only (#422)."""
+        owner, name = self.repo.split("/")
+        out = self.run(["gh", "api", "--method", "POST", "-H", "Accept: application/vnd.github+json",
+                        "graphql", "-f", "query=query($o:String!,$n:String!,$i:Int!){repository("
+                        "owner:$o,name:$n){issue(number:$i){lastEditedAt}}}",
+                        "-F", "o=" + owner, "-F", "n=" + name, "-F", "i=%d" % number])
+        return json.loads(out)["data"]["repository"]["issue"]["lastEditedAt"]
 
     def api_text(self, path: str, accept: str) -> str:
         return self.run(["gh", "api", "--method", "GET", "-H", "Accept: " + accept, path])
@@ -238,6 +262,9 @@ class Worker(AgentSteps):
 
         events = self.api_pages(self.repo_path("/issues/%d/timeline" % number))
         reason = check_actor(approval_actor(events), allowed)
+        if reason is None:
+            reason = check_body_unchanged(self.body_edited_at(number),
+                                          last_approval(events).get("created_at"))
         test = test_command(issue.get("body"))
         if reason is None and test is None:
             reason = ("The Issue body has no test command. Add a `### テストコマンド` "
