@@ -12,7 +12,7 @@ KUMIKI（組木）/ KAGARI（篝）の合意済み設計判断を記録します
 | [0006 — Claude主体の実行構成とv3廃止](0006-claude-primary-execution-topology.md) | Accepted (PR #392, 2026-11-09); addendum 2026-11-09; D8 は ADR-0009 で置き換え | 実行構成・host所有のMain・Ask二分類・Leaf実行・承認ラベル・v3廃止・次期リリース条件（ADR-0009 で置き換え） |
 | [0007 — Issue起点の最小E2E経路（MVI walking skeleton）](0007-mvi-walking-skeleton.md) | Accepted (2026-11-11); I-1〜I-3 実装済み、E2E-MVI-01 実施済み、D7 追補 (2026-11-12)、D2/D2a は ADR-0008 で決定、LXC は実機確認に限る（ADR-0009） | ADR-0006 D8より先に通す最小経路・ラベル状態機械・LXC/ユーザー分離・W1〜W5凍結（ADR-0008 で処置）・実装で確定した起動設定と権限 |
 | [0008 — MVI を正とし、D8 経路の部品は必要時に取り込む](0008-mvi-mainline-and-d8-parts.md) | Accepted (2026-11-12); リリース定義と D4 の前提条件は ADR-0009 | 正とする経路・部品の取り込み規則・W1〜W5 の処置・KUMIKI を対象にする前提条件・設計者の役割 |
-| [0009 — KAGARI の責任範囲と v0.2 系](0009-kagari-responsibility-and-v02.md) | Accepted (2026-11-13) | 責任を持つ範囲（人間の関門・GitHub 資格情報の分離・誤操作の防止・検証）と持たない範囲・ユーザー分離だけの実行環境・v0.1 資産の扱い・v0.2.0 の条件・#337/#391 の扱い |
+| [0009 — KAGARI の責任範囲と v0.2 系](0009-kagari-responsibility-and-v02.md) | Accepted (2026-11-13); 追補 2026-11-14（dispatch 経路は凍結、二重取得は確認済み、OAuth は保留） | 責任を持つ範囲（人間の関門・GitHub 資格情報の分離・誤操作の防止・検証）と持たない範囲・ユーザー分離だけの実行環境・v0.1 資産の扱い・v0.2.0 の条件・#337/#391 の扱い |
 
 **Decision tracking:** [Issue #254](https://github.com/upiscium/KUMIKI/issues/254)。既存の v4 [Issue #189](https://github.com/upiscium/KUMIKI/issues/189)、KUMIKI/KAGARI 改名 [#242](https://github.com/upiscium/KUMIKI/issues/242)、#221 / Draft PR #224、#250 と整合させる。
 
