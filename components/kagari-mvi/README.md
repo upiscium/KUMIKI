@@ -140,6 +140,7 @@ just mvi::ensure-labels OWNER/REPO   # 5 つのラベルを作る（既にあれ
 just mvi::run-once OWNER/REPO        # 承認された Issue を最大 1 件処理する
 just mvi::run-once OWNER/REPO --agent-config-dir DIR   # 追加の引数は kagari_mvi.py に渡る
 just mvi::review-once OWNER/REPO     # implemented の Issue の PR を最大 1 件レビューする
+just mvi::review-once OWNER/REPO --reviewer tsumgi   # レビューを TSUMGI（別系統のモデル）で行う
 just mvi::test                       # 単体テスト（gh・git・sudo は偽物に差し替える）
 ```
 
@@ -230,6 +231,11 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - そのほかの起動設定は、実装と同じです（`--permission-prompts none`、MCP は空、subagent の深さは 1）。
    - 規則：受入条件ごとに `AC<n>: PASS|FAIL|UNKNOWN — 根拠（file:line）` を 1 行ずつ出力し、根拠が足りなければ UNKNOWN にします。
    - 記録は `<workdir>/logs/issue-N-review.jsonl` に残します。
+   - **`--reviewer tsumgi` の場合**：Claude は起動せず、runner が TSUMGI（`https://tsumgi.arc.upiscium.dev/v1`、モデル `qwen3.6-35b-a3b`）の chat completions API に 1 回だけ問い合わせます（`curl`）。実装者（Claude）と別系統のモデルでレビューするためです（ADR-0007 D6、ADR-0009 D4 の条件 2）。
+     - 渡すのは、上の 3 つの入力（受入条件、差分、テスト結果）だけです。TSUMGI はファイルを読めないので、根拠は差分とテスト結果の中から示します。差分の外にあるファイルを根拠にする受入条件は、UNKNOWN になりやすくなります。
+     - TSUMGI の入力は約 1 万トークンまでです。入力が 24,000 バイトを超える PR は送らず、すべての受入条件を UNKNOWN にして、コメントに「too large for TSUMGI」と書きます。差分は切り詰めません。
+     - TSUMGI が応答しない、エラーを返す、などの場合も、すべての受入条件を UNKNOWN にし、「reviewer session: ended with an error」と記録して `reviewed` を付けます。
+     - OpenCode は使いません。OpenCode が付け足す指示文だけで約 9,000 トークンになり、TSUMGI の上限を超えるためです（2026-11-14 に確認）。
 5. **PR にコメントする**：受入条件ごとの判定と根拠を表にして、PR にコメントします。コメントには、レビューした commit と、PASS 以外の件数も入れます。判定の行が無い受入条件は UNKNOWN と表示します。
 6. **ラベルを付ける**：判定の結果にかかわらず、`kagari:reviewed` を付けてから `running` を外します。merge するかどうかは User が決めます。
 
@@ -250,7 +256,7 @@ KAGARI が責任を持たないもの（上の「KAGARI が責任を持つこと
 - **残るプロセス**：Claude とテストは、sudo の内側で `timeout -k` によって時間を区切ります。テストの前には `kill -1` でプロセスを止めます。ただし、cron・at・`systemd-run --user` で後から起動するプロセスは止められません。そうしたプロセスがテストの最中に `.verify` を書き換えることは、防げていません。
 - **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。KAGARI は、`.github/workflows/` の変更は push せずに止めますが、既存のワークフローが Claude のコードを実行することは防ぎません。これは target リポジトリの設定の問題です。secrets があるリポジトリを対象にする場合は、fork からの PR と同じ扱い（secrets を渡さない、承認してから実行する）になるよう、ワークフローを設定してください。
 - **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。レビュー用の `issue-N.review` も同じです。これは処理を止めるだけで、権限の昇格にはつながりません。
-- **レビューの独立性**：レビュアーは実装者と同じモデル系統です（ADR-0007 D6）。受入条件と差分は Issue と PR から取るので、その文面でレビュアーを誘導することもできます。レビューの結果は参考として扱い、merge は User が判断してください。
+- **レビューの独立性**：既定のレビュアーは、実装者と同じモデル系統です（ADR-0007 D6）。`--reviewer tsumgi` では別系統になりますが、ファイルを読めず、大きな PR はレビューできません。受入条件と差分は Issue と PR から取るので、その文面でレビュアーを誘導することもできます。レビューの結果は参考として扱い、merge は User が判断してください。
 - **レビュアーの起動の乗っ取り**：レビュアーは実装者と同じ `kagari-agent` で、ログインシェルから起動します。そのため、実装者が Bash で `~/.profile` の PATH や、`kagari-agent` の home に置いた `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがあります（未確認）。`claude` を root が所有する場所に入れ、`--claude` に絶対パスを渡せば、指定したパスの本体がすり替わることは防げます。ただし、`~/.profile` はシェルスクリプトなので、その内容（環境変数の設定や、`exec` による別のプログラムへの置き換え、PATH から探す `timeout` や `node` の差し替えなど）による介入は残ります。レビューをログインシェルなしで起動すれば防げると考えていますが、未確認です。実装者と別のユーザーでレビューする方法は、2 周目で扱います。
 - **レビュー後の変更**：`reviewed` を付けた後に PR へ commit を足しても、もう一度はレビューしません。やり直す場合は、`kagari:reviewed` を外してください。
 - **一覧への反映の遅れ**：承認した直後の実行では、Issue が選ばれないことがあります。ラベルで絞り込む一覧 API への反映が遅れるためと推測しています。次の実行で拾われます。

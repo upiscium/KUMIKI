@@ -35,6 +35,9 @@ PROTECTED_GLOBS = tuple("**/" + name for name in INSTRUCTION_FILES) + (
     "**/.claude/**", ".github/workflows/**")
 REVIEW_TOOLS = "Read,Grep,Glob"  # no Bash, no editing, no Web (I-3)
 MAX_DIFF_CHARS = 200_000
+# TSUMGI accepts about 10k input tokens (65,536 request bytes); a larger PR is not sent.
+TSUMGI_MAX_BYTES = 24_000
+TSUMGI_URL, TSUMGI_MODEL = "https://tsumgi.arc.upiscium.dev/v1", "qwen3.6-35b-a3b"
 AGENT_TIMEOUT = 3600
 TEST_TIMEOUT = 1800
 AGENT_SCRIPT = 'cd "$1" && umask 002 && shift && exec "$@"'
@@ -192,13 +195,39 @@ class AgentSteps:
                                     "deny": ["Bash", "Edit", "Write", "NotebookEdit", "Agent",
                                              "WebFetch", "WebSearch"]},
                     "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"}}
-        if len(diff) > MAX_DIFF_CHARS:
+        if len(diff) > MAX_DIFF_CHARS and self.reviewer == "claude":
             diff = diff[:MAX_DIFF_CHARS] + "\n[diff truncated; read the files for the rest]\n"
         prompt = ("Acceptance criteria:\n%s\n\nRunner test result:\n%s\n\nPR diff:\n%s\n" % (
             "\n".join("AC%d: %s" % (i, c) for i, c in enumerate(criteria, start=1)),
             test_report, diff))
+        if self.reviewer == "tsumgi":
+            return self.run_tsumgi_review(criteria, prompt)
         outcome = self.launch_claude(workdir, review_dir, "issue-%d-review" % number, REVIEW_TOOLS,
-                                     settings, REVIEW_RULES, prompt)
+                                     settings, REVIEW_RULES.format(access="The current directory is "
+                                     "a checkout of the PR head; you may only read it."), prompt)
+        outcome["verdicts"] = review_verdicts(outcome["text"], len(criteria))
+        outcome["reviewer"] = ("new `claude -p` session, tools %s only; same model family as the "
+                               "implementer" % REVIEW_TOOLS)
+        return outcome
+
+    def run_tsumgi_review(self, criteria: List[str], prompt: str) -> Dict[str, Any]:
+        """One chat request to TSUMGI, a model family other than the implementer's (ADR-0007 D6)."""
+        outcome: Dict[str, Any] = {"errored": True, "denials": 0, "text": "", "reviewer": "TSUMGI "
+                                   "`%s`, diff and test result only" % TSUMGI_MODEL}
+        body = {"model": TSUMGI_MODEL, "temperature": 0, "max_tokens": 1024, "messages": [
+            {"role": "system", "content": REVIEW_RULES.format(access="You cannot read files.")},
+            {"role": "user", "content": prompt}]}
+        size = len(prompt.encode("utf-8"))
+        try:
+            if size > TSUMGI_MAX_BYTES:  # not sent: every verdict becomes UNKNOWN
+                raise ValueError("the PR is too large for TSUMGI (%d bytes)" % size)
+            out = self.run(["curl", "-sS", "--fail-with-body", "-m", "300", "-H", "Content-Type: "
+                            "application/json", "--data-binary", "@-", TSUMGI_URL + "/chat/completions"],
+                           input=json.dumps(body))
+            text = json.loads(out)["choices"][0]["message"]["content"] or ""
+            outcome.update(errored=False, text=re.sub(r"(?s)<think>.*?</think>", "", text))
+        except (CommandError, ValueError, KeyError, IndexError, TypeError) as error:
+            outcome["reviewer"] += "; %s" % str(error).splitlines()[0][:200]
         outcome["verdicts"] = review_verdicts(outcome["text"], len(criteria))
         return outcome
 
@@ -270,7 +299,7 @@ class AgentSteps:
 
 REVIEW_RULES = """You are an independent reviewer of one pull request (KAGARI MVI).
 - You get the Issue's acceptance criteria, the PR diff and the runner's test result.
-  The current directory is a checkout of the PR head; you may only read it.
+  {access}
 - Judge each criterion on evidence in the diff, the files and the test result. If the
   evidence is missing or unclear, answer UNKNOWN rather than PASS.
 - Output exactly one line per criterion, in order:
@@ -321,11 +350,10 @@ def review_report(head: str, criteria: List[str], outcome: Dict[str, Any], fresh
     rows = ["| AC%d | %s | **%s** | %s |" % (i, cell(c), status, cell(evidence))
             for i, (c, (status, evidence)) in enumerate(zip(criteria, verdicts), start=1)]
     failing = sum(1 for status, _ in verdicts if status != "PASS")
-    return ("kagari-mvi: independent review (new `claude -p` session, tools %s only; same "
-            "model family as the implementer, ADR-0007 D6).\n\n- reviewed head: `%s`\n"
+    return ("kagari-mvi: independent review (%s, ADR-0007 D6).\n\n- reviewed head: `%s`\n"
             "- not PASS: %d of %d\n- permission denials: %d\n- reviewer session: %s\n"
             "- runner test result: %s\n\n| # | 受入条件 | 判定 | 根拠 |\n| --- | --- | --- | --- |\n%s\n"
-            % (REVIEW_TOOLS, head, failing, len(verdicts), denials,
+            % (outcome["reviewer"], head, failing, len(verdicts), denials,
                "ended with an error" if outcome["errored"] else "ok",
                "for this head" if fresh else "missing or for another commit (not evidence)",
                "\n".join(rows)))

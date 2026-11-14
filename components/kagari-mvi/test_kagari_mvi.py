@@ -435,6 +435,47 @@ class ReviewOnceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as workdir:
             return mvi.Worker("o/r", run=runner, log=lambda _: None).review_once(workdir)
 
+    def run_tsumgi(self, runner):
+        with tempfile.TemporaryDirectory() as workdir:
+            return mvi.Worker("o/r", run=runner, log=lambda _: None, reviewer="tsumgi").review_once(workdir)
+
+    def test_tsumgi_review_posts_one_request_and_table(self):
+        reply = json.dumps({"choices": [{"message": {
+            "content": "<think>x</think>AC1: PASS — greet.py:1\nAC2: UNKNOWN — no test shown"}}]})
+        runner = FakeRunner(self.routes(), outputs={"chat/completions": reply})
+        self.assertEqual(self.run_tsumgi(runner), 0)
+        self.assertFalse(any("stream-json" in args for args, _, _ in runner.calls))
+        curl = [(args, inp) for args, _, inp in runner.calls if args[0] == "curl"]
+        self.assertEqual(len(curl), 1)
+        self.assertEqual(curl[0][0][-1], ex.TSUMGI_URL + "/chat/completions")
+        body = json.loads(curl[0][1])
+        self.assertEqual(body["model"], ex.TSUMGI_MODEL)
+        self.assertIn("You cannot read files.", body["messages"][0]["content"])
+        self.assertIn("+def greet()", body["messages"][1]["content"])
+        report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
+        self.assertIn("TSUMGI `%s`" % ex.TSUMGI_MODEL, report)
+        self.assertIn("| AC1 | greet() returns Hello | **PASS** | greet.py:1 |", report)
+        self.assertIn("reviewer session: ok", report)
+        self.assertIn(mvi.REVIEWED, runner.added_labels())
+
+    def test_tsumgi_large_pr_is_not_sent_and_unknown(self):
+        routes = self.routes()
+        routes[("DIFF", "repos/o/r/pulls/70")] = "+" + "x" * ex.TSUMGI_MAX_BYTES
+        runner = FakeRunner(routes)
+        self.assertEqual(self.run_tsumgi(runner), 0)
+        self.assertFalse(any(args[0] == "curl" for args, _, _ in runner.calls))
+        report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
+        self.assertIn("too large for TSUMGI", report)
+        self.assertIn("not PASS: 2 of 2", report)
+        self.assertIn("reviewer session: ended with an error", report)
+
+    def test_tsumgi_http_error_is_reported_not_blocked(self):
+        runner = FakeRunner(self.routes(), fail={"chat/completions": '{"code":"context_length_exceeded"}'})
+        self.assertEqual(self.run_tsumgi(runner), 0)
+        report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
+        self.assertIn("reviewer session: ended with an error", report)
+        self.assertIn("not PASS: 2 of 2", report)
+
     def test_review_posts_table_and_marks_reviewed(self):
         runner = FakeRunner(self.routes(), outputs={
             "stream-json": stream("AC1: PASS — greet.py:1\nAC2: FAIL — no test file")})
