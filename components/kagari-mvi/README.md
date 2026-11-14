@@ -146,7 +146,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 1. **Issue を選ぶ**：対象は、open で、`kagari:approved` が付いていて、running / implemented / reviewed / blocked のどれも付いていない Issue です（PR は除きます）。その中で作成日時が最も古い 1 件を選びます。
 2. **処理を始める前に確かめる**：次のどれかに当たる場合は、`blocked` を付けて理由をコメントし、そこで終わります。
    - timeline の最後の `labeled` イベントで `kagari:approved` を付けた actor が、許可リストに含まれない。
-   - Issue 本文を最後に編集した時刻（GraphQL の `lastEditedAt`）が、その `labeled` イベントより後である。承認した内容と違う本文で動かないためです（#422）。本文を確かめたうえで、`kagari:approved` を外して付け直すと、新しい時刻で比べるので処理が進みます。
+   - Issue 本文を最後に編集した時刻（GraphQL の `lastEditedAt`）が、その `labeled` イベントより後である。承認した内容と違う本文で動かないためです（#422）。本文を確かめたうえで、`kagari:approved` を外して付け直すと、新しい時刻で比べるので処理が進みます。Web の画面で付け直すときは、ラベルを外したらメニューをいったん閉じてから、もう一度付けてください。メニューを開いたまま外して付け直すと変更が記録されず、承認の時刻が新しくなりません（sandbox で確認）。
    - テストコマンドが見つからない。
 3. **ロックを取る**：`kagari:running` を付けます。
 4. **worktree を用意する**：`kagari/issue-N` の open な PR が既にあれば、PR を増やさずに `blocked` にします。その PR のテストを確かめ直していないので、`implemented` にはしません。やり直す場合は、PR を close し、ブランチを削除してください。PR が無い場合は、次のように準備します。
