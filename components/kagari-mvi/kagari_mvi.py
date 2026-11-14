@@ -17,8 +17,8 @@ import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from kagari_mvi_exec import (SAFE_GIT, AgentSteps, Blocked, CommandError, Runner,
-                             acceptance_criteria, report, review_report, subprocess_runner, tail,
-                             test_command)
+                             acceptance_criteria, allowed_protected, report, review_report,
+                             subprocess_runner, tail, test_command)
 
 TEST_REPORT_PREFIX = "kagari-mvi: test result recorded by the runner"
 
@@ -292,7 +292,8 @@ class Worker(AgentSteps):
                 stage = "claude"
                 outcome = self.run_agent(workdir, worktree, issue, test)
                 stage = "commit"
-                sha = self.commit_changes(clone, worktree, number)
+                sha, protected = self.commit_changes(clone, worktree, number,
+                                                     allowed_protected(issue.get("body")))
                 if not sha:
                     raise Blocked("Claude made no changes (status: %s)." % outcome["status"])
                 stage = "test"
@@ -303,7 +304,7 @@ class Worker(AgentSteps):
                 stage = "draft-pr"
                 pr = self.create_draft_pr(issue, base)
                 stage = "report"
-                self.comment(pr["number"], report(test, code, output, outcome, sha))
+                self.comment(pr["number"], report(test, code, output, outcome, sha, protected))
                 if code != 0 or not outcome["completed"]:
                     problem = ("Draft PR #%d was created, but status is `%s` and the test "
                                "exit code is %d. See the PR comment." % (

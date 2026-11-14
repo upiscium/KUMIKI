@@ -28,6 +28,11 @@ AGENT_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 # these are denied as a speed bump, not a boundary (python3 -c can still reach the network).
 DENIED_COMMANDS = ("curl", "wget", "gh", "git push", "git remote", "ssh", "scp", "sudo", "su",
                    "nc", "ncat", "socat", "telnet")
+# Changes to these need a human decision (ADR-0009 D1): instruction files and Claude
+# settings at any depth, and CI workflows. The runner checks the commit before pushing.
+INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md")
+PROTECTED_GLOBS = tuple("**/" + name for name in INSTRUCTION_FILES) + (
+    "**/.claude/**", ".github/workflows/**")
 REVIEW_TOOLS = "Read,Grep,Glob"  # no Bash, no editing, no Web (I-3)
 MAX_DIFF_CHARS = 200_000
 AGENT_TIMEOUT = 3600
@@ -44,6 +49,8 @@ AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worke
 - You may run shell commands (build, lint, tests). Do not commit: the host commits
   and opens the pull request for you.
 - The host denies network and credential commands (curl, wget, gh, git push, ssh, sudo, ...).
+- Do not change CLAUDE.md, CLAUDE.local.md, AGENTS.md, `.claude/` or `.github/workflows/` unless the Issue
+  lists the path under `### 変更する保護ファイル`. Other changes there stop the run before push.
 - The Issue's test command, which the host re-runs to decide the result: {test}
 - End your last message with one line: `status: COMPLETED` if the Issue is done and the
   test command passes, otherwise `status: BLOCKED: <reason>`.
@@ -90,6 +97,17 @@ def _command_env() -> Dict[str, str]:
 def tail(text: str) -> str:
     lines = text.strip().splitlines()[-TAIL_LINES:]
     return "\n".join(lines)[-TAIL_CHARS:]
+
+
+def protected_paths(paths: Sequence[str]) -> List[str]:
+    """Changed paths that a human must review before anything is pushed."""
+    return [path for path in paths
+            if path.rsplit("/", 1)[-1] in INSTRUCTION_FILES or ".claude" in path.split("/")
+            or path.startswith(".github/workflows/")]
+
+
+def is_allowed(path: str, allowed: Sequence[str]) -> bool:
+    return any(path == item or (item.endswith("/") and path.startswith(item)) for item in allowed)
 
 
 def test_command(body: Optional[str]) -> Optional[str]:
@@ -150,6 +168,7 @@ class AgentSteps:
     def run_agent(self, workdir: str, worktree: str, issue: Dict[str, Any],
                   test: str) -> Dict[str, Any]:
         number = issue["number"]
+        allowed = allowed_protected(issue.get("body"))
         if os.path.lexists(os.path.join(worktree, ".claude", "settings.local.json")):
             raise Blocked("The repository commits `.claude/settings.local.json`; it would widen "
                           "Claude's permissions (hooks, allow rules, plugins). Remove it to proceed.")
@@ -158,7 +177,9 @@ class AgentSteps:
                                       "Write(/%s/**)" % worktree],
                             "deny": ["Agent", "WebFetch", "WebSearch", "NotebookEdit"] + [
                                 "Bash(%s)" % rule for name in DENIED_COMMANDS
-                                for rule in (name, name + " *")]},
+                                for rule in (name, name + " *")] + [
+                                "%s(/%s/%s)" % (tool, worktree, glob) for tool in ("Edit", "Write")
+                                for glob in PROTECTED_GLOBS if not allowed]},
             "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"},
         }
         prompt = "Issue #%d: %s\n\n%s\n" % (number, issue["title"], issue.get("body") or "")
@@ -208,16 +229,26 @@ class AgentSteps:
             raise CommandError(argv, 1, output)
         return outcome
 
-    def commit_changes(self, clone: str, worktree: str, number: int) -> Optional[str]:
+    def commit_changes(self, clone: str, worktree: str, number: int,
+                       allowed: Sequence[str] = ()) -> Tuple[Optional[str], List[str]]:
+        """(sha, protected paths the Issue allowed); blocks on other protected paths."""
         # Explicit --git-dir: the `.git` file in the worktree is agent-writable.
         git = ["git", "--git-dir", os.path.join(clone, ".git", "worktrees", "issue-%d" % number),
                "--work-tree", worktree] + SAFE_GIT
         self.run(git + ["add", "--all", "--", "."] + ARTIFACTS, cwd=worktree)
-        if not self.run(git + ["diff", "--cached", "--name-only"], cwd=worktree).strip():
-            return None
+        names = self.run(git + ["diff", "--cached", "--name-only", "--no-renames", "-z"],
+                         cwd=worktree).split("\0")
+        if not any(name.strip() for name in names):
+            return None, []
         self.run(git + ["commit", "--no-verify", "-m", "kagari-mvi: implement #%d" % number],
                  cwd=worktree)
-        return self.run(git + ["rev-parse", "HEAD"], cwd=worktree).strip()
+        sha = self.run(git + ["rev-parse", "HEAD"], cwd=worktree).strip()
+        protected = [path for path in protected_paths(names) if not is_allowed(path, allowed)]
+        if protected:
+            raise Blocked("The changes touch files that need a human decision, so nothing was "
+                          "pushed: %s. Commit %s is kept in `%s` for review." % (
+                              ", ".join("`%s`" % path for path in protected), sha, worktree))
+        return sha, protected_paths(names)
 
     def kill_agent_processes(self) -> None:
         # Not under timeout/as_agent: kill(-1) spares only the sending shell, not its parents.
@@ -245,6 +276,8 @@ REVIEW_RULES = """You are an independent reviewer of one pull request (KAGARI MV
 - Output exactly one line per criterion, in order:
   AC<n>: PASS|FAIL|UNKNOWN — <evidence as file:line, or the reason>
 """
+ALLOWED_HEADING = re.compile(r"^#{2,6}[ \t]*(?:変更する保護ファイル|Protected files to change)[ \t]*$",
+                             re.M | re.I)
 CRITERIA_HEADING = re.compile(r"^#{2,6}[ \t]*(?:受入条件|Acceptance criteria)[ \t]*$", re.M | re.I)
 # [^\w\n] / [ \t]: a verdict never spans lines (an empty evidence must not swallow the next line).
 VERDICT_LINE = re.compile(r"^[^\w\n]*AC(\d+)[^\w\n]*?[:：][^\w\n]*(PASS|FAIL|UNKNOWN)\b[*_]*[ \t]*"
@@ -253,7 +286,17 @@ VERDICT_LINE = re.compile(r"^[^\w\n]*AC(\d+)[^\w\n]*?[:：][^\w\n]*(PASS|FAIL|UN
 
 def acceptance_criteria(body: Optional[str]) -> List[str]:
     """List items (`- [ ] ...` or `- ...`) under a `### 受入条件` heading."""
-    heading = CRITERIA_HEADING.search(body or "")
+    return section_items(body, CRITERIA_HEADING)
+
+
+def allowed_protected(body: Optional[str]) -> List[str]:
+    """Protected paths the approved Issue lets Claude change; a trailing `/` covers a directory."""
+    paths = [re.match(r"`([^`]+)`|(\S+)", item) for item in section_items(body, ALLOWED_HEADING)]
+    return [re.sub(r"^(\./|/)+", "", match.group(1) or match.group(2)) for match in paths if match]
+
+
+def section_items(body: Optional[str], pattern: "re.Pattern[str]") -> List[str]:
+    heading = pattern.search(body or "")
     if heading is None:
         return []
     section = re.split(r"^#{1,6}\s", (body or "")[heading.end():], maxsplit=1, flags=re.M)[0]
@@ -293,9 +336,12 @@ def bounded(seconds: int) -> List[str]:
     return ["timeout", "-k", "10", str(seconds)]
 
 
-def report(test: str, code: int, output: str, outcome: Dict[str, Any], sha: str) -> str:
+def report(test: str, code: int, output: str, outcome: Dict[str, Any], sha: str,
+           protected: Sequence[str] = ()) -> str:
+    changed = "".join("- protected file changed (allowed by the Issue): `%s`\n" % path
+                      for path in protected)
     return ("kagari-mvi: test result recorded by the runner (not reported by Claude).\n\n"
-            "- tested commit: `%s`\n" % sha +
+            "- tested commit: `%s`\n" % sha + changed +
             "- test command: `%s` (run by the runner as the agent user)\n- exit code: %d\n"
             "- Claude status: `%s`\n- permission denials: %d\n\n```\n%s\n```" % (
                 test, code, outcome["status"], outcome["denials"],
