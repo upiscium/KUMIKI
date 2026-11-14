@@ -1,6 +1,6 @@
 # ADR-0006: Claude主体の実行構成、host所有のMain、Ask二分類、v3廃止
 
-- **Status:** Accepted — PR #392で2026-11-09にMerge。同日の追補（D4aのプラグイン方針、Follow-upの追記）を含む。D8 の実施経路とリリース定義は ADR-0008 で保留。D5 の設計の場も ADR-0008 で変更。実装 Issue #393〜#397 の処置も ADR-0008
+- **Status:** Accepted — PR #392で2026-11-09にMerge。同日の追補（D4aのプラグイン方針、Follow-upの追記）を含む。D8 の実施経路とリリース定義は ADR-0008 で保留。D5 の設計の場も ADR-0008 で変更。実装 Issue #393〜#397 の処置も ADR-0008。D8 のリリース定義は ADR-0009 D4 で置き換え（v0.2 系は MVI）。D7-3 と Consequences の #337 の行も ADR-0009 D4 で変更
 - **Human decision:** 案Y（Claude主体）を採用。未確定4論点＋同時実行数について推奨案をすべて承認。D8のリリース定義、#291 ACの扱い、v1 metadata経路の採用を承認（いずれも2026-11-09 JST）
 - **Related:** ADR-0001/0004/0005、#291、#340、#292、#339、#288、#359、#317、#364、#337、#256、#194、#197、#142
 - **Supersedes:** 引き継ぎ文書の「OpenCodeがdefault、Claudeは任意executor」という前提、#340の「optional executor」という位置付け、#288の「N/C上限を強制しない」のうちClaudeセッション部分
