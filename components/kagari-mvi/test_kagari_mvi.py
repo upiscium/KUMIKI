@@ -33,8 +33,12 @@ def stream(result, is_error=False, denials=0):
          "permission_denials": [{"tool_name": "Bash"}] * denials}))
 
 
-def labeled(login, name=mvi.APPROVED):
-    return {"event": "labeled", "label": {"name": name}, "actor": {"login": login}}
+def labeled(login, name=mvi.APPROVED, at="2026-11-14T01:00:00Z"):
+    return {"event": "labeled", "label": {"name": name}, "actor": {"login": login}, "created_at": at}
+
+
+def edited(at):
+    return {"data": {"repository": {"issue": {"lastEditedAt": at}}}}
 
 
 class FakeRunner:
@@ -129,6 +133,26 @@ class ActorTest(unittest.TestCase):
         self.assertFalse(any(args[0] == "git" for args, _, _ in runner.calls))
 
 
+    def test_body_edited_after_approval_blocks_before_running(self):
+        runner = FakeRunner({
+            ("GET", "repos/o/r/issues?"): [issue(4, [mvi.APPROVED])],
+            ("GET", "repos/o/r/issues/4/timeline"): [labeled("upiscium", at="2026-11-14T01:00:00Z")],
+            ("POST", "graphql"): edited("2026-11-14T01:00:05Z"),
+        })
+        code = mvi.Worker("o/r", run=runner, log=lambda _: None).run_once(["upiscium"], "/nonexistent")
+        self.assertEqual(code, 0)
+        self.assertEqual(runner.added_labels(), [mvi.BLOCKED])
+        self.assertIn("edited after", runner.api_calls("POST", "repos/o/r/issues/4/comments")[0]["body"])
+        self.assertFalse(any(args[0] in ("git", "sudo") for args, _, _ in runner.calls))
+
+    def test_check_body_unchanged(self):
+        approved = "2026-11-14T01:00:00Z"
+        self.assertIsNone(mvi.check_body_unchanged(None, approved))
+        self.assertIsNone(mvi.check_body_unchanged("2026-11-14T00:59:59Z", approved))
+        self.assertIsNotNone(mvi.check_body_unchanged("2026-11-14T01:00:01Z", approved))
+        self.assertIsNotNone(mvi.check_body_unchanged("2026-11-14T00:00:00Z", None))
+
+
 class ParseTest(unittest.TestCase):
     def test_test_command_heading_and_fence(self):
         self.assertEqual(mvi.test_command(TEST_BODY % 1), "python3 -m unittest")
@@ -160,6 +184,7 @@ class RunOnceTest(unittest.TestCase):
             ("GET", "repos/o/r/labels"): [],
             ("POST", "repos/o/r/pulls"): {"number": 70, "html_url": "https://x/pull/70"},
             ("GET", "repos/o/r"): {"default_branch": "main"},
+            ("POST", "graphql"): edited(None),
         }
 
     def run_worker(self, runner, workdir=None):

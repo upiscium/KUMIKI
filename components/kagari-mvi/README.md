@@ -2,7 +2,7 @@
 
 ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります（`run-once`）。Draft PR ができた Issue は、別の Claude セッションが受入条件ごとにレビューします（`review-once`）。
 
-- **構成**：本体は 2 ファイルで、合わせて 700 行以内に保ちます（User 判断 2026-11-11。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は使いません。
+- **構成**：本体は 2 ファイルで、合わせて 800 行以内に保ちます（User 判断 2026-11-11 の 700 行を、2026-11-14 に変更。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は、Issue 本文を最後に編集した時刻を取る 1 か所だけで使います（REST では取れないため。User 判断 2026-11-14）。
 - **状態の持ち方**：状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata にも依存しません。
 - **実行の単位**：1 回の実行で処理する Issue は最大 1 件です。systemd timer などから定期的に呼ぶ前提です。
 - **ユーザーの分担**（D3）：
@@ -144,8 +144,9 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 ## `run-once` の動作
 
 1. **Issue を選ぶ**：対象は、open で、`kagari:approved` が付いていて、running / implemented / reviewed / blocked のどれも付いていない Issue です（PR は除きます）。その中で作成日時が最も古い 1 件を選びます。
-2. **処理を始める前に確かめる**：次のどちらかに当たる場合は、`blocked` を付けて理由をコメントし、そこで終わります。
+2. **処理を始める前に確かめる**：次のどれかに当たる場合は、`blocked` を付けて理由をコメントし、そこで終わります。
    - timeline の最後の `labeled` イベントで `kagari:approved` を付けた actor が、許可リストに含まれない。
+   - Issue 本文を最後に編集した時刻（GraphQL の `lastEditedAt`）が、その `labeled` イベントより後である。承認した内容と違う本文で動かないためです（#422）。本文を確かめたうえで、`kagari:approved` を外して付け直すと、新しい時刻で比べるので処理が進みます。Web の画面で付け直すときは、ラベルを外したらメニューをいったん閉じてから、もう一度付けてください。メニューを開いたまま外して付け直すと変更が記録されず、承認の時刻が新しくなりません（sandbox で確認）。
    - テストコマンドが見つからない。
 3. **ロックを取る**：`kagari:running` を付けます。
 4. **worktree を用意する**：`kagari/issue-N` の open な PR が既にあれば、PR を増やさずに `blocked` にします。その PR のテストを確かめ直していないので、`implemented` にはしません。やり直す場合は、PR を close し、ブランチを削除してください。PR が無い場合は、次のように準備します。
@@ -209,7 +210,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 ### 既知の限界（MVI の範囲外）
 
 - **止まった Issue**：`running` が付いたまま止まった Issue は、自動では復旧しません。
-- **承認後の本文の変更**：承認した後に Issue 本文が変わっても、検知しません。
+- **承認と編集がほぼ同時の場合**：本文の編集と承認が同じ秒に起きた場合は、編集が先とみなして処理を進めます。比べるのは本文だけで、タイトルとコメントの変更は見ません（コメントは Claude に渡しません）。
 - **残ったブランチ**：PR を作る前に失敗した後で再実行すると、remote に `kagari/issue-N` が残っている場合があります。そのときは push が non-fast-forward で拒否され、`blocked` になります。force push はしません。再実行する前に、そのブランチを削除してください。
 - **target リポジトリの設定**：`--restricted` により、target リポジトリの設定ファイルは読み込みません。`.claude/settings.local.json` を commit しているリポジトリは対象にできません。target リポジトリの `CLAUDE.md` が読み込まれるかどうかは、未確認です。
 - **Bash の広さ**：Bash は原則として許可しているので、拒否リストは回り道で越えられます。たとえば `python3 -c` でネットワークに接続できます。`env curl`、`/usr/bin/curl`、`bash -c "curl …"` のように書き方を変えた場合に拒否されるかは、Claude Code の照合の実装しだいで、未確認です。Claude は `kagari-agent` の Claude 資格情報（`~/.claude/.credentials.json`）を読めるので、Issue 本文で誘導されると、その資格情報を外部へ送られるおそれがあります。外部の人が作った Issue を承認するときは、本文を確認してください。
