@@ -120,8 +120,7 @@ class Worker(AgentSteps):
         self.log = log
         self.agent_user = agent_user
         self.claude = claude
-        self.agent_config_dir = agent_config_dir
-        self.reviewer = reviewer
+        self.agent_config_dir, self.reviewer = agent_config_dir, reviewer
 
     # --- GitHub REST via `gh api` -------------------------------------------
     def api(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Any:
@@ -405,8 +404,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("created: %s" % (", ".join(created) if created else "(none)"))
             return 0
         worker = Worker(args.repo, agent_user=args.agent_user, claude=args.claude,
-                        agent_config_dir=args.agent_config_dir,
-                        reviewer=getattr(args, "reviewer", "claude"))
+                        agent_config_dir=args.agent_config_dir, reviewer=getattr(args, "reviewer", "claude"))
         if args.command == "review-once":
             return worker.review_once(os.path.abspath(args.workdir))
         allowed = [name.strip() for value in args.allow_actor for name in value.split(",")

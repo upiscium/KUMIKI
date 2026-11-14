@@ -475,6 +475,16 @@ class ReviewOnceTest(unittest.TestCase):
         report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
         self.assertIn("reviewer session: ended with an error", report)
         self.assertIn("not PASS: 2 of 2", report)
+        self.assertIn("context_length_exceeded", report)  # TSUMGI's error body, not only curl's
+        self.assertIn(mvi.REVIEWED, runner.added_labels())
+
+    def test_tsumgi_cut_off_or_unclosed_reasoning_is_not_a_verdict(self):
+        for choice in ({"finish_reason": "length", "message": {"content": "AC1: PASS — x"}},
+                       {"finish_reason": "stop", "message": {"content": "<think>AC1: PASS — draft"}}):
+            runner = FakeRunner(self.routes(), outputs={"chat/completions": json.dumps({"choices": [choice]})})
+            self.assertEqual(self.run_tsumgi(runner), 0)
+            report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
+            self.assertIn("not PASS: 2 of 2", report)
 
     def test_review_posts_table_and_marks_reviewed(self):
         runner = FakeRunner(self.routes(), outputs={

@@ -214,20 +214,22 @@ class AgentSteps:
         """One chat request to TSUMGI, a model family other than the implementer's (ADR-0007 D6)."""
         outcome: Dict[str, Any] = {"errored": True, "denials": 0, "text": "", "reviewer": "TSUMGI "
                                    "`%s`, diff and test result only" % TSUMGI_MODEL}
-        body = {"model": TSUMGI_MODEL, "temperature": 0, "max_tokens": 1024, "messages": [
+        body = {"model": TSUMGI_MODEL, "temperature": 0, "max_tokens": 2048, "messages": [
             {"role": "system", "content": REVIEW_RULES.format(access="You cannot read files.")},
             {"role": "user", "content": prompt}]}
-        size = len(prompt.encode("utf-8"))
         try:
-            if size > TSUMGI_MAX_BYTES:  # not sent: every verdict becomes UNKNOWN
-                raise ValueError("the PR is too large for TSUMGI (%d bytes)" % size)
+            if len(prompt.encode()) > TSUMGI_MAX_BYTES:  # not sent: every verdict becomes UNKNOWN
+                raise ValueError("the PR is too large for TSUMGI (%d bytes)" % len(prompt.encode()))
             out = self.run(["curl", "-sS", "--fail-with-body", "-m", "300", "-H", "Content-Type: "
                             "application/json", "--data-binary", "@-", TSUMGI_URL + "/chat/completions"],
-                           input=json.dumps(body))
-            text = json.loads(out)["choices"][0]["message"]["content"] or ""
-            outcome.update(errored=False, text=re.sub(r"(?s)<think>.*?</think>", "", text))
+                           input=json.dumps(body, ensure_ascii=False))
+            choice = json.loads(out)["choices"][0]
+            if choice.get("finish_reason") == "length":  # cut off: a draft verdict is not a verdict
+                raise ValueError("TSUMGI stopped at max_tokens")
+            text = (choice["message"]["content"] or "").rsplit("</think>", 1)[-1]  # drop reasoning
+            outcome.update(errored=False, text="" if "<think>" in text else text)
         except (CommandError, ValueError, KeyError, IndexError, TypeError) as error:
-            outcome["reviewer"] += "; %s" % str(error).splitlines()[0][:200]
+            outcome["reviewer"] += "; " + " ".join((getattr(error, "output", "") or str(error)).split())[:200]
         outcome["verdicts"] = review_verdicts(outcome["text"], len(criteria))
         return outcome
 

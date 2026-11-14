@@ -234,7 +234,8 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - **`--reviewer tsumgi` の場合**：Claude は起動せず、runner が TSUMGI（`https://tsumgi.arc.upiscium.dev/v1`、モデル `qwen3.6-35b-a3b`）の chat completions API に 1 回だけ問い合わせます（`curl`）。実装者（Claude）と別系統のモデルでレビューするためです（ADR-0007 D6、ADR-0009 D4 の条件 2）。
      - 渡すのは、上の 3 つの入力（受入条件、差分、テスト結果）だけです。TSUMGI はファイルを読めないので、根拠は差分とテスト結果の中から示します。差分の外にあるファイルを根拠にする受入条件は、UNKNOWN になりやすくなります。
      - TSUMGI の入力は約 1 万トークンまでです。入力が 24,000 バイトを超える PR は送らず、すべての受入条件を UNKNOWN にして、コメントに「too large for TSUMGI」と書きます。差分は切り詰めません。
-     - TSUMGI が応答しない、エラーを返す、などの場合も、すべての受入条件を UNKNOWN にし、「reviewer session: ended with an error」と記録して `reviewed` を付けます。
+     - TSUMGI が応答しない、エラーを返す、出力の上限（2,048 トークン）で途中で切れた、推論（`<think>`）が閉じていない、などの場合も、すべての受入条件を UNKNOWN にし、「reviewer session: ended with an error」と記録して `reviewed` を付けます。
+     - レビュー用の checkout（手順 3）は、TSUMGI では使いませんが、Claude のときと同じく作ります。
      - OpenCode は使いません。OpenCode が付け足す指示文だけで約 9,000 トークンになり、TSUMGI の上限を超えるためです（2026-11-14 に確認）。
 5. **PR にコメントする**：受入条件ごとの判定と根拠を表にして、PR にコメントします。コメントには、レビューした commit と、PASS 以外の件数も入れます。判定の行が無い受入条件は UNKNOWN と表示します。
 6. **ラベルを付ける**：判定の結果にかかわらず、`kagari:reviewed` を付けてから `running` を外します。merge するかどうかは User が決めます。
