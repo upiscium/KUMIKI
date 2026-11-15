@@ -10,6 +10,7 @@ ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件
   - `kagari-agent`（Claude の資格情報だけを持つ）が、Claude とテストコマンドを動かします。
   - git の commit と push は `kagari-runner` が行います。
 - **1 つのホストに 1 つの KAGARI**：複数のリポジトリを、同じホストの 1 つの KAGARI で扱います。worktree・レビュー用の checkout・記録は `<workdir>/wt/<owner>__<repo>/`・`<workdir>/logs/<owner>__<repo>/` のようにリポジトリごとに分けるので、別のリポジトリに同じ番号の Issue があってもぶつかりません。ただし、`run-once` と `review-once` は、同じホストで同時に動かさないでください。テストの前に `kagari-agent` のプロセスをすべて止めるので、もう一方の実行を止めてしまいます（リポジトリを順に回す 1 つの timer で動かす）。
+  - **古い置き場所からの移行**：この変更より前に作った `<workdir>/wt/issue-N` の worktree は、clone に登録されたまま残ります。残っていると、同じ番号の Issue を処理するときに新しい場所で worktree を作れず、止まります。移行するときに、リポジトリごとに一度だけ消してください（`kagari-runner` として、`for w in /srv/kagari/wt/issue-*; do git -C /srv/kagari/repos/O__R worktree remove --force "$w"; done; git -C /srv/kagari/repos/O__R worktree prune`。消えずに残ったディレクトリは `rm -rf` してから `prune` する）。
 - **実行環境の前提**：同じホスト上の OS のユーザー分離（上の 2 ユーザー）だけです。2 つのユーザーは KAGARI 専用にしてください。LXC は MVI の実機確認に使った環境で、必須ではありません（ADR-0009 D2）。
 
 ## KAGARI が責任を持つこと（ADR-0009 D1）
@@ -257,7 +258,7 @@ KAGARI が責任を持たないもの（上の「KAGARI が責任を持つこと
 - **設定ファイルと git の関連ファイル**：`--restricted` の下では、設定・git・ツール設定のファイルを Edit や Write で書くには承認が必要です。`--permission-prompts none` なので、その操作は自動で拒否されます。そのため、`.gitignore` や `.github/` などを変える Issue では、Claude が Bash で書くか、`BLOCKED` で終わります。保護するファイルを Bash で書いた場合は、commit の段階で止まります。どのファイルが対象になるかは、未確認です。`--restricted` は local の設定ファイルも読まないので、Claude が `.claude/settings.local.json` を書いても権限は広がらないと推測しています（CLI の help の記述による。実機では未確認）。書かれたファイルは PR の差分に入ります。
 - **残るプロセス**：Claude とテストは、sudo の内側で `timeout -k` によって時間を区切ります。テストの前には `kill -1` でプロセスを止めます。ただし、cron・at・`systemd-run --user` で後から起動するプロセスは止められません。そうしたプロセスがテストの最中に `.verify` を書き換えることは、防げていません。
 - **GitHub Actions**：runner が push すると、target リポジトリの `push` / `pull_request` のワークフローが動きます。そのワークフローは、Claude が書いたコードを、GITHUB_TOKEN と secrets を使える状態で実行できます。KAGARI は、`.github/workflows/` の変更は push せずに止めますが、既存のワークフローが Claude のコードを実行することは防ぎません。これは target リポジトリの設定の問題です。secrets があるリポジトリを対象にする場合は、fork からの PR と同じ扱い（secrets を渡さない、承認してから実行する）になるよう、ワークフローを設定してください。
-- **worktree の先取り**：`kagari-agent` は `wt/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。レビュー用の `issue-N.review` も同じです。これは処理を止めるだけで、権限の昇格にはつながりません。
+- **worktree の先取り**：`kagari-agent` は `wt/<owner>__<repo>/` に書き込めるので、ほかの Issue の worktree の場所に、先にディレクトリを作れます。その Issue は処理するときに `blocked` になります。レビュー用の `issue-N.review` も同じです。これは処理を止めるだけで、権限の昇格にはつながりません。
 - **レビューの独立性**：既定のレビュアーは、実装者と同じモデル系統です（ADR-0007 D6）。`--reviewer tsumgi` では別系統になりますが、ファイルを読めず、大きな PR はレビューできません。受入条件と差分は Issue と PR から取るので、その文面でレビュアーを誘導することもできます。レビューの結果は参考として扱い、merge は User が判断してください。
 - **レビュアーの起動の乗っ取り**：レビュアーは実装者と同じ `kagari-agent` で、ログインシェルから起動します。そのため、実装者が Bash で `~/.profile` の PATH や、`kagari-agent` の home に置いた `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがあります（未確認）。`claude` を root が所有する場所に入れ、`--claude` に絶対パスを渡せば、指定したパスの本体がすり替わることは防げます。ただし、`~/.profile` はシェルスクリプトなので、その内容（環境変数の設定や、`exec` による別のプログラムへの置き換え、PATH から探す `timeout` や `node` の差し替えなど）による介入は残ります。レビューをログインシェルなしで起動すれば防げると考えていますが、未確認です。実装者と別のユーザーでレビューする方法は、2 周目で扱います。
 - **レビュー後の変更**：`reviewed` を付けた後に PR へ commit を足しても、もう一度はレビューしません。やり直す場合は、`kagari:reviewed` を外してください。

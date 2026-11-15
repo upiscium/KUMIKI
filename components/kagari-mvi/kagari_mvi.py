@@ -370,7 +370,8 @@ def shared_dir(workdir: str, slug: str, name: str) -> str:
     """<workdir>/wt/<owner>__<repo>/<name>; the parent is shared like wt (setgid, sticky)."""
     parent = os.path.join(workdir, "wt", slug)
     os.makedirs(parent, exist_ok=True)
-    os.chmod(parent, 0o3770)
+    if os.stat(parent).st_mode & 0o7777 != 0o3770:  # chmod only when needed: owner-only call
+        os.chmod(parent, 0o3770)
     return os.path.join(parent, name)
 
 
