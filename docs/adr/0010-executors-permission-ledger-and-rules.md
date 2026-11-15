@@ -1,6 +1,6 @@
 # ADR-0010: 実行役を Claude Code と Pi に分け、許可台帳と運用ルールを足す
 
-- **Status:** Proposed（2026-11-15）
+- **Status:** Accepted（2026-11-15、PR #439 の merge による User の承認）
 - **Human decision:** 2026-11-14〜15 の設計セッションで、User が次の方針を決めた（#429、指示書「KAGARI/MUSUBI 次期方針 実装指示書」）。この ADR はそれを記録し、改定する ADR の箇所を示す。
 - **Issue:** #429
 - **Related:** ADR-0006（D1、D3、D4、D6）、ADR-0007（D2、D3、D4、D7）、ADR-0009（D1、D4、Consequences、追補 2026-11-14）、#340、#359、#418、#419、#427、#430〜#437、upiscium/MUSUBI#37〜#39
