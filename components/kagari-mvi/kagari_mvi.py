@@ -44,21 +44,19 @@ def label_names(issue: Dict[str, Any]) -> List[str]:
     return [label["name"] for label in issue.get("labels", [])]
 
 
-def is_candidate(issue: Dict[str, Any]) -> bool:
-    """Open, approved, not a PR, and in none of the worker states."""
-    if "pull_request" in issue or issue.get("state") != "open":
-        return False
+def has_labels(issue: Dict[str, Any], required: Sequence[str], excluded: Sequence[str]) -> bool:
+    """An open Issue (not a PR) with every required label and none of the excluded ones."""
     names = label_names(issue)
-    return APPROVED in names and not any(name in names for name in EXCLUDED)
+    return ("pull_request" not in issue and issue.get("state") == "open"
+            and all(name in names for name in required) and not any(name in names for name in excluded))
 
 
-def is_review_candidate(issue: Dict[str, Any]) -> bool:
-    """Open, approved and implemented, not a PR, not locked, reviewed or blocked."""
-    if "pull_request" in issue or issue.get("state") != "open":
-        return False
-    names = label_names(issue)
-    return (APPROVED in names and IMPLEMENTED in names
-            and not any(name in names for name in (RUNNING, REVIEWED, BLOCKED)))
+def is_candidate(issue: Dict[str, Any]) -> bool:  # approved, in none of the worker states
+    return has_labels(issue, (APPROVED,), EXCLUDED)
+
+
+def is_review_candidate(issue: Dict[str, Any]) -> bool:  # implemented, not locked/reviewed/blocked
+    return has_labels(issue, (APPROVED, IMPLEMENTED), (RUNNING, REVIEWED, BLOCKED))
 
 
 def oldest(issues: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -103,9 +101,7 @@ def check_actor(actor: Optional[str], allowed: Sequence[str]) -> Optional[str]:
     return None
 
 
-
-def quote_path(value: str) -> str:
-    return urllib.parse.quote(value, safe="")
+quote_path = lambda value: urllib.parse.quote(value, safe="")  # noqa: E731
 
 
 class Worker(AgentSteps):
@@ -115,7 +111,7 @@ class Worker(AgentSteps):
                  agent_config_dir: Optional[str] = None, reviewer: str = "claude") -> None:
         if repo.count("/") != 1 or not all(repo.split("/")):
             raise ValueError("--repo must be OWNER/REPO: %r" % repo)
-        self.repo = repo
+        self.repo, self.slug = repo, repo.replace("/", "__")  # paths per repository
         self.run = run
         self.log = log
         self.agent_user = agent_user
@@ -238,8 +234,8 @@ class Worker(AgentSteps):
         return mine[-1] if mine else "(no runner test result was found on the PR)"
 
     def prepare_review_dir(self, workdir: str, number: int, head: str) -> str:
-        clone = os.path.join(workdir, "repos", self.repo.replace("/", "__"))
-        review_dir = os.path.join(workdir, "wt", "issue-%d.review" % number)
+        clone = os.path.join(workdir, "repos", self.slug)
+        review_dir = shared_dir(workdir, self.slug, "issue-%d.review" % number)
         self.kill_agent_processes()  # nothing left over may write into the review checkout
         self.run(["git", "-C", clone] + SAFE_GIT + ["fetch", "--prune", "origin"])
         if os.path.exists(review_dir):
@@ -345,8 +341,8 @@ class Worker(AgentSteps):
         return pulls[0] if pulls else None
 
     def prepare_worktree(self, workdir: str, number: int, base: str) -> Tuple[str, str]:
-        clone = os.path.join(workdir, "repos", self.repo.replace("/", "__"))
-        worktree = os.path.join(workdir, "wt", "issue-%d" % number)
+        clone = os.path.join(workdir, "repos", self.slug)
+        worktree = shared_dir(workdir, self.slug, "issue-%d" % number)
         if os.path.isdir(os.path.join(clone, ".git")):
             self.run(["git", "-C", clone] + SAFE_GIT + ["fetch", "--prune", "origin"])
         else:
@@ -356,7 +352,6 @@ class Worker(AgentSteps):
             # Leftover from an earlier attempt on this Issue: the worker owns it.
             self.run(["git", "-C", clone, "worktree", "remove", "--force", worktree])
         self.run(["git", "-C", clone, "worktree", "prune"])
-        os.makedirs(os.path.dirname(worktree), exist_ok=True)
         self.run(["git", "-C", clone] + SAFE_GIT + ["worktree", "add", "-B", branch_name(number),
                                                      worktree, "origin/%s" % base])
         return clone, worktree
@@ -369,6 +364,14 @@ class Worker(AgentSteps):
             "title": issue["title"], "head": branch_name(number), "base": base,
             "body": body, "draft": True,
         })
+
+
+def shared_dir(workdir: str, slug: str, name: str) -> str:
+    """<workdir>/wt/<owner>__<repo>/<name>; the parent is shared like wt (setgid, sticky)."""
+    parent = os.path.join(workdir, "wt", slug)
+    os.makedirs(parent, exist_ok=True)
+    os.chmod(parent, 0o3770)
+    return os.path.join(parent, name)
 
 
 def branch_name(number: int) -> str:

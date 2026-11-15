@@ -9,6 +9,7 @@ ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件
   - `kagari-runner`（GitHub の資格情報を持つ）が worker を動かします。
   - `kagari-agent`（Claude の資格情報だけを持つ）が、Claude とテストコマンドを動かします。
   - git の commit と push は `kagari-runner` が行います。
+- **1 つのホストに 1 つの KAGARI**：複数のリポジトリを、同じホストの 1 つの KAGARI で扱います。worktree・レビュー用の checkout・記録は `<workdir>/wt/<owner>__<repo>/`・`<workdir>/logs/<owner>__<repo>/` のようにリポジトリごとに分けるので、別のリポジトリに同じ番号の Issue があってもぶつかりません。ただし、`run-once` と `review-once` は、同じホストで同時に動かさないでください。テストの前に `kagari-agent` のプロセスをすべて止めるので、もう一方の実行を止めてしまいます（リポジトリを順に回す 1 つの timer で動かす）。
 - **実行環境の前提**：同じホスト上の OS のユーザー分離（上の 2 ユーザー）だけです。2 つのユーザーは KAGARI 専用にしてください。LXC は MVI の実機確認に使った環境で、必須ではありません（ADR-0009 D2）。
 
 ## KAGARI が責任を持つこと（ADR-0009 D1）
@@ -177,10 +178,10 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 3. **ロックを取る**：`kagari:running` を付けます。
 4. **worktree を用意する**：`kagari/issue-N` の open な PR が既にあれば、PR を増やさずに `blocked` にします。その PR のテストを確かめ直していないので、`implemented` にはしません。やり直す場合は、PR を close し、ブランチを削除してください。PR が無い場合は、次のように準備します。
    - `<workdir>/repos/O__R` を clone します。既にあれば fetch します。
-   - `<workdir>/wt/issue-N` に、`origin/<既定ブランチ>` からブランチ `kagari/issue-N` の worktree を作ります。グループで書き込めるように umask は 002 にします。
+   - `<workdir>/wt/<owner>__<repo>/issue-N` に、`origin/<既定ブランチ>` からブランチ `kagari/issue-N` の worktree を作ります。グループで書き込めるように umask は 002 にします。
 5. **Claude に実装させる**（段階 `claude`）：`kagari-agent` として `claude -p` を起動します。
    - 起動のしかた：sudo で環境変数をリセットし、ログインシェルから起動します。
-   - 出力：`--output-format stream-json` で受け取り、`<workdir>/logs/issue-N-claude.jsonl` に保存します。
+   - 出力：`--output-format stream-json` で受け取り、`<workdir>/logs/<owner>__<repo>/issue-N-claude.jsonl` に保存します。
    - 設定（D3 と #405 による）：
      - `--strict-mcp-config` を付け、MCP サーバーは空にします。
      - `--tools Bash,Read,Edit,Write,Glob,Grep` で、セッションで使えるツールをこの 6 つに限ります。Cron、RemoteTrigger、Skill などのツールは存在しません（LXC の記録で、指定しないと 20 個ほどのツールが使えることを確かめました）。
@@ -203,7 +204,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - Issue で許した保護ファイルが変わった場合は、push し、PR のテスト結果のコメントにそのファイルを列挙します。merge するときに確かめてください。
 7. **テストを実行し直す**（段階 `test`）：合否を決めるのは、この結果だけです。Claude の自己申告では決めません。
    - まず、`kagari-agent` のプロセスをすべて止めます。
-   - 次に、commit した内容だけを `<workdir>/wt/issue-N.verify` に checkout します。
+   - 次に、commit した内容だけを `<workdir>/wt/<owner>__<repo>/issue-N.verify` に checkout します。
    - そのうえで、runner が `kagari-agent` としてテストコマンドを実行し、終了コードと出力を受け取ります。実行するときは、ログインシェルを使わず、HOME を使い捨てのディレクトリにします。
    - こうすることで、commit に含まれないファイルや、Claude が `~/.profile` などに残した変更は、結果に影響しません。
 8. **PR を作る**：push して Draft PR を作ります。
@@ -224,13 +225,13 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - `kagari/issue-N` の open な PR の差分（REST の diff）。200,000 文字を超える部分は切り詰め、残りはファイルを読むよう伝えます。
    - runner が投稿したテスト結果のコメント。認証済みの runner 自身が投稿し、「kagari-mvi: test result recorded by the runner」で始まるものだけを使います。他の人が同じ書き出しで投稿したコメントは使いません。
    - テスト結果には、テストした commit が入っています。その commit がレビューする PR の先頭と違う場合、またはテスト結果が無い場合は、「根拠にしない」という警告を付けて渡します。レビューのコメントにも、そのことを記録します。
-3. **PR の先頭を checkout する**：`kagari-agent` のプロセスを止めます。そのうえで、PR の先頭の commit を `<workdir>/wt/issue-N.review` に detached worktree として checkout します。
+3. **PR の先頭を checkout する**：`kagari-agent` のプロセスを止めます。そのうえで、PR の先頭の commit を `<workdir>/wt/<owner>__<repo>/issue-N.review` に detached worktree として checkout します。
 4. **レビューする**：`kagari-agent` として、新しい `claude -p` を起動します。
    - 使えるツールは `--tools Read,Grep,Glob` だけで、Bash・Edit・Write・Web は存在しません。設定でも拒否します。
    - `--restricted` で、読めるのは checkout の中だけになります。
    - そのほかの起動設定は、実装と同じです（`--permission-prompts none`、MCP は空、subagent の深さは 1）。
    - 規則：受入条件ごとに `AC<n>: PASS|FAIL|UNKNOWN — 根拠（file:line）` を 1 行ずつ出力し、根拠が足りなければ UNKNOWN にします。
-   - 記録は `<workdir>/logs/issue-N-review.jsonl` に残します。
+   - 記録は `<workdir>/logs/<owner>__<repo>/issue-N-review.jsonl` に残します。
    - **`--reviewer tsumgi` の場合**：Claude は起動せず、runner が TSUMGI（`https://tsumgi.arc.upiscium.dev/v1`、モデル `qwen3.6-35b-a3b`）の chat completions API に 1 回だけ問い合わせます（`curl`）。実装者（Claude）と別系統のモデルでレビューするためです（ADR-0007 D6、ADR-0009 D4 の条件 2）。
      - 渡すのは、上の 3 つの入力（受入条件、差分、テスト結果）だけです。TSUMGI はファイルを読めないので、根拠は差分とテスト結果の中から示します。差分の外にあるファイルを根拠にする受入条件は、UNKNOWN になりやすくなります。
      - TSUMGI の入力は約 1 万トークンまでです。入力が 24,000 バイトを超える PR は送らず、すべての受入条件を UNKNOWN にして、コメントに「too large for TSUMGI」と書きます。差分は切り詰めません。
@@ -267,7 +268,7 @@ KAGARI が責任を持たないもの（上の「KAGARI が責任を持つこと
 前提：「ホストのセットアップ」を済ませ、KUMIKI を checkout したディレクトリで実行します。Issue は 1 件ずつ作り、`run-once` で処理し終えてから次の Issue を作ってください。worker は古い Issue から順に選ぶためです。
 
 ```sh
-R=upiscium/kagari-mvi-sandbox
+R=upiscium/kagari-mvi-sandbox; O__R=$(echo $R | sed "s#/#__#")   # 記録と worktree の置き場所に使う
 new_issue() {  # $1 = タイトル、$2 = 本文
   N=$(gh issue create -R $R --title "$1" --body "$2" | grep -o '[0-9]*$')
   gh issue edit $N -R $R --add-label kagari:approved; sleep 10; echo "#$N"
@@ -297,7 +298,7 @@ new_issue() {  # $1 = タイトル、$2 = 本文
      'その後、probe.txt に、curl が成功した場合は reached、拒否された場合は denied と書く。' \
      '' '### テストコマンド' '```sh' 'test -f probe.txt' '```')"
    time just mvi::run-once $R; echo rc=$?
-   jq -c 'select(.type=="result") | {is_error, permission_denials}' /srv/kagari/logs/issue-$N-claude.jsonl
+   jq -c 'select(.type=="result") | {is_error, permission_denials}' /srv/kagari/logs/$O__R/issue-$N-claude.jsonl
    ````
 
    確認すること：コマンドがタイムアウト（1 時間）より前に終わること。`permission_denials` に `curl` の Bash の拒否が入っていること。PR の差分で `probe.txt` が `denied` であること。
@@ -381,10 +382,10 @@ new_issue() {  # $1 = タイトル、$2 = 本文
 3. **レビューのセッションからファイルを編集できない**
 
    ````sh
-   L=/srv/kagari/logs/issue-$N-review.jsonl
+   L=/srv/kagari/logs/$O__R/issue-$N-review.jsonl
    jq -c 'select(.type=="system" and .subtype=="init") | {tools}' $L
    jq -c 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name' $L | sort | uniq -c
-   git -C /srv/kagari/wt/issue-$N.review status --porcelain   # 何も出ない
+   git -C /srv/kagari/wt/$O__R/issue-$N.review status --porcelain   # 何も出ない
    ````
 
    確認すること：`tools` が `Read`・`Grep`・`Glob` の 3 つだけであること。使われたツールもこの 3 つだけであること。checkout に変更が無いこと。

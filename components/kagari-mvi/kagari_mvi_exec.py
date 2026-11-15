@@ -98,8 +98,7 @@ def _command_env() -> Dict[str, str]:
 
 
 def tail(text: str) -> str:
-    lines = text.strip().splitlines()[-TAIL_LINES:]
-    return "\n".join(lines)[-TAIL_CHARS:]
+    return "\n".join(text.strip().splitlines()[-TAIL_LINES:])[-TAIL_CHARS:]
 
 
 def protected_paths(paths: Sequence[str]) -> List[str]:
@@ -107,10 +106,6 @@ def protected_paths(paths: Sequence[str]) -> List[str]:
     return [path for path in paths
             if path.rsplit("/", 1)[-1] in INSTRUCTION_FILES or ".claude" in path.split("/")
             or path.startswith(".github/workflows/")]
-
-
-def is_allowed(path: str, allowed: Sequence[str]) -> bool:
-    return any(path == item or (item.endswith("/") and path.startswith(item)) for item in allowed)
 
 
 def test_command(body: Optional[str]) -> Optional[str]:
@@ -157,7 +152,7 @@ class Blocked(Exception):
 
 
 class AgentSteps:
-    """Agent-side steps; the host class provides run, agent_user, claude, agent_config_dir."""
+    """Agent-side steps; the host class provides run, slug, agent_user, claude, agent_config_dir."""
 
     def as_agent(self, cwd: str, argv: List[str], login: bool = True) -> List[str]:
         """Run argv as the agent user; sudo resets the environment."""
@@ -247,7 +242,7 @@ class AgentSteps:
                               timeout=AGENT_TIMEOUT + 60)
         except CommandError as error:
             output, failed = error.output, True
-        logs = os.path.join(workdir, "logs")
+        logs = os.path.join(workdir, "logs", self.slug)
         os.makedirs(logs, mode=0o700, exist_ok=True)
         with open(os.path.join(logs, log_name + ".jsonl"), "w", encoding="utf-8") as handle:
             handle.write(output)
@@ -274,7 +269,8 @@ class AgentSteps:
         self.run(git + ["commit", "--no-verify", "-m", "kagari-mvi: implement #%d" % number],
                  cwd=worktree)
         sha = self.run(git + ["rev-parse", "HEAD"], cwd=worktree).strip()
-        protected = [path for path in protected_paths(names) if not is_allowed(path, allowed)]
+        protected = [path for path in protected_paths(names) if not any(  # a trailing / covers a directory
+            path == item or (item.endswith("/") and path.startswith(item)) for item in allowed)]
         if protected:
             raise Blocked("The changes touch files that need a human decision, so nothing was "
                           "pushed: %s. Commit %s is kept in `%s` for review." % (

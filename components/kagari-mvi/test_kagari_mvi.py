@@ -215,14 +215,14 @@ class RunOnceTest(unittest.TestCase):
         deny = settings["permissions"]["deny"]
         for rule in ("Bash(curl *)", "Bash(gh *)", "Bash(git push *)", "Bash(sudo)", "Agent"):
             self.assertIn(rule, deny)
-        self.assertTrue(any(rule.startswith("Edit(//") and rule.endswith("/wt/issue-7/**)") for rule in allow))
+        self.assertTrue(any(rule.startswith("Edit(//") and rule.endswith("/wt/o__r/issue-7/**)") for rule in allow))
         self.assertNotIn("Edit", allow)
-        self.assertTrue(any(rule.startswith("Write(//") and rule.endswith("/wt/issue-7/**/.claude/**)")
+        self.assertTrue(any(rule.startswith("Write(//") and rule.endswith("/wt/o__r/issue-7/**/.claude/**)")
                             for rule in deny))
         # kill -1 must be the direct child of sudo: no timeout/env wrapper it would also kill.
         self.assertEqual(kill, ["sudo", "-n", "-u", "kagari-agent", "-H", "--", "sh", "-c", "kill -KILL -1; true"])
         self.assertNotIn("-lc", test)  # no login shell: agent-written ~/.profile is ignored
-        self.assertTrue(test[-3].endswith("/wt/issue-7.verify"))
+        self.assertTrue(test[-3].endswith("/wt/o__r/issue-7.verify"))
         self.assertEqual(test[-2:], ["python3 -m unittest", str(ex.TEST_TIMEOUT)])
         self.assertEqual(claude[claude.index("timeout"):claude.index("timeout") + 4],
                          ["timeout", "-k", "10", str(ex.AGENT_TIMEOUT)])
@@ -328,6 +328,14 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(ex.allowed_protected(body), ["CLAUDE.md", ".claude/", "AGENTS.md"])
         self.assertEqual(ex.allowed_protected("no heading\n- CLAUDE.md\n"), [])
 
+    def test_shared_dir_is_per_repository_and_shared(self):
+        with tempfile.TemporaryDirectory() as workdir:
+            a = mvi.shared_dir(workdir, mvi.Worker("o/a").slug, "issue-7")
+            b = mvi.shared_dir(workdir, mvi.Worker("o/b").slug, "issue-7")
+            self.assertNotEqual(a, b)
+            self.assertEqual(a, os.path.join(workdir, "wt", "o__a", "issue-7"))
+            self.assertEqual(os.stat(os.path.dirname(a)).st_mode & 0o7777, 0o3770)
+
     def test_protected_paths(self):
         changed = ["AGENTS.md", "pkg/CLAUDE.local.md", "a/.claude/settings.json", ".claude/x",
                    ".github/workflows/ci.yml", "src/claude.md", "docs/.github/workflows/x",
@@ -337,8 +345,8 @@ class RunOnceTest(unittest.TestCase):
     def test_committed_settings_local_blocks_before_claude(self):
         runner = FakeRunner(self.routes())
         with tempfile.TemporaryDirectory() as workdir:
-            os.makedirs(os.path.join(workdir, "wt", "issue-7", ".claude"))
-            open(os.path.join(workdir, "wt", "issue-7", ".claude", "settings.local.json"), "w").close()
+            os.makedirs(os.path.join(workdir, "wt", "o__r", "issue-7", ".claude"))
+            open(os.path.join(workdir, "wt", "o__r", "issue-7", ".claude", "settings.local.json"), "w").close()
             self.assertEqual(self.run_worker(runner, workdir), 1)
         self.assertFalse(any("stream-json" in args for args, _, _ in runner.calls))
         self.assertIn("settings.local.json", self.comments(runner, 7)[0])
