@@ -18,9 +18,9 @@ TAIL_CHARS = 2000
 GIT_IDENTITY = ["-c", "user.name=kagari-mvi", "-c", "user.email=kagari-mvi@localhost"]
 # The worktree is writable by the agent: never let it choose code that git runs here.
 SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] + GIT_IDENTITY
-# Build outputs that tests leave behind; never committed (pathspec excludes).
-ARTIFACTS = [":(exclude,glob)**/%s" % pattern for pattern in (
-    "__pycache__/**", "*.pyc", ".pytest_cache/**", "node_modules/**", ".mypy_cache/**")]
+ARTIFACTS = [":(exclude,glob)**/%s" % pattern for pattern in (  # build outputs, caches: never committed
+    "__pycache__/**", "*.pyc", ".pytest_cache/**", "node_modules/**", ".mypy_cache/**",
+    ".npm-cache/**", ".npm/**", ".cache/**", ".yarn/cache/**", ".pnpm-store/**")]
 # Only these built-in tools exist in the session (no Cron, RemoteTrigger, Skill, ...).
 # --restricted also ignores user/project/local settings and confines file tools to the cwd.
 AGENT_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"

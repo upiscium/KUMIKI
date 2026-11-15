@@ -199,7 +199,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - 認証エラーの扱い：`Not logged in`、`Login expired`、`401` などで終わった場合は、`blocked` を付けて「kagari-agent の再ログインが必要」とコメントします。リトライはしません。
 6. **commit する**（段階 `commit`、`kagari-runner` が実行）
    - worktree の中にある `.git` ファイルは `kagari-agent` が書き換えられるので、使いません。git の管理ディレクトリを `--git-dir` で明示して指定します。
-   - `core.hooksPath=/dev/null` と `core.fsmonitor=false` を指定し、`--no-verify` を付けて、すべての変更を commit します。ただし、テストで生成されるファイル（`__pycache__`、`*.pyc`、`.pytest_cache`、`node_modules`、`.mypy_cache`）は commit しません。
+   - `core.hooksPath=/dev/null` と `core.fsmonitor=false` を指定し、`--no-verify` を付けて、すべての変更を commit します。ただし、テストやビルドで生成されるファイルと、パッケージのキャッシュ（`__pycache__`、`*.pyc`、`.pytest_cache`、`node_modules`、`.mypy_cache`、`.npm-cache`、`.npm`、`.cache`、`.yarn/cache`、`.pnpm-store`。どの階層にあっても）は commit しません。これらの場所にある変更は、リポジトリで管理しているファイルでも commit しません。npm のキャッシュが worktree の中に作られ、PR に入ったことがあるため（upiscium/MUSUBI#40）です。
    - 変更が無い場合は、PR を作らずに `blocked` にします。
    - 保護するファイルが変わっていて、Issue の `### 変更する保護ファイル` に書かれていない場合は、commit を worktree に残したまま、push も PR の作成もせずに `blocked` にします。コメントには、そのファイルを列挙します。保護するのは、どの階層にある `CLAUDE.md`・`CLAUDE.local.md`・`AGENTS.md`・`.claude/` と、リポジトリ直下の `.github/workflows/` です。
    - Issue で許した保護ファイルが変わった場合は、push し、PR のテスト結果のコメントにそのファイルを列挙します。merge するときに確かめてください。

@@ -230,6 +230,8 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(checkout[checkout.index("--work-tree") + 1], test[-3])
         add = next(args for args, _, _ in runner.calls if "--all" in args)
         self.assertIn(":(exclude,glob)**/__pycache__/**", add)
+        for cache in (".npm-cache", ".npm", ".cache", ".yarn/cache", ".pnpm-store"):
+            self.assertIn(":(exclude,glob)**/%s/**" % cache, add)
         commit = next(args for args, _, _ in runner.calls if "commit" in args)
         self.assertIn("--git-dir", commit)
         self.assertIn("core.hooksPath=/dev/null", commit)
