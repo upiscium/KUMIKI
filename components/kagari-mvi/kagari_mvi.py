@@ -350,6 +350,7 @@ class Worker(AgentSteps):
             self.run(["git"] + SAFE_GIT + ["clone", "https://github.com/%s.git" % self.repo, clone])
         if os.path.exists(worktree):
             # Leftover from an earlier attempt on this Issue: the worker owns it.
+            self.kill_agent_processes()  # a failed run may leave processes writing here
             self.remove_leftover(worktree)
         self.run(["git", "-C", clone, "worktree", "prune"])
         self.run(["git", "-C", clone] + SAFE_GIT + ["worktree", "add", "-B", branch_name(number),
