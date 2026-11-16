@@ -273,11 +273,18 @@ class AgentSteps:
         # Not under timeout/as_agent: kill(-1) spares only the sending shell, not its parents.
         self.run(["sudo", "-n", "-u", self.agent_user, "-H", "--", "sh", "-c", "kill -KILL -1; true"])
 
+    def remove_leftover(self, path: str) -> None:
+        """Delete an earlier attempt's directory (git may have half-removed it already)."""
+        if os.path.exists(path):  # npm and others ignore umask 002: reopen the agent's dirs first
+            self.run(["sudo", "-n", "-u", self.agent_user, "-H", "--", "find", path, "-user", self.agent_user,
+                      "-type", "d", "-exec", "chmod", "g+rwx", "{}", "+"])
+            shutil.rmtree(path)
+
     def run_test(self, clone: str, worktree: str, number: int, test: str) -> Tuple[int, str]:
         """Re-run the test ourselves on a clean checkout of the commit (as the agent user)."""
         self.kill_agent_processes()
         verify = worktree + ".verify"  # no leftover processes may write here now
-        shutil.rmtree(verify, ignore_errors=True)
+        self.remove_leftover(verify)
         os.makedirs(verify)
         self.run(["git", "--git-dir", os.path.join(clone, ".git", "worktrees", "issue-%d" % number),
                   "--work-tree", verify] + SAFE_GIT + ["checkout", "-f", "HEAD", "--", "."])
