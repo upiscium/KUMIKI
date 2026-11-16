@@ -277,7 +277,7 @@ class AgentSteps:
         """Delete an earlier attempt's directory (git may have half-removed it already)."""
         if os.path.exists(path):  # npm and others ignore umask 002: reopen the agent's dirs first
             self.run(["sudo", "-n", "-u", self.agent_user, "-H", "--", "find", path, "-user", self.agent_user,
-                      "-type", "d", "-exec", "chmod", "g+rwx", "{}", "+"])
+                      "-type", "d", "-exec", "chmod", "u+rwx,g+rwx", "{}", ";"])  # ";": before find reads it
             shutil.rmtree(path)
 
     def run_test(self, clone: str, worktree: str, number: int, test: str) -> Tuple[int, str]:

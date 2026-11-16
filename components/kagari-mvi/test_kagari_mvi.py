@@ -4,6 +4,7 @@ Run: python3 components/kagari-mvi/test_kagari_mvi.py  (or: just mvi::test)
 """
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -418,11 +419,27 @@ class RunOnceTest(unittest.TestCase):
         joined = [" ".join(args) for args, _, _ in runner.calls]
         for name in ("issue-7", "issue-7.verify"):
             self.assertIn("sudo -n -u kagari-agent -H -- find %s/%s -user kagari-agent -type d "
-                          "-exec chmod g+rwx {} +" % (wt, name), joined)
+                          "-exec chmod u+rwx,g+rwx {} ;" % (wt, name), joined)
         self.assertFalse(any("worktree remove" in j for j in joined))
+        kill = "sudo -n -u kagari-agent -H -- sh -c kill -KILL -1; true"  # before deleting issue-7
+        self.assertLess(joined.index(kill), joined.index(next(j for j in joined if " find %s/issue-7 " % wt in j)))
+
+    def test_leftover_reopen_reaches_dirs_the_agent_cannot_read(self):
+        runner = FakeRunner(self.routes())
+        with tempfile.TemporaryDirectory() as workdir:
+            leftover = os.path.join(workdir, "wt", "o__r", "issue-7")
+            locked = os.path.join(leftover, "locked")
+            os.makedirs(os.path.join(locked, "inner"))
+            os.chmod(locked, 0)
+            with mock.patch.object(ex.shutil, "rmtree"):  # keep it to run the real find on
+                self.assertEqual(self.run_worker(runner, workdir), 0)
+            find = next(args for args, _, _ in runner.calls if args[6:8] == ["find", leftover])
+            subprocess.run([a for a in find[6:] if a not in ("-user", "kagari-agent")], check=True)
+            self.assertEqual(os.stat(locked).st_mode & 0o770, 0o770)
+            self.assertEqual(os.stat(os.path.join(locked, "inner")).st_mode & 0o070, 0o070)
 
     def test_leftover_that_cannot_be_reopened_blocks_at_worktree(self):
-        runner = FakeRunner(self.routes(), fail={"-exec chmod g+rwx": "find: 'x': Permission denied"})
+        runner = FakeRunner(self.routes(), fail={"-exec chmod u+rwx,g+rwx": "find: 'x': Permission denied"})
         with tempfile.TemporaryDirectory() as workdir:
             leftover = os.path.join(workdir, "wt", "o__r", "issue-7")
             os.makedirs(leftover)
@@ -560,11 +577,11 @@ class ReviewOnceTest(unittest.TestCase):
             self.assertFalse(os.path.exists(review_dir))
         joined = [" ".join(args) for args, _, _ in runner.calls]
         self.assertIn("sudo -n -u kagari-agent -H -- find %s -user kagari-agent -type d "
-                      "-exec chmod g+rwx {} +" % review_dir, joined)
+                      "-exec chmod u+rwx,g+rwx {} ;" % review_dir, joined)
         self.assertFalse(any("worktree remove" in j for j in joined))
 
     def test_leftover_review_dir_that_cannot_be_reopened_blocks(self):
-        runner = FakeRunner(self.routes(), fail={"-exec chmod g+rwx": "find: 'x': Permission denied"})
+        runner = FakeRunner(self.routes(), fail={"-exec chmod u+rwx,g+rwx": "find: 'x': Permission denied"})
         with tempfile.TemporaryDirectory() as workdir:
             os.makedirs(os.path.join(workdir, "wt", "o__r", "issue-7.review"))
             self.assertEqual(mvi.Worker("o/r", run=runner, log=lambda _: None).review_once(workdir), 1)
