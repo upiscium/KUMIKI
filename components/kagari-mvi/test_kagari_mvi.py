@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import kagari_mvi as mvi  # noqa: E402
 import kagari_mvi_exec as ex  # noqa: E402
+import kagari_mvi_tsumgi as ts  # noqa: E402
 
 
 TEST_BODY = "body %d\n\n### テストコマンド\n```sh\npython3 -m unittest\n```\n"
@@ -151,6 +152,53 @@ class ActorTest(unittest.TestCase):
         self.assertIsNone(mvi.check_body_unchanged("2026-11-14T00:59:59Z", approved))
         self.assertIsNotNone(mvi.check_body_unchanged("2026-11-14T01:00:01Z", approved))
         self.assertIsNotNone(mvi.check_body_unchanged("2026-11-14T00:00:00Z", None))
+
+
+class TsumgiTest(unittest.TestCase):
+    def test_over_estimated_limit_is_not_sent_and_recorded(self):
+        runner = FakeRunner({})
+        with tempfile.TemporaryDirectory() as tmp:
+            record = os.path.join(tmp, "logs", "o__r", "x.jsonl")
+            big = "x" * (ts.max_input_bytes() + 1)
+            reply = ts.chat(runner, "rules", big, "summary", record)
+            self.assertFalse(reply["sent"])
+            self.assertIn("too large for TSUMGI", reply["error"])
+            self.assertEqual(reply["text"], "")
+            self.assertEqual(runner.calls, [])
+            with open(record) as handle:
+                entry = json.loads(handle.read())
+            self.assertEqual((entry["purpose"], entry["sent"], entry["input_tokens"]), ("summary", False, None))
+            self.assertGreater(entry["estimated_input_tokens"], ts.INPUT_TOKEN_LIMIT * ts.MARGIN)
+
+    def test_tokens_are_recorded_each_call(self):
+        out = json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+                          "usage": {"prompt_tokens": 120, "completion_tokens": 7}})
+        runner = FakeRunner({}, outputs={"chat/completions": out})
+        with tempfile.TemporaryDirectory() as tmp:
+            record = os.path.join(tmp, "u.jsonl")
+            for _ in range(2):
+                reply = ts.chat(runner, "rules", "hello", "classify", record)
+            self.assertEqual((reply["text"], reply["input_tokens"], reply["output_tokens"]), ("ok", 120, 7))
+            with open(record) as handle:
+                entries = [json.loads(line) for line in handle]
+            self.assertEqual(len(entries), 2)
+            self.assertEqual((entries[0]["input_tokens"], entries[0]["output_tokens"]), (120, 7))
+            self.assertIsNone(entries[0]["text"])  # the record keeps counts, not the answer
+
+    def test_unclosed_reasoning_is_an_error_not_an_answer(self):
+        out = json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": "<think>AC1: PASS"}}]})
+        reply = ts.chat(FakeRunner({}, outputs={"chat/completions": out}), "rules", "hi", "review")
+        self.assertEqual(reply["text"], "")
+        self.assertIn("reasoning was not closed", reply["error"])
+
+    def test_bad_estimate_setting_is_an_error_result(self):
+        reply = ts.chat(FakeRunner({}), "rules", "hi", "review", bytes_per_token=0)
+        self.assertFalse(reply["sent"])
+        self.assertIsNotNone(reply["error"])
+
+    def test_estimate_settings(self):
+        self.assertEqual(ts.estimate_tokens("あ" * 10, bytes_per_token=3), 10)
+        self.assertEqual(ts.max_input_bytes(bytes_per_token=2, margin=0.5), ts.INPUT_TOKEN_LIMIT)
 
 
 class ParseTest(unittest.TestCase):

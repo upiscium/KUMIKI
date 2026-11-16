@@ -3,6 +3,7 @@
 ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります（`run-once`）。Draft PR ができた Issue は、別の Claude セッションが受入条件ごとにレビューします（`review-once`）。
 
 - **構成**：本体は 2 ファイルで、合わせて 800 行以内に保ちます（User 判断 2026-11-11 の 700 行を、2026-11-14 に変更。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は、Issue 本文を最後に編集した時刻を取る 1 か所だけで使います（REST では取れないため。User 判断 2026-11-14）。
+- **TSUMGI の直接呼び出し**（#434、ADR-0010 D1）：編集を伴わない Leaf（今はレビュー）が使う TSUMGI の呼び出しは、`kagari_mvi_tsumgi.py` に分けています。本体 2 ファイルが 800 行の上限に達したためです（ADR-0010 Consequences）。
 - **状態の持ち方**：状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata にも依存しません。
 - **実行の単位**：1 回の実行で処理する Issue は最大 1 件です。systemd timer などから定期的に呼ぶ前提です。
 - **ユーザーの分担**（D3）：
@@ -235,7 +236,8 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - 記録は `<workdir>/logs/<owner>__<repo>/issue-N-review.jsonl` に残します。
    - **`--reviewer tsumgi` の場合**：Claude は起動せず、runner が TSUMGI（`https://tsumgi.arc.upiscium.dev/v1`、モデル `qwen3.6-35b-a3b`）の chat completions API に 1 回だけ問い合わせます（`curl`）。実装者（Claude）と別系統のモデルでレビューするためです（ADR-0007 D6、ADR-0009 D4 の条件 2）。
      - 渡すのは、上の 3 つの入力（受入条件、差分、テスト結果）だけです。TSUMGI はファイルを読めないので、根拠は差分とテスト結果の中から示します。差分の外にあるファイルを根拠にする受入条件は、UNKNOWN になりやすくなります。
-     - TSUMGI の入力は約 1 万トークンまでです。入力が 24,000 バイトを超える PR は送らず、すべての受入条件を UNKNOWN にして、コメントに「too large for TSUMGI」と書きます。差分は切り詰めません。
+     - TSUMGI の入力は 10,240 トークンまでです。送る前に、入力（規則と、受入条件・差分・テスト結果）のトークン数を UTF-8 のバイト数から見積もります（既定は 2.5 バイトで 1 トークン、上限の 95% まで。約 24,300 バイトまで送る。2026-11-15 に、日本語を含む差分で実際のトークン数より多めに見積もることを確認）。超える PR は送らず、すべての受入条件を UNKNOWN にして、コメントに「too large for TSUMGI」と書きます。差分は切り詰めません。見積もりの方法と余裕は、環境変数 `KAGARI_MVI_TSUMGI_BYTES_PER_TOKEN` と `KAGARI_MVI_TSUMGI_MARGIN` で変えられます。
+     - 呼び出すたびに、見積もったトークン数、TSUMGI が返した入力と出力のトークン数、送ったかどうか、エラーを、`<workdir>/logs/<owner>__<repo>/issue-N-tsumgi.jsonl` に 1 行ずつ追記します（答えの本文は残しません）。レビューのコメントの 1 行目にも、入力と出力のトークン数を書きます。
      - TSUMGI が応答しない、エラーを返す、出力の上限（2,048 トークン）で途中で切れた、推論（`<think>`）が閉じていない、などの場合も、すべての受入条件を UNKNOWN にし、「reviewer session: ended with an error」と記録して `reviewed` を付けます。
      - レビュー用の checkout（手順 3）は、TSUMGI では使いませんが、Claude のときと同じく作ります。
      - OpenCode は使いません。OpenCode が付け足す指示文だけで約 9,000 トークンになり、TSUMGI の上限を超えるためです（2026-11-14 に確認）。

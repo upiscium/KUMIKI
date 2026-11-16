@@ -13,6 +13,11 @@ import shutil
 import subprocess
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import kagari_mvi_tsumgi as tsumgi
+from kagari_mvi_tsumgi import TSUMGI_MODEL, TSUMGI_URL  # noqa: F401 - used by callers and tests
+
+TSUMGI_MAX_BYTES = tsumgi.max_input_bytes()  # a larger review input is not sent (#434)
+
 TAIL_LINES = 20
 TAIL_CHARS = 2000
 GIT_IDENTITY = ["-c", "user.name=kagari-mvi", "-c", "user.email=kagari-mvi@localhost"]
@@ -35,9 +40,6 @@ PROTECTED_GLOBS = tuple("**/" + name for name in INSTRUCTION_FILES) + (
     "**/.claude/**", ".github/workflows/**")
 REVIEW_TOOLS = "Read,Grep,Glob"  # no Bash, no editing, no Web (I-3)
 MAX_DIFF_CHARS = 200_000
-# TSUMGI accepts about 10k input tokens (65,536 request bytes); a larger PR is not sent.
-TSUMGI_MAX_BYTES = 24_000
-TSUMGI_URL, TSUMGI_MODEL = "https://tsumgi.arc.upiscium.dev/v1", "qwen3.6-35b-a3b"
 AGENT_TIMEOUT = 3600
 TEST_TIMEOUT = 1800
 AGENT_SCRIPT = 'cd "$1" && umask 002 && shift && exec "$@"'
@@ -196,7 +198,7 @@ class AgentSteps:
             "\n".join("AC%d: %s" % (i, c) for i, c in enumerate(criteria, start=1)),
             test_report, diff))
         if self.reviewer == "tsumgi":
-            return self.run_tsumgi_review(criteria, prompt)
+            return self.run_tsumgi_review(workdir, number, criteria, prompt)
         outcome = self.launch_claude(workdir, review_dir, "issue-%d-review" % number, REVIEW_TOOLS,
                                      settings, REVIEW_RULES.format(access="The current directory is "
                                      "a checkout of the PR head; you may only read it."), prompt)
@@ -205,28 +207,18 @@ class AgentSteps:
                                "implementer" % REVIEW_TOOLS)
         return outcome
 
-    def run_tsumgi_review(self, criteria: List[str], prompt: str) -> Dict[str, Any]:
-        """One chat request to TSUMGI, a model family other than the implementer's (ADR-0007 D6)."""
-        outcome: Dict[str, Any] = {"errored": True, "denials": 0, "text": "", "reviewer": "TSUMGI "
-                                   "`%s`, diff and test result only" % TSUMGI_MODEL}
-        body = {"model": TSUMGI_MODEL, "temperature": 0, "max_tokens": 2048, "messages": [
-            {"role": "system", "content": REVIEW_RULES.format(access="You cannot read files.")},
-            {"role": "user", "content": prompt}]}
-        try:
-            if len(prompt.encode()) > TSUMGI_MAX_BYTES:  # not sent: every verdict becomes UNKNOWN
-                raise ValueError("the PR is too large for TSUMGI (%d bytes)" % len(prompt.encode()))
-            out = self.run(["curl", "-sS", "--fail-with-body", "-m", "300", "-H", "Content-Type: "
-                            "application/json", "--data-binary", "@-", TSUMGI_URL + "/chat/completions"],
-                           input=json.dumps(body, ensure_ascii=False))
-            choice = json.loads(out)["choices"][0]
-            if choice.get("finish_reason") == "length":  # cut off: a draft verdict is not a verdict
-                raise ValueError("TSUMGI stopped at max_tokens")
-            text = (choice["message"]["content"] or "").rsplit("</think>", 1)[-1]  # drop reasoning
-            outcome.update(errored=False, text="" if "<think>" in text else text)
-        except (CommandError, ValueError, KeyError, IndexError, TypeError) as error:
-            outcome["reviewer"] += "; " + " ".join((getattr(error, "output", "") or str(error)).split())[:200]
-        outcome["verdicts"] = review_verdicts(outcome["text"], len(criteria))
-        return outcome
+    def run_tsumgi_review(self, workdir: str, number: int, criteria: List[str],
+                          prompt: str) -> Dict[str, Any]:
+        """One TSUMGI request, a model family other than the implementer's (ADR-0007 D6)."""
+        reply = tsumgi.chat(self.run, REVIEW_RULES.format(access="You cannot read files."), prompt,
+                            "review issue-%d" % number,
+                            os.path.join(workdir, "logs", self.slug, "issue-%d-tsumgi.jsonl" % number))
+        tokens = ("tokens in %s / out %s" % (reply["input_tokens"], reply["output_tokens"])
+                  if reply["sent"] else "not sent (estimated %s tokens)" % reply["estimated_input_tokens"])
+        reviewer = "TSUMGI `%s`, diff and test result only; %s" % (TSUMGI_MODEL, tokens)
+        return {"errored": reply["error"] is not None, "denials": 0, "text": reply["text"],
+                "verdicts": review_verdicts(reply["text"], len(criteria)),
+                "reviewer": reviewer + ("; " + reply["error"] if reply["error"] else "")}
 
     def launch_claude(self, workdir: str, cwd: str, log_name: str, tools: str,
                       settings: Dict[str, Any], rules: str, prompt: str) -> Dict[str, Any]:
