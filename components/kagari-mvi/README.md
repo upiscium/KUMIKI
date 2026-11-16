@@ -2,8 +2,8 @@
 
 ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります（`run-once`）。Draft PR ができた Issue は、別の Claude セッションが受入条件ごとにレビューします（`review-once`）。
 
-- **構成**：本体は 2 ファイルで、合わせて 800 行以内に保ちます（User 判断 2026-11-11 の 700 行を、2026-11-14 に変更。ADR-0007 D5 の目安「1 モジュール 500 行」から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は、Issue 本文を最後に編集した時刻を取る 1 か所だけで使います（REST では取れないため。User 判断 2026-11-14）。
-- **TSUMGI の直接呼び出し**（#434、ADR-0010 D1）：編集を伴わない Leaf（今はレビュー）が使う TSUMGI の呼び出しは、`kagari_mvi_tsumgi.py` に分けています。本体 2 ファイルが 800 行の上限に達したためです（ADR-0010 Consequences）。
+- **構成**：1 ファイルあたり、本体は 500 行以内、テスト（`test_*.py`）は 800 行以内に保ちます。`just mvi::test` の `LineLimitTest` がこの上限を確かめます。超える場合は責任の単位でファイルを分け、理由を PR に書きます（ADR-0010 追補 2026-11-16。それまでの、本体 2 ファイルの合計に対する上限から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は、Issue 本文を最後に編集した時刻を取る 1 か所だけで使います（REST では取れないため。User 判断 2026-11-14）。
+- **TSUMGI の直接呼び出し**（#434、ADR-0010 D1）：編集を伴わない Leaf（今はレビュー）が使う TSUMGI の呼び出しは、`kagari_mvi_tsumgi.py` に分けています。分けたときは、本体 2 ファイルが当時の合計の上限に達していました（ADR-0010 Consequences）。
 - **状態の持ち方**：状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata にも依存しません。
 - **実行の単位**：1 回の実行で処理する Issue は最大 1 件です。systemd timer などから定期的に呼ぶ前提です。
 - **ユーザーの分担**（D3）：
