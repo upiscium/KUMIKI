@@ -213,8 +213,9 @@ class AgentSteps:
         reply = tsumgi.chat(self.run, REVIEW_RULES.format(access="You cannot read files."), prompt,
                             "review issue-%d" % number,
                             os.path.join(workdir, "logs", self.slug, "issue-%d-tsumgi.jsonl" % number))
-        reviewer = "TSUMGI `%s`, diff and test result only; tokens in %s / out %s" % (
-            TSUMGI_MODEL, reply["input_tokens"], reply["output_tokens"])
+        tokens = ("tokens in %s / out %s" % (reply["input_tokens"], reply["output_tokens"])
+                  if reply["sent"] else "not sent (estimated %s tokens)" % reply["estimated_input_tokens"])
+        reviewer = "TSUMGI `%s`, diff and test result only; %s" % (TSUMGI_MODEL, tokens)
         return {"errored": reply["error"] is not None, "denials": 0, "text": reply["text"],
                 "verdicts": review_verdicts(reply["text"], len(criteria)),
                 "reviewer": reviewer + ("; " + reply["error"] if reply["error"] else "")}

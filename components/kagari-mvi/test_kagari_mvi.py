@@ -165,7 +165,8 @@ class TsumgiTest(unittest.TestCase):
             self.assertIn("too large for TSUMGI", reply["error"])
             self.assertEqual(reply["text"], "")
             self.assertEqual(runner.calls, [])
-            entry = json.loads(open(record).read())
+            with open(record) as handle:
+                entry = json.loads(handle.read())
             self.assertEqual((entry["purpose"], entry["sent"], entry["input_tokens"]), ("summary", False, None))
             self.assertGreater(entry["estimated_input_tokens"], ts.INPUT_TOKEN_LIMIT * ts.MARGIN)
 
@@ -178,10 +179,22 @@ class TsumgiTest(unittest.TestCase):
             for _ in range(2):
                 reply = ts.chat(runner, "rules", "hello", "classify", record)
             self.assertEqual((reply["text"], reply["input_tokens"], reply["output_tokens"]), ("ok", 120, 7))
-            entries = [json.loads(line) for line in open(record)]
+            with open(record) as handle:
+                entries = [json.loads(line) for line in handle]
             self.assertEqual(len(entries), 2)
             self.assertEqual((entries[0]["input_tokens"], entries[0]["output_tokens"]), (120, 7))
             self.assertIsNone(entries[0]["text"])  # the record keeps counts, not the answer
+
+    def test_unclosed_reasoning_is_an_error_not_an_answer(self):
+        out = json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": "<think>AC1: PASS"}}]})
+        reply = ts.chat(FakeRunner({}, outputs={"chat/completions": out}), "rules", "hi", "review")
+        self.assertEqual(reply["text"], "")
+        self.assertIn("reasoning was not closed", reply["error"])
+
+    def test_bad_estimate_setting_is_an_error_result(self):
+        reply = ts.chat(FakeRunner({}), "rules", "hi", "review", bytes_per_token=0)
+        self.assertFalse(reply["sent"])
+        self.assertIsNotNone(reply["error"])
 
     def test_estimate_settings(self):
         self.assertEqual(ts.estimate_tokens("あ" * 10, bytes_per_token=3), 10)
