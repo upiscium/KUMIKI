@@ -604,5 +604,21 @@ class ReviewOnceTest(unittest.TestCase):
         self.assertEqual(len(runner.calls), 1)
 
 
+class LineLimitTest(unittest.TestCase):
+    """ADR-0010 追補 2026-11-16: per file, 500 lines of code and 800 lines of tests."""
+
+    def test_every_python_file_is_within_its_limit(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        names = sorted(n for n in os.listdir(here) if n.endswith(".py"))
+        self.assertIn("kagari_mvi.py", names)
+        for name in names:
+            limit = 800 if name.startswith("test_") else 500
+            with open(os.path.join(here, name), encoding="utf-8") as handle:
+                lines = sum(1 for _ in handle)
+            with self.subTest(file=name):
+                self.assertLessEqual(lines, limit, "%s has %d lines (limit %d): split it by "
+                                     "responsibility; do not raise the limit" % (name, lines, limit))
+
+
 if __name__ == "__main__":
     unittest.main()
