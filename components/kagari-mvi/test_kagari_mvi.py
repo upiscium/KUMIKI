@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -420,6 +421,40 @@ class RunOnceTest(unittest.TestCase):
                           "-exec chmod g+rwx {} +" % (wt, name), joined)
         self.assertFalse(any("worktree remove" in j for j in joined))
 
+    def test_leftover_that_cannot_be_reopened_blocks_at_worktree(self):
+        runner = FakeRunner(self.routes(), fail={"-exec chmod g+rwx": "find: 'x': Permission denied"})
+        with tempfile.TemporaryDirectory() as workdir:
+            leftover = os.path.join(workdir, "wt", "o__r", "issue-7")
+            os.makedirs(leftover)
+            self.assertEqual(self.run_worker(runner, workdir), 1)
+            self.assertTrue(os.path.exists(leftover))  # nothing is deleted after a failed reopen
+        self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.BLOCKED])
+        body = self.comments(runner, 7)[0]
+        self.assertIn("`worktree`", body)
+        self.assertIn("Permission denied", body)
+        self.assertFalse(any("stream-json" in args for args, _, _ in runner.calls))
+
+    def test_leftover_that_cannot_be_deleted_blocks_after_reopening(self):
+        runner = FakeRunner(self.routes())
+        reopened_first, real_rmtree = [], ex.shutil.rmtree
+
+        def rmtree(path, **kwargs):  # TemporaryDirectory also uses rmtree
+            if not path.endswith("/wt/o__r/issue-7"):
+                return real_rmtree(path, **kwargs)
+            reopened_first.append(any(args[:7] == ["sudo", "-n", "-u", "kagari-agent", "-H", "--", "find"]
+                                      and path in args for args, _, _ in runner.calls))
+            raise PermissionError(13, "Permission denied", path)
+        with tempfile.TemporaryDirectory() as workdir:
+            os.makedirs(os.path.join(workdir, "wt", "o__r", "issue-7"))
+            with mock.patch.object(ex.shutil, "rmtree", side_effect=rmtree):
+                self.assertEqual(self.run_worker(runner, workdir), 1)
+        self.assertEqual(reopened_first, [True])
+        self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.BLOCKED])
+        body = self.comments(runner, 7)[0]
+        self.assertIn("`worktree`", body)
+        self.assertIn("Permission denied", body)
+        self.assertFalse(any("stream-json" in args for args, _, _ in runner.calls))
+
     def test_missing_test_command_blocks_before_start(self):
         routes = self.routes()
         no_test = issue(7, [mvi.APPROVED])
@@ -527,6 +562,18 @@ class ReviewOnceTest(unittest.TestCase):
         self.assertIn("sudo -n -u kagari-agent -H -- find %s -user kagari-agent -type d "
                       "-exec chmod g+rwx {} +" % review_dir, joined)
         self.assertFalse(any("worktree remove" in j for j in joined))
+
+    def test_leftover_review_dir_that_cannot_be_reopened_blocks(self):
+        runner = FakeRunner(self.routes(), fail={"-exec chmod g+rwx": "find: 'x': Permission denied"})
+        with tempfile.TemporaryDirectory() as workdir:
+            os.makedirs(os.path.join(workdir, "wt", "o__r", "issue-7.review"))
+            self.assertEqual(mvi.Worker("o/r", run=runner, log=lambda _: None).review_once(workdir), 1)
+        self.assertIn(mvi.BLOCKED, runner.added_labels())
+        self.assertNotIn(mvi.REVIEWED, runner.added_labels())
+        body = runner.api_calls("POST", "repos/o/r/issues/7/comments")[0]["body"]
+        self.assertIn("`checkout`", body)
+        self.assertIn("Permission denied", body)
+        self.assertFalse(any("stream-json" in args for args, _, _ in runner.calls))
 
     def test_tsumgi_review_posts_one_request_and_table(self):
         reply = json.dumps({"choices": [{"message": {
