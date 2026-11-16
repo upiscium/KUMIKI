@@ -239,7 +239,7 @@ class Worker(AgentSteps):
         self.kill_agent_processes()  # nothing left over may write into the review checkout
         self.run(["git", "-C", clone] + SAFE_GIT + ["fetch", "--prune", "origin"])
         if os.path.exists(review_dir):
-            self.run(["git", "-C", clone, "worktree", "remove", "--force", review_dir])
+            self.remove_leftover(review_dir)
         self.run(["git", "-C", clone, "worktree", "prune"])
         self.run(["git", "-C", clone] + SAFE_GIT + ["worktree", "add", "--detach", review_dir, head])
         return review_dir
@@ -350,7 +350,7 @@ class Worker(AgentSteps):
             self.run(["git"] + SAFE_GIT + ["clone", "https://github.com/%s.git" % self.repo, clone])
         if os.path.exists(worktree):
             # Leftover from an earlier attempt on this Issue: the worker owns it.
-            self.run(["git", "-C", clone, "worktree", "remove", "--force", worktree])
+            self.remove_leftover(worktree)
         self.run(["git", "-C", clone, "worktree", "prune"])
         self.run(["git", "-C", clone] + SAFE_GIT + ["worktree", "add", "-B", branch_name(number),
                                                      worktree, "origin/%s" % base])
