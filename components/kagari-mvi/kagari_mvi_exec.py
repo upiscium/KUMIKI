@@ -305,6 +305,9 @@ REVIEW_RULES = """You are an independent reviewer of one pull request (KAGARI MV
 ALLOWED_HEADING = re.compile(r"^#{2,6}[ \t]*(?:変更する保護ファイル|Protected files to change)[ \t]*$",
                              re.M | re.I)
 CRITERIA_HEADING = re.compile(r"^#{2,6}[ \t]*(?:受入条件|Acceptance criteria)[ \t]*$", re.M | re.I)
+PLACEMENT_HEADINGS = [(names, re.compile(r"^#{2,6}[ \t]*(?:%s)[ \t]*$" % "|".join(names), re.M | re.I))
+                      for names in (("全体ロジック", "Overall logic"), ("置く理由", "Why here"),
+                                    ("却下した置き場所", "Rejected placements"))]
 # [^\w\n] / [ \t]: a verdict never spans lines (an empty evidence must not swallow the next line).
 VERDICT_LINE = re.compile(r"^[^\w\n]*AC(\d+)[^\w\n]*?[:：][^\w\n]*(PASS|FAIL|UNKNOWN)\b[*_]*[ \t]*"
                           r"[-—–:：]*[ \t]*(.*)$", re.M | re.I)
@@ -321,11 +324,22 @@ def allowed_protected(body: Optional[str]) -> List[str]:
     return [re.sub(r"^(\./|/)+", "", match.group(1) or match.group(2)) for match in paths if match]
 
 
-def section_items(body: Optional[str], pattern: "re.Pattern[str]") -> List[str]:
+def missing_placement(body: Optional[str]) -> List[str]:
+    """Placement headings (ADR-0011) that are absent or hold nothing but list markers."""
+    return [names[0] for names, pattern in PLACEMENT_HEADINGS
+            if not re.sub(r"[-*\s]|\[[ xX]\]", "", section_text(body, pattern) or "")]
+
+
+def section_text(body: Optional[str], pattern: "re.Pattern[str]") -> Optional[str]:
+    """Text from the heading to the next heading, or None without the heading."""
     heading = pattern.search(body or "")
     if heading is None:
-        return []
-    section = re.split(r"^#{1,6}\s", (body or "")[heading.end():], maxsplit=1, flags=re.M)[0]
+        return None
+    return re.split(r"^#{1,6}\s", (body or "")[heading.end():], maxsplit=1, flags=re.M)[0]
+
+
+def section_items(body: Optional[str], pattern: "re.Pattern[str]") -> List[str]:
+    section = section_text(body, pattern) or ""
     items = re.findall(r"^\s*[-*]\s+(?:\[[ xX]\]\s*)?(.+?)\s*$", section, re.M)
     return [item for item in items if item]
 
