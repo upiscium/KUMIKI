@@ -318,6 +318,14 @@ class RunOnceTest(unittest.TestCase):
         self.assertLess(len(wide.encode()), ex.PURPOSE_BYTES + 50)
         fenced = "```\ntests:\n- t: a (AC1)\nuntested: none\n- not part of it\n```\nThanks, done.\nstatus: COMPLETED"
         self.assertEqual(ex.test_purposes(fenced), "tests:\n- t: a (AC1)\nuntested: none")
+        loose_note = "tests:\n- t: a\n~~~\n```\nuntested:\n\n1. real HW that\n   is slow\n2. network\n\nThanks.\nstatus: COMPLETED"
+        self.assertEqual(ex.test_purposes(loose_note), "tests:\n- t: a\nuntested: 1. real HW that is slow; 2. network")
+        for count, cut in ((38, False), (39, True)):  # + `tests:` and `untested:` = 40 / 41 lines
+            declared_lines = ex.test_purposes("tests:\n" + "- t\n" * count + "untested: none").splitlines()
+            self.assertEqual((len(declared_lines), declared_lines[-1] == "(truncated by the runner)"),
+                             (ex.PURPOSE_LINES + 1, True) if cut else (ex.PURPOSE_LINES, False))
+        odd = ex.test_purposes("tests:\n- t: x" + "長" * 2000 + "\nuntested: none")  # cut inside a 3-byte char
+        self.assertTrue(odd.endswith("(truncated by the runner)"))
         for text, shown in ((declared, "- test_greet: returns Hello (AC1)"), ("done\nstatus: COMPLETED", "申告なし")):
             runner = FakeRunner(self.routes())
             runner.outputs["stream-json"] = stream(text)
