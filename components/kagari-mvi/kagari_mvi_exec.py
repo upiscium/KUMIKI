@@ -20,6 +20,8 @@ TSUMGI_MAX_BYTES = tsumgi.max_input_bytes()  # a larger review input is not sent
 
 TAIL_LINES = 20
 TAIL_CHARS = 2000
+PURPOSE_LINES = 40  # Claude's declared test purposes stay small for comments and TSUMGI
+PURPOSE_CHARS = 3000
 GIT_IDENTITY = ["-c", "user.name=kagari-mvi", "-c", "user.email=kagari-mvi@localhost"]
 # The worktree is writable by the agent: never let it choose code that git runs here.
 SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] + GIT_IDENTITY
@@ -156,13 +158,30 @@ def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
 
 
 def test_purposes(text: str) -> Optional[str]:
-    """The last `tests:` list and `untested:` line Claude declared, or None (#453)."""
-    found = re.findall(r"^[ \t]*tests:[ \t]*\n((?:[ \t]*[-*][ \t]+\S.*\n)*)[ \t]*(untested:[ \t]*\S.*)$",
-                       text, re.M | re.I)
-    if not found:
+    """Claude's last `tests:` list and `untested:` note (#453), bounded: it is untrusted text."""
+    lines = text.replace("\r\n", "\n").splitlines()
+    starts = [i for i, line in enumerate(lines) if re.match(r"^\W*tests\W*:\W*$", line, re.I)]
+    if not starts:
         return None
-    items, untested = found[-1]
-    return "tests:\n%s%s" % ("".join(line.strip() + "\n" for line in items.splitlines()), untested.strip())
+    items: List[str] = []
+    untested: Optional[List[str]] = None
+    for line in (bare.strip() for bare in lines[starts[-1] + 1:]):
+        note = re.match(r"^\W*untested\W*:\W*(.*)$", line, re.I)
+        if re.match(r"^\W*status\W*:", line, re.I) or (untested is not None and not line):
+            break
+        if note:
+            untested = [note.group(1)] if note.group(1) else []
+        elif untested is not None:
+            untested.append(line)
+        elif re.match(r"^(?:[-*+]|\d+[.)])\s+\S", line):
+            items.append(line)
+        elif line and items:  # a wrapped item
+            items[-1] += " " + line
+    declared = "tests:\n%s\nuntested: %s" % ("\n".join(items), "; ".join(untested) if untested
+                                              else "(not declared)" if untested is None else "")
+    if len(declared) > PURPOSE_CHARS or declared.count("\n") > PURPOSE_LINES:
+        declared = "\n".join(declared[:PURPOSE_CHARS].splitlines()[:PURPOSE_LINES]) + "\n(truncated by the runner)"
+    return declared if items or untested else None
 
 
 class Blocked(Exception):
@@ -370,9 +389,9 @@ def section_items(body: Optional[str], pattern: "re.Pattern[str]") -> List[str]:
 
 def tests_verdict(text: str) -> Tuple[str, str]:
     """The reviewer's `TESTS:` line; a missing or conflicting one counts as UNKNOWN."""
-    found = {(status.upper(), evidence.strip()) for status, evidence in TESTS_LINE.findall(text)}
-    if len(found) == 1:
-        return found.pop()
+    found = [(status.upper(), evidence.strip()) for status, evidence in TESTS_LINE.findall(text)]
+    if len({status for status, _ in found}) == 1:
+        return found[-1]
     if not found:
         return ("UNKNOWN", "(no TESTS verdict from the reviewer)")
     return ("UNKNOWN", "(conflicting TESTS verdicts from the reviewer)")

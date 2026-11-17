@@ -307,7 +307,13 @@ class RunOnceTest(unittest.TestCase):
                     "- test_cli: prints ``` (AC2)\nuntested: unicode names\nstatus: COMPLETED")
         self.assertEqual(ex.test_purposes(declared), "tests:\n- test_greet: returns Hello (AC1)\n"
                          "- test_cli: prints ``` (AC2)\nuntested: unicode names")
-        self.assertIsNone(ex.test_purposes("tests:\n- a: b\nstatus: COMPLETED"))  # no untested line
+        self.assertEqual(ex.test_purposes("tests:\n- a: b\nstatus: COMPLETED"), "tests:\n- a: b\nuntested: (not declared)")
+        loose = "**tests:**\r\n\r\n1. test_a: checks\r\n   the parser (AC1)\r\n\r\nuntested:\r\n- CRLF\r\n\r\nstatus: COMPLETED"
+        self.assertEqual(ex.test_purposes(loose), "tests:\n1. test_a: checks the parser (AC1)\nuntested: - CRLF")
+        self.assertIsNone(ex.test_purposes("tests:\n\nstatus: COMPLETED"))
+        huge = ex.test_purposes("tests:\n" + "- t: %s\n" % ("x" * 200) * 400 + "untested: none")
+        self.assertLess(len(huge), ex.PURPOSE_CHARS + 50)
+        self.assertTrue(huge.endswith("(truncated by the runner)"))
         for text, shown in ((declared, "- test_greet: returns Hello (AC1)"), ("done\nstatus: COMPLETED", "申告なし")):
             runner = FakeRunner(self.routes())
             runner.outputs["stream-json"] = stream(text)
@@ -575,6 +581,7 @@ class ReviewParseTest(unittest.TestCase):
                          ("FAIL", "test_a checks nothing"))
         self.assertEqual(ex.tests_verdict("AC1: PASS — a"), ("UNKNOWN", "(no TESTS verdict from the reviewer)"))
         self.assertEqual(ex.tests_verdict("TESTS: PASS — x\nTESTS: FAIL — y")[0], "UNKNOWN")
+        self.assertEqual(ex.tests_verdict("TESTS: PASS — x\nsummary\nTESTS: PASS — y"), ("PASS", "y"))
         self.assertEqual(ex.tests_verdict("TESTS: PASSED")[0], "UNKNOWN")
 
     def test_verdicts_missing_line_is_unknown(self):
