@@ -71,7 +71,9 @@ aggregate is limited to 15 minutes. This does not declare timed-out tests passed
 Each completed test also emits a `CI_TEST_SECONDS` line for log-level diagnosis.
 
 The final `contracts` job has the same required check name as before and runs
-with `always()`. It fails if a Python shard, any original Nix/contract command,
+with `!cancelled()`: after any job failure, but not in a run that was cancelled
+(for example superseded by a newer push to the same PR), where it ends cancelled
+rather than failed (#464). It fails if a Python shard, any original Nix/contract command,
 or any generated-template smoke did not report success. It downloads all eight
 Python reports and independently re-discovers the full suite to verify each
 exact assignment, the same inventory fingerprint, every test executed once,
