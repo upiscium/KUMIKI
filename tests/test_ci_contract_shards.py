@@ -22,13 +22,27 @@ class ContractShardProofTest(unittest.TestCase):
         self.assertEqual(set(range(sharding.SHARDS)), set(per_shard))
         self.assertEqual(set(self.ids), set().union(*(set(x) for x in per_shard.values())))
         self.assertEqual(len(self.ids), sum(len(x) for x in per_shard.values()))
-        # Only the #196 host-checkpoint TestCase may be split across shards.
+        # Only the #196 host-checkpoint TestCase and SPLIT_MODULES may be split across shards.
         by_module = defaultdict(set)
         for identifier, shard in assigned.items():
             by_module[identifier.split(".", 1)[0]].add(shard)
         for module, shards in by_module.items():
-            if module != sharding.SPECIAL_MODULE:
+            if module != sharding.SPECIAL_MODULE and module not in sharding.SPLIT_MODULES:
                 self.assertEqual(1, len(shards), module)
+        for module in sharding.SPLIT_MODULES:
+            self.assertGreater(len(by_module[module]), 1, module)
+
+    def test_split_modules_have_per_test_fixtures_and_read_no_package(self) -> None:
+        from pathlib import Path
+        from tools import kagari_v010_ci_packages as packages
+        root = Path(sharding.__file__).resolve().parents[1]
+        consumers = packages.package_module_requirements(root)
+        for module in sharding.SPLIT_MODULES:
+            source = (root / "tests" / (module + ".py")).read_text(encoding="utf-8")
+            for shared in ("setUpClass", "setUpModule", "tearDownClass", "tearDownModule"):
+                self.assertNotIn(shared, source, module)
+            self.assertNotIn(module, consumers)
+            self.assertTrue(any(identifier.startswith(module + ".") for identifier in self.ids), module)
 
     def test_reordering_suite_does_not_change_file_assignment(self) -> None:
         before = sharding.assignments(self.ids)

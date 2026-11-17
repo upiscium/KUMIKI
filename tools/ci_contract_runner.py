@@ -25,6 +25,9 @@ if str(ROOT) not in sys.path:
 SHARDS = 8
 SPECIAL_MODULE = "test_turn_orchestration_v4"
 SPECIAL_SHARDS = (4, 5, 6, 7)
+# Modules whose TestCases rebuild every fixture in setUp (no setUpClass/setUpModule)
+# and read no Nix package, so their exact tests may run on any shard (#459).
+SPLIT_MODULES = ("test_kagari_vnext_main_host", "test_kagari_vnext_trusted_host")
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 _REPORT_FIELDS = frozenset({
     "schema_version", "shard", "shards", "inventory_digest",
@@ -38,30 +41,110 @@ _REPORT_COUNTS = frozenset({
     "tests_run", "skipped", "failures", "errors", "unexpected_successes",
 })
 
-# Relative measurements from PR #240's failed 1431-test CI; not portable time guarantees.
-# Unknown/new files are always included, using a conservative count-based estimate.
+# Observed per-module seconds (individual_test_seconds summed per module) from the
+# Actions run 43978046785 (2026-11-16, PR #457). Scheduling weights only, never PASS
+# evidence. Stale weights pinned four 1-2 minute modules as 10-25 minute loads, so all
+# other modules piled onto shards 4-7. Unknown/new files are always included, using a
+# count-based estimate (test count / 10 seconds); refresh these from a recent run.
 ESTIMATED_SECONDS = {
-    "test_task_collaboration_v4": 977,
-    "test_task_cleanup_v4": 1509,
-    "test_task_integration_v4": 679,
-    "test_task_view_v4": 527,
-    "test_task_record_v4": 157,
-    "test_automation_upgrade": 51,
-    "test_metadata_ref": 130,
-    "test_task_state_recovery": 62,
-    "test_evidence_v4": 87,
-    "test_source_bootstrap_upgrade_bridge": 22,
-    "test_source_publication_recovery_bridge": 23,
-    "test_cleanup_resources_v4": 23,
-    "test_integration_git_v4": 51,
-    "test_post_merge_finalization": 13,
-    "test_collaboration_git_v4": 10,
+    "test_kagari_vnext_main_host": 381,
+    "test_kagari_vnext_trusted_host": 288,
+    "test_kagari_metadata_v2_pr_checkpoint": 101,
+    "test_task_cleanup_v4": 97,
+    "test_kagari_vnext_claude_lane_b": 96,
+    "test_kagari_loopback_main_bridge": 78,
+    "test_kagari_loopback_attached": 75,
+    "test_kagari_vnext_main_v2_pr_first_publication": 75,
+    "test_task_collaboration_v4": 71,
+    "test_kagari_vnext_main_v2_pr_first_observation": 63,
+    "test_automation_upgrade": 50,
+    "test_kagari_vnext_main_service": 50,
+    "test_kagari_metadata_v2_pr_checkpoint_state_machine": 48,
+    "test_kagari_loopback_v2_preview": 46,
+    "test_task_view_v4": 44,
+    "test_kagari_metadata_v2_archive_host": 37,
+    "test_task_integration_v4": 37,
+    "test_kagari_metadata_v2_cleanup_intent": 36,
+    "test_kagari_vnext_test_evidence": 33,
+    "test_kagari_vnext_cleanup_isolation": 29,
+    "test_kagari_vnext_main": 29,
+    "test_kagari_vnext_host_qualification": 23,
+    "test_kagari_metadata_v2_issue_publisher": 22,
+    "test_kagari_vnext_session": 21,
+    "test_kagari_metadata_v2_cleanup_host": 21,
+    "test_source_bootstrap_upgrade_bridge": 20,
+    "test_kagari_vnext_pr_first": 19,
+    "test_kagari_vnext_caller_detach": 18,
+    "test_kagari_vnext_main_v2_session_observation": 18,
+    "test_kagari_metadata_v2_cleanup_history": 16,
+    "test_kagari_vnext_main_v2_worktree": 14,
+    "test_kagari_vnext_test_to_pr": 13,
+    "test_issue_worktree_cleanup_v4": 13,
+    "test_integration_git_v4": 12,
+    "test_issue_worktree_v4": 12,
+    "test_metadata_v2": 12,
+    "test_kagari_vnext_task_binding": 12,
+    "test_task_record_v4": 12,
+    "test_kagari_vnext_opencode_control": 11,
+    "test_post_merge_finalization": 11,
+    "test_kagari_v010_native_generic_task": 10,
+    "test_kagari_vnext_attached_main": 10,
+    "test_kagari_metadata_v2_task_admission": 10,
+    "test_metadata_ref": 9,
+    "test_kagari_vnext_executor_selection": 9,
+    "test_collaboration_git_v4": 8,
+    "test_kagari_v010_ga_stable_lifecycle": 8,
+    "test_kagari_v010_ci_packages": 8,
+    "test_kagari_loopback_control": 8,
+    "test_kagari_vnext_main_v2_locator_recheck_r22": 7,
+    "test_task_state_recovery": 7,
+    "test_kagari_v010_ga_lifecycle": 6,
+    "test_kagari_v010_rc_lifecycle": 6,
+    "test_evidence_v4": 6,
+    "test_worktree_lifecycle_smoke": 5,
 }
 PINNED = {
     "test_task_collaboration_v4": 0,
     "test_task_cleanup_v4": 1,
     "test_task_integration_v4": 2,
     "test_task_view_v4": 3,
+}
+
+
+# Observed per-test seconds of SPLIT_MODULES (same run as ESTIMATED_SECONDS); others count 1.
+SPLIT_TEST_SECONDS = {
+    "MainHostTests.test_different_approved_issue_gets_independent_worktree_and_session": 58,
+    "MainHostTests.test_restart_after_main_checkpoint_before_session_reobserves_without_duplicate": 37,
+    "TrustedHostTests.test_main_host_route_stops_before_session_and_reconnect_reuses_checkpoint": 36,
+    "MainHostTests.test_existing_pr_checkpoint_without_main_runtime_is_adopted_not_republished": 34,
+    "TrustedHostTests.test_uncertain_comment_no_result_never_recaptures_or_reposts": 33,
+    "TrustedHostTests.test_success_real_interfaces_and_reconnect_without_duplicate": 32,
+    "TrustedHostTests.test_lost_ack_pr_and_comment_exactly_reconciled": 32,
+    "MainHostTests.test_stale_existing_initial_checkpoint_cannot_launch": 29,
+    "TrustedHostTests.test_snapshot_denied_and_retry_no_duplicate_pr": 28,
+    "MainHostTests.test_receipted_missing_context_never_replaces_session_or_process_evidence": 25,
+    "MainHostTests.test_follow_uses_same_host_route_and_never_reprompts": 25,
+    "MainHostTests.test_altered_kickoff_identity_cannot_enable_session_resume": 25,
+    "TrustedHostTests.test_altered_approved_comment_content_cannot_use_permit": 25,
+    "MainHostTests.test_denied_content_or_intent_or_snapshot_cannot_start_model": 24,
+    "MainHostTests.test_other_session_materialized_pristine_task_is_adopted_before_first_session": 24,
+    "MainHostTests.test_ordinary_host_route_pr_first_then_restart_does_not_duplicate": 23,
+    "MainHostTests.test_outside_session_after_checkpoint_cannot_receive_main_first_prompt": 23,
+    "MainHostTests.test_process_only_state_after_checkpoint_refuses_without_new_session": 22,
+    "TrustedHostTests.test_uncertain_pr_no_result_never_reposts_even_on_reconnect": 19,
+    "MainHostTests.test_missing_checkpoint_after_unconfirmed_post_never_starts_session": 18,
+    "TrustedHostTests.test_denied_content_and_intent_do_not_create_pr": 14,
+    "TrustedHostTests.test_interrupt_after_remote_cas_recovers_exact_candidate_not_tip": 12,
+    "TrustedHostTests.test_interrupt_before_publication_blocks_without_recapture": 11,
+    "TrustedHostTests.test_pagination_limits_duplicates_and_malformed_extra_entries": 10,
+    "TrustedHostTests.test_conflicting_source_or_unknown_recovery_state_blocks": 10,
+    "TrustedHostTests.test_transport_writes_require_real_one_use_facade_permit": 10,
+    "TrustedHostTests.test_cross_repo_issue_and_pr_facts": 10,
+    "MainHostTests.test_denied_existing_facade_authority_blocks_before_model": 9,
+    "TrustedHostTests.test_denied_authority_before_branch_or_github_publication": 2,
+    "MainHostTests.test_dirty_existing_task_is_not_pristine_adoption": 2,
+    "TrustedHostTests.test_json_duplicate_oversized_wrong_shapes_and_principal": 1,
+    "MainHostTests.test_live_session_created_outside_main_is_not_a_pristine_task": 1,
 }
 
 
@@ -149,7 +232,7 @@ def inventory_digest(identifiers: list[str]) -> str:
 
 
 def assignments(identifiers: list[str], shard_count: int = SHARDS) -> dict[str, int]:
-    """Assign each exact test ID once; only #196's heavy module splits by ID."""
+    """Assign each exact test ID once; only #196's module and SPLIT_MODULES split by ID."""
     if shard_count != SHARDS:
         raise DiscoveryError(f"expected exactly {SHARDS} independent shards")
     if not identifiers or len(set(identifiers)) != len(identifiers):
@@ -159,7 +242,7 @@ def assignments(identifiers: list[str], shard_count: int = SHARDS) -> dict[str, 
         raise DiscoveryError("no contract test modules")
     has_special = SPECIAL_MODULE in modules
     normal_modules = {module: count for module, count in modules.items()
-                      if module != SPECIAL_MODULE}
+                      if module != SPECIAL_MODULE and module not in SPLIT_MODULES}
     if has_special and modules[SPECIAL_MODULE] < len(SPECIAL_SHARDS):
         raise DiscoveryError("insufficient tests for dedicated heavy module split")
     # With #196 present, dedicate the upper 4 runners to its independent
@@ -171,20 +254,22 @@ def assignments(identifiers: list[str], shard_count: int = SHARDS) -> dict[str, 
         if module in normal_modules:
             file_map[module] = shard
             loads[shard] += ESTIMATED_SECONDS[module]
-    remaining = sorted(
-        (module for module in normal_modules if module not in file_map),
-        key=lambda module: (-ESTIMATED_SECONDS.get(
-            module, max(1.0, normal_modules[module] / 10.0)), module),
-    )
-    for module in remaining:
-        weight = ESTIMATED_SECONDS.get(module, max(1.0, normal_modules[module] / 10.0))
-        shard = min(normal_shards, key=lambda n: (loads[n], n))
-        file_map[module] = shard
-        loads[shard] += weight
+    # Whole modules and the exact tests of SPLIT_MODULES share one heaviest-first queue.
+    units = [(ESTIMATED_SECONDS.get(module, max(1.0, normal_modules[module] / 10.0)), module, None)
+             for module in normal_modules if module not in file_map]
+    units += [(SPLIT_TEST_SECONDS.get(identifier.split(".", 1)[1], 1), identifier, identifier)
+              for identifier in identifiers if identifier.split(".", 1)[0] in SPLIT_MODULES]
     by_id: dict[str, int] = {}
+    for weight, key, identifier in sorted(units, key=lambda unit: (-unit[0], unit[1])):
+        shard = min(normal_shards, key=lambda n: (loads[n], n))
+        if identifier is None:
+            file_map[key] = shard
+        else:
+            by_id[identifier] = shard
+        loads[shard] += weight
     for identifier in identifiers:
         module = identifier.split(".", 1)[0]
-        if module != SPECIAL_MODULE:
+        if module in normal_modules:
             by_id[identifier] = file_map[module]
     if has_special:
         heavy_ids = sorted(
@@ -222,8 +307,9 @@ def plan(tests: list[unittest.TestCase]) -> dict:
     by_file: dict[int, set[str]] = {}
     for identifier, shard in mapping.items():
         by_file.setdefault(shard, set()).add(identifier.split(".", 1)[0])
-    heavy_locations = sorted({mapping[identifier] for identifier in identifiers
-                              if identifier.split(".", 1)[0] == SPECIAL_MODULE})
+    split = {module: sorted({mapping[identifier] for identifier in identifiers
+                             if identifier.split(".", 1)[0] == module})
+             for module in (SPECIAL_MODULE, *SPLIT_MODULES)}
     return {
         "schema_version": 1,
         "inventory_digest": inventory_digest(identifiers),
@@ -232,7 +318,7 @@ def plan(tests: list[unittest.TestCase]) -> dict:
         "shards": SHARDS,
         "selected_counts": {str(shard): counts[shard] for shard in range(SHARDS)},
         "modules": {str(shard): sorted(by_file.get(shard, set())) for shard in range(SHARDS)},
-        "split_modules": {SPECIAL_MODULE: heavy_locations} if heavy_locations else {},
+        "split_modules": {module: shards for module, shards in split.items() if shards},
     }
 
 
