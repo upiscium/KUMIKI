@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR supersedes the older run; main keeps every run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   python-contracts:
     name: Python contracts (shard ${{ matrix.shard }})
