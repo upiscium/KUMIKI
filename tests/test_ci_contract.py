@@ -26,7 +26,7 @@ class CiContractTest(unittest.TestCase):
         self.assertIn("actions/download-artifact@v4", workflow)
         self.assertIn("timeout-minutes: 75", workflow)
         self.assertIn("needs: [python-contracts, contract-support, generated-template-smoke]", workflow)
-        self.assertIn("if: ${{ always() }}", workflow)
+        self.assertIn("if: ${{ !cancelled() }}", workflow)
         self.assertIn('test "$PYTHON_RESULT" = success', workflow)
         self.assertIn('test "$SUPPORT_RESULT" = success', workflow)
         self.assertIn('test "$SMOKE_RESULT" = success', workflow)

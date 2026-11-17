@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [python-contracts, contract-support, generated-template-smoke]
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     steps:
       - name: Require every original gate to pass
         env:
