@@ -180,6 +180,8 @@ def test_purposes(text: str) -> Optional[str]:
             elif line and untested and not gap and raw[:1].isspace() and not re.search(
                     r"[.。!?！？]$", untested[-1]):  # a bullet wrapped mid-sentence
                 untested[-1] += " " + line
+            elif line and untested and not gap and raw[:1].isspace():
+                continue  # prose under a finished bullet: skip it, a later bullet still counts
             elif line:
                 break  # prose after the declaration
             gap = not line and bool(untested)

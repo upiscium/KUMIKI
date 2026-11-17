@@ -320,7 +320,7 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(ex.test_purposes(fenced), "tests:\n- t: a (AC1)\nuntested: none")
         loose_note = "tests:\n- t: a\n~~~\n```\nuntested:\n\n1. real HW that\n   is slow\n2. network\n\nThanks.\nstatus: COMPLETED"
         self.assertEqual(ex.test_purposes(loose_note), "tests:\n- t: a\nuntested: 1. real HW that is slow; 2. network")
-        for tail, shown in (("- HW.\n  Thanks, done.\n- net", "- HW."), ("- HW\n\n- net\n\n  more", "- HW; - net")):
+        for tail, shown in (("- HW.\n  Needs a board.\n  Really.\n- net.\n  Thanks.\nDone.", "- HW.; - net."), ("- HW\n\n- net\n\n  more", "- HW; - net")):
             self.assertEqual(ex.test_purposes("tests:\n- t\nuntested:\n" + tail), "tests:\n- t\nuntested: " + shown)
         self.assertEqual(ex.test_purposes("tests:\n- t\nuntested:\n99. a\n2026. b"), "tests:\n- t\nuntested: 99. a")
         for count, cut in ((38, False), (39, True)):  # + `tests:` and `untested:` = 40 / 41 lines
