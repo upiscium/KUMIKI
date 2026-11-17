@@ -57,6 +57,11 @@ AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worke
 - Do not change CLAUDE.md, CLAUDE.local.md, AGENTS.md, `.claude/` or `.github/workflows/` unless the Issue
   lists the path under `### 変更する保護ファイル`. Other changes there stop the run before push.
 - The Issue's test command, which the host re-runs to decide the result: {test}
+- Just before the status line, declare what each test is for (the host posts it as is;
+  it does not decide the result):
+  tests:
+  - <test name>: <what it is meant to guarantee> (AC<n>)
+  untested: <what the tests do not check, or none>
 - End your last message with one line: `status: COMPLETED` if the Issue is done and the
   test command passes, otherwise `status: BLOCKED: <reason>`.
 """
@@ -138,6 +143,7 @@ def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
     text = str((result or {}).get("result") or "")
     statuses = re.findall(r"status:\s*(COMPLETED|BLOCKED[^\n]*)", text)
     return {
+        "purposes": test_purposes(text),
         # Only the final result and stderr: file contents and ids may contain "401".
         "errored": errored,
         "auth": errored and bool(AUTH_PATTERN.search("\n".join(plain + [text]))),
@@ -147,6 +153,16 @@ def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
         "detail": tail("\n".join(plain + [text])),  # readable: no raw stream-json
         "text": text,
     }
+
+
+def test_purposes(text: str) -> Optional[str]:
+    """The last `tests:` list and `untested:` line Claude declared, or None (#453)."""
+    found = re.findall(r"^[ \t]*tests:[ \t]*\n((?:[ \t]*[-*][ \t]+\S.*\n)*)[ \t]*(untested:[ \t]*\S.*)$",
+                       text, re.M | re.I)
+    if not found:
+        return None
+    items, untested = found[-1]
+    return "tests:\n%s%s" % ("".join(line.strip() + "\n" for line in items.splitlines()), untested.strip())
 
 
 class Blocked(Exception):
@@ -203,6 +219,7 @@ class AgentSteps:
                                      settings, REVIEW_RULES.format(access="The current directory is "
                                      "a checkout of the PR head; you may only read it."), prompt)
         outcome["verdicts"] = review_verdicts(outcome["text"], len(criteria))
+        outcome["tests"] = tests_verdict(outcome["text"])
         outcome["reviewer"] = ("new `claude -p` session, tools %s only; same model family as the "
                                "implementer" % REVIEW_TOOLS)
         return outcome
@@ -218,6 +235,7 @@ class AgentSteps:
         reviewer = "TSUMGI `%s`, diff and test result only; %s" % (TSUMGI_MODEL, tokens)
         return {"errored": reply["error"] is not None, "denials": 0, "text": reply["text"],
                 "verdicts": review_verdicts(reply["text"], len(criteria)),
+                "tests": tests_verdict(reply["text"]),
                 "reviewer": reviewer + ("; " + reply["error"] if reply["error"] else "")}
 
     def launch_claude(self, workdir: str, cwd: str, log_name: str, tools: str,
@@ -301,6 +319,10 @@ REVIEW_RULES = """You are an independent reviewer of one pull request (KAGARI MV
   evidence is missing or unclear, answer UNKNOWN rather than PASS.
 - Output exactly one line per criterion, in order:
   AC<n>: PASS|FAIL|UNKNOWN — <evidence as file:line, or the reason>
+- Then one line on the implementer's declared test purposes (in the test result):
+  TESTS: PASS|FAIL|UNKNOWN — <reason>
+  PASS only if each declared purpose matches what that test really checks and every
+  criterion has a test; FAIL if not; UNKNOWN if there is no declaration or you cannot tell.
 """
 ALLOWED_HEADING = re.compile(r"^#{2,6}[ \t]*(?:変更する保護ファイル|Protected files to change)[ \t]*$",
                              re.M | re.I)
@@ -311,6 +333,8 @@ PLACEMENT_HEADINGS = [(names, re.compile(r"^#{2,6}[ \t]*(?:%s)[ \t]*$" % "|".joi
 # [^\w\n] / [ \t]: a verdict never spans lines (an empty evidence must not swallow the next line).
 VERDICT_LINE = re.compile(r"^[^\w\n]*AC(\d+)[^\w\n]*?[:：][^\w\n]*(PASS|FAIL|UNKNOWN)\b[*_]*[ \t]*"
                           r"[-—–:：]*[ \t]*(.*)$", re.M | re.I)
+TESTS_LINE = re.compile(r"^[^\w\n]*TESTS[^\w\n]*?[:：][^\w\n]*(PASS|FAIL|UNKNOWN)\b[*_]*[ \t]*"
+                        r"[-—–:：]*[ \t]*(.*)$", re.M | re.I)
 
 
 def acceptance_criteria(body: Optional[str]) -> List[str]:
@@ -344,6 +368,16 @@ def section_items(body: Optional[str], pattern: "re.Pattern[str]") -> List[str]:
     return [item for item in items if item]
 
 
+def tests_verdict(text: str) -> Tuple[str, str]:
+    """The reviewer's `TESTS:` line; a missing or conflicting one counts as UNKNOWN."""
+    found = {(status.upper(), evidence.strip()) for status, evidence in TESTS_LINE.findall(text)}
+    if len(found) == 1:
+        return found.pop()
+    if not found:
+        return ("UNKNOWN", "(no TESTS verdict from the reviewer)")
+    return ("UNKNOWN", "(conflicting TESTS verdicts from the reviewer)")
+
+
 def review_verdicts(text: str, count: int) -> List[Tuple[str, str]]:
     """(status, evidence) per criterion; a missing line counts as UNKNOWN."""
     found: Dict[int, Tuple[str, str]] = {}
@@ -361,6 +395,8 @@ def review_report(head: str, criteria: List[str], outcome: Dict[str, Any], fresh
     rows = ["| AC%d | %s | **%s** | %s |" % (i, cell(c), status, cell(evidence))
             for i, (c, (status, evidence)) in enumerate(zip(criteria, verdicts), start=1)]
     failing = sum(1 for status, _ in verdicts if status != "PASS")
+    rows.append("| TESTS | テストの目的（申告）と受入条件の対応 | **%s** | %s |" % (
+        outcome["tests"][0], cell(outcome["tests"][1])))
     return ("kagari-mvi: independent review (%s, ADR-0007 D6).\n\n- reviewed head: `%s`\n"
             "- not PASS: %d of %d\n- permission denials: %d\n- reviewer session: %s\n"
             "- runner test result: %s\n\n| # | 受入条件 | 判定 | 根拠 |\n| --- | --- | --- | --- |\n%s\n"
@@ -382,6 +418,8 @@ def report(test: str, code: int, output: str, outcome: Dict[str, Any], sha: str,
     return ("kagari-mvi: test result recorded by the runner (not reported by Claude).\n\n"
             "- tested commit: `%s`\n" % sha + changed +
             "- test command: `%s` (run by the runner as the agent user)\n- exit code: %d\n"
-            "- Claude status: `%s`\n- permission denials: %d\n\n```\n%s\n```" % (
-                test, code, outcome["status"], outcome["denials"],
-                tail(output).replace("```", "'''")))
+            "- Claude status: `%s`\n- permission denials: %d\n\n```\n%s\n```\n\n"
+            "テストの目的（Claude の申告。合否には使わない）：\n\n%s" % (
+                test, code, outcome["status"], outcome["denials"], tail(output).replace("```", "'''"),
+                "```\n%s\n```" % outcome["purposes"].replace("```", "'''")
+                if outcome.get("purposes") else "申告なし"))
