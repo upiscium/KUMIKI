@@ -166,24 +166,32 @@ def test_purposes(text: str) -> Optional[str]:
     items: List[str] = []
     untested: Optional[List[str]] = None
     inline = False
-    for line in (bare.strip() for bare in lines[starts[-1] + 1:]):
+    bullet = r"^(?:[-*+]|\d+[.)])\s+\S"
+    for raw in lines[starts[-1] + 1:]:
+        line, fence = raw.strip(), raw.strip()[:3] in ("```", "~~~")
         note = re.match(r"^\W*untested\W*:\W*(.*)$", line, re.I)
-        if re.match(r"^\W*status\W*:", line, re.I) or (untested is not None and (
-                inline or not re.match(r"^[-*+]\s+\S", line))):
-            break  # untested: one line, or the bullets right under it (no fence, no prose)
-        if note:
+        if re.match(r"^\W*status\W*:", line, re.I):
+            break
+        if untested is not None:  # one inline line, or the list right under `untested:`
+            if inline or fence or (not line and untested):
+                break
+            if re.match(bullet, line):
+                untested.append(line)
+            elif line and untested and raw[:1].isspace():  # a wrapped bullet
+                untested[-1] += " " + line
+            elif line:
+                break  # prose after the declaration
+        elif note:
             untested, inline = ([note.group(1)], True) if note.group(1) else ([], False)
-        elif untested is not None:
-            untested.append(line)
-        elif line.startswith("```"):
+        elif fence:
             continue
-        elif re.match(r"^(?:[-*+]|\d+[.)])\s+\S", line):
+        elif re.match(bullet, line):
             items.append(line)
         elif line and items:  # a wrapped item
             items[-1] += " " + line
     declared = "tests:\n%s\nuntested: %s" % ("\n".join(items), "; ".join(untested) if untested
                                               else "(not declared)" if untested is None else "")
-    if len(declared.encode()) > PURPOSE_BYTES or declared.count("\n") > PURPOSE_LINES:
+    if len(declared.encode()) > PURPOSE_BYTES or len(declared.splitlines()) > PURPOSE_LINES:
         cut = declared.encode()[:PURPOSE_BYTES].decode(errors="ignore")  # bytes: TSUMGI's budget
         declared = "\n".join(cut.splitlines()[:PURPOSE_LINES]) + "\n(truncated by the runner)"
     return declared if items or untested else None
