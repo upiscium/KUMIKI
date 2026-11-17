@@ -312,8 +312,12 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(ex.test_purposes(loose), "tests:\n1. test_a: checks the parser (AC1)\nuntested: - CRLF")
         self.assertIsNone(ex.test_purposes("tests:\n\nstatus: COMPLETED"))
         huge = ex.test_purposes("tests:\n" + "- t: %s\n" % ("x" * 200) * 400 + "untested: none")
-        self.assertLess(len(huge), ex.PURPOSE_CHARS + 50)
+        self.assertLess(len(huge.encode()), ex.PURPOSE_BYTES + 50)
         self.assertTrue(huge.endswith("(truncated by the runner)"))
+        wide = ex.test_purposes("tests:\n- t: " + "長" * 5000 + "\nuntested: none")  # one line, 15 KB
+        self.assertLess(len(wide.encode()), ex.PURPOSE_BYTES + 50)
+        fenced = "```\ntests:\n- t: a (AC1)\nuntested: none\n- not part of it\n```\nThanks, done.\nstatus: COMPLETED"
+        self.assertEqual(ex.test_purposes(fenced), "tests:\n- t: a (AC1)\nuntested: none")
         for text, shown in ((declared, "- test_greet: returns Hello (AC1)"), ("done\nstatus: COMPLETED", "申告なし")):
             runner = FakeRunner(self.routes())
             runner.outputs["stream-json"] = stream(text)

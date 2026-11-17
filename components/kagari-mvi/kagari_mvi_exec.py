@@ -21,7 +21,7 @@ TSUMGI_MAX_BYTES = tsumgi.max_input_bytes()  # a larger review input is not sent
 TAIL_LINES = 20
 TAIL_CHARS = 2000
 PURPOSE_LINES = 40  # Claude's declared test purposes stay small for comments and TSUMGI
-PURPOSE_CHARS = 3000
+PURPOSE_BYTES = 3000
 GIT_IDENTITY = ["-c", "user.name=kagari-mvi", "-c", "user.email=kagari-mvi@localhost"]
 # The worktree is writable by the agent: never let it choose code that git runs here.
 SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] + GIT_IDENTITY
@@ -165,22 +165,27 @@ def test_purposes(text: str) -> Optional[str]:
         return None
     items: List[str] = []
     untested: Optional[List[str]] = None
+    inline = False
     for line in (bare.strip() for bare in lines[starts[-1] + 1:]):
         note = re.match(r"^\W*untested\W*:\W*(.*)$", line, re.I)
-        if re.match(r"^\W*status\W*:", line, re.I) or (untested is not None and not line):
-            break
+        if re.match(r"^\W*status\W*:", line, re.I) or (untested is not None and (
+                inline or not re.match(r"^[-*+]\s+\S", line))):
+            break  # untested: one line, or the bullets right under it (no fence, no prose)
         if note:
-            untested = [note.group(1)] if note.group(1) else []
+            untested, inline = ([note.group(1)], True) if note.group(1) else ([], False)
         elif untested is not None:
             untested.append(line)
+        elif line.startswith("```"):
+            continue
         elif re.match(r"^(?:[-*+]|\d+[.)])\s+\S", line):
             items.append(line)
         elif line and items:  # a wrapped item
             items[-1] += " " + line
     declared = "tests:\n%s\nuntested: %s" % ("\n".join(items), "; ".join(untested) if untested
                                               else "(not declared)" if untested is None else "")
-    if len(declared) > PURPOSE_CHARS or declared.count("\n") > PURPOSE_LINES:
-        declared = "\n".join(declared[:PURPOSE_CHARS].splitlines()[:PURPOSE_LINES]) + "\n(truncated by the runner)"
+    if len(declared.encode()) > PURPOSE_BYTES or declared.count("\n") > PURPOSE_LINES:
+        cut = declared.encode()[:PURPOSE_BYTES].decode(errors="ignore")  # bytes: TSUMGI's budget
+        declared = "\n".join(cut.splitlines()[:PURPOSE_LINES]) + "\n(truncated by the runner)"
     return declared if items or untested else None
 
 
