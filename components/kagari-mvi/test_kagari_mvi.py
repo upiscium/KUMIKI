@@ -17,7 +17,9 @@ import kagari_mvi_exec as ex  # noqa: E402
 import kagari_mvi_tsumgi as ts  # noqa: E402
 
 
-TEST_BODY = "body %d\n\n### テストコマンド\n```sh\npython3 -m unittest\n```\n"
+PLACEMENT = ("### 全体ロジック\nrun-once の流れ\n\n### 置く理由\n同じ段で止められる\n\n"
+             "### 却下した置き場所\n- review-once：実装の後になる\n\n")
+TEST_BODY = "body %d\n\n" + PLACEMENT + "### テストコマンド\n```sh\npython3 -m unittest\n```\n"
 
 
 def issue(number, labels, created="2026-11-01T00:00:00Z", pr=False, state="open"):
@@ -374,6 +376,15 @@ class RunOnceTest(unittest.TestCase):
         self.assertIn("`.github/workflows/x.yml`", comment)
         self.assertNotIn("ci.yml", comment)
 
+    def test_missing_placement_accepts_english_headings_and_none_with_reason(self):
+        self.assertEqual(ex.missing_placement(TEST_BODY % 1), [])
+        english = ("## Overall logic\nflow\n## why here\nsame stage\n"
+                   "#### Rejected placements\n- 無し：他に候補が無い\n")
+        self.assertEqual(ex.missing_placement(english), [])
+        self.assertEqual(ex.missing_placement(english.replace("same stage", " ")), ["置く理由"])
+        self.assertEqual(ex.missing_placement("全体ロジック\n置く理由\n却下した置き場所\n"),
+                         ["全体ロジック", "置く理由", "却下した置き場所"])
+
     def test_allowed_protected(self):
         body = ("### Protected files to change\n- `CLAUDE.md` — 理由\n* ./.claude/\n- /AGENTS.md\n"
                 "### テストコマンド\n- not.this\n")
@@ -481,6 +492,21 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(self.run_worker(runner), 0)
         self.assertEqual(runner.added_labels(), [mvi.BLOCKED])
         self.assertFalse(any(args[0] in ("git", "sudo") for args, _, _ in runner.calls))
+
+    def test_missing_placement_blocks_before_start_and_names_the_headings(self):
+        for body, missing in (("### テストコマンド\n```\nmake\n```\n", ["全体ロジック", "置く理由", "却下した置き場所"]),
+                              (TEST_BODY.replace("同じ段で止められる", "") % 7, ["置く理由"]),
+                              (TEST_BODY.replace("- review-once：実装の後になる", "- [ ]\n-") % 7,
+                               ["却下した置き場所"])):
+            routes = self.routes()
+            routes[("GET", "repos/o/r/issues?")] = [dict(issue(7, [mvi.APPROVED]), body=body)]
+            runner = FakeRunner(routes)
+            self.assertEqual(self.run_worker(runner), 0)
+            self.assertEqual(runner.added_labels(), [mvi.BLOCKED])
+            self.assertFalse(any(args[0] in ("git", "sudo") for args, _, _ in runner.calls))
+            comment = self.comments(runner, 7)[0]
+            for name in ("全体ロジック", "置く理由", "却下した置き場所"):
+                self.assertEqual("`### %s`" % name in comment, name in missing, (name, comment))
 
     def test_failure_in_push_blocks_with_stage_and_tail(self):
         runner = FakeRunner(self.routes(), fail={"push origin": "line1\n! [rejected] non-fast-forward"})

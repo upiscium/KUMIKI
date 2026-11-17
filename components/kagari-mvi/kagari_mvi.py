@@ -17,8 +17,8 @@ import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from kagari_mvi_exec import (SAFE_GIT, AgentSteps, Blocked, CommandError, Runner,
-                             acceptance_criteria, allowed_protected, report, review_report,
-                             subprocess_runner, tail, test_command)
+                             acceptance_criteria, allowed_protected, missing_placement, report,
+                             review_report, subprocess_runner, tail, test_command)
 
 TEST_REPORT_PREFIX = "kagari-mvi: test result recorded by the runner"
 
@@ -264,6 +264,10 @@ class Worker(AgentSteps):
         if reason is None and test is None:
             reason = ("The Issue body has no test command. Add a `### テストコマンド` "
                       "heading followed by a code block whose first line is the command.")
+        missing = missing_placement(issue.get("body"))
+        if reason is None and missing:
+            reason = ("The Issue body lacks placement sections (ADR-0011): %s. Add each as a "
+                      "`###` heading with content." % ", ".join("`### %s`" % name for name in missing))
         if reason is not None:
             self.add_labels(number, BLOCKED)
             self.comment(number, "kagari-mvi: blocked before start.\n\n" + reason)
