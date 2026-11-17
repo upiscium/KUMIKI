@@ -302,6 +302,32 @@ class RunOnceTest(unittest.TestCase):
         self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.IMPLEMENTED])
         self.assertEqual(runner.removed_labels(), ["kagari%3Arunning"])
 
+    def test_declared_test_purposes_are_posted_without_changing_the_result(self):
+        declared = ("done\ntests:\n- test_a: old\nuntested: old\n\ntests:\n  - test_greet: returns Hello (AC1)\n"
+                    "- test_cli: prints ``` (AC2)\nuntested: unicode names\nstatus: COMPLETED")
+        self.assertEqual(ex.test_purposes(declared), "tests:\n- test_greet: returns Hello (AC1)\n"
+                         "- test_cli: prints ``` (AC2)\nuntested: unicode names")
+        self.assertEqual(ex.test_purposes("tests:\n- a: b\nstatus: COMPLETED"), "tests:\n- a: b\nuntested: (not declared)")
+        loose = "**tests:**\r\n\r\n1. test_a: checks\r\n   the parser (AC1)\r\n\r\nuntested:\r\n- CRLF\r\n\r\nstatus: COMPLETED"
+        self.assertEqual(ex.test_purposes(loose), "tests:\n1. test_a: checks the parser (AC1)\nuntested: - CRLF")
+        self.assertIsNone(ex.test_purposes("tests:\n\nstatus: COMPLETED"))
+        huge = ex.test_purposes("tests:\n" + "- t: %s\n" % ("x" * 200) * 400 + "untested: none")
+        self.assertLess(len(huge.encode()), ex.PURPOSE_BYTES + 50)
+        self.assertTrue(huge.endswith("(truncated by the runner)"))
+        wide = ex.test_purposes("tests:\n- t: " + "長" * 5000 + "\nuntested: none")  # one line, 15 KB
+        self.assertLess(len(wide.encode()), ex.PURPOSE_BYTES + 50)
+        fenced = "```\ntests:\n- t: a (AC1)\nuntested: none\n- not part of it\n```\nThanks, done.\nstatus: COMPLETED"
+        self.assertEqual(ex.test_purposes(fenced), "tests:\n- t: a (AC1)\nuntested: none")
+        for text, shown in ((declared, "- test_greet: returns Hello (AC1)"), ("done\nstatus: COMPLETED", "申告なし")):
+            runner = FakeRunner(self.routes())
+            runner.outputs["stream-json"] = stream(text)
+            self.assertEqual(self.run_worker(runner), 0)
+            report = self.comments(runner, 70)[0]
+            self.assertIn("テストの目的（Claude の申告。合否には使わない）", report)
+            self.assertIn(shown, report)
+            self.assertNotIn("prints ```", report)  # a fence in the declaration cannot close ours
+            self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.IMPLEMENTED])
+
     def test_failing_test_creates_pr_then_blocks(self):
         runner = FakeRunner(self.routes(), fail={".verify python3 -m unittest 1800": "FAILED (failures=1)"})
         self.assertEqual(self.run_worker(runner), 1)
@@ -554,6 +580,14 @@ class ReviewParseTest(unittest.TestCase):
         self.assertEqual(ex.acceptance_criteria(REVIEW_BODY), ["greet() returns Hello", "tests added"])
         self.assertEqual(ex.acceptance_criteria("no criteria"), [])
 
+    def test_tests_verdict_line_missing_or_conflicting_is_unknown(self):
+        self.assertEqual(ex.tests_verdict("AC1: PASS — a\n**TESTS**: FAIL — test_a checks nothing"),
+                         ("FAIL", "test_a checks nothing"))
+        self.assertEqual(ex.tests_verdict("AC1: PASS — a"), ("UNKNOWN", "(no TESTS verdict from the reviewer)"))
+        self.assertEqual(ex.tests_verdict("TESTS: PASS — x\nTESTS: FAIL — y")[0], "UNKNOWN")
+        self.assertEqual(ex.tests_verdict("TESTS: PASS — x\nsummary\nTESTS: PASS — y"), ("PASS", "y"))
+        self.assertEqual(ex.tests_verdict("TESTS: PASSED")[0], "UNKNOWN")
+
     def test_verdicts_missing_line_is_unknown(self):
         text = "notes\nAC1: PASS — greet.py:2\n**AC3**: FAIL - nope\n"
         self.assertEqual(ex.review_verdicts(text, 3), [
@@ -620,7 +654,8 @@ class ReviewOnceTest(unittest.TestCase):
 
     def test_tsumgi_review_posts_one_request_and_table(self):
         reply = json.dumps({"choices": [{"message": {
-            "content": "<think>x</think>AC1: PASS — greet.py:1\nAC2: UNKNOWN — no test shown"}}]})
+            "content": "<think>x</think>AC1: PASS — greet.py:1\nAC2: UNKNOWN — no test shown\n"
+                       "TESTS: PASS — test_greet matches AC1"}}]})
         runner = FakeRunner(self.routes(), outputs={"chat/completions": reply})
         self.assertEqual(self.run_tsumgi(runner), 0)
         self.assertFalse(any("stream-json" in args for args, _, _ in runner.calls))
@@ -634,6 +669,8 @@ class ReviewOnceTest(unittest.TestCase):
         report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
         self.assertIn("TSUMGI `%s`" % ex.TSUMGI_MODEL, report)
         self.assertIn("| AC1 | greet() returns Hello | **PASS** | greet.py:1 |", report)
+        self.assertIn("| TESTS | テストの目的（申告）と受入条件の対応 | **PASS** | test_greet matches AC1 |", report)
+        self.assertIn("TESTS: PASS|FAIL|UNKNOWN", body["messages"][0]["content"])
         self.assertIn("reviewer session: ok", report)
         self.assertIn(mvi.REVIEWED, runner.added_labels())
 
@@ -683,6 +720,8 @@ class ReviewOnceTest(unittest.TestCase):
         report = runner.api_calls("POST", "repos/o/r/issues/70/comments")[0]["body"]
         self.assertIn("reviewed head: `abc123`", report)
         self.assertIn("| AC2 | tests added | **FAIL** | no test file |", report)
+        self.assertIn("| TESTS | テストの目的（申告）と受入条件の対応 | **UNKNOWN** | (no TESTS verdict", report)
+        self.assertIn("TESTS: PASS|FAIL|UNKNOWN", next(a for a in claude if "independent reviewer" in a))
         self.assertIn("not PASS: 1 of 2", report)
         self.assertIn("runner test result: for this head", report)
         self.assertNotIn("WARNING", prompt)
