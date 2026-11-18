@@ -165,22 +165,26 @@ def test_purposes(text: str) -> Optional[str]:
         return None
     items: List[str] = []
     untested: Optional[List[str]] = None
-    inline = False
-    bullet = r"^(?:[-*+]|\d+[.)])\s+\S"
+    inline = gap = False
+    bullet = r"^(?:[-*+]|\d{1,2}[.)])\s+\S"  # `2026. ...` is prose, not item 2026
     for raw in lines[starts[-1] + 1:]:
         line, fence = raw.strip(), raw.strip()[:3] in ("```", "~~~")
         note = re.match(r"^\W*untested\W*:\W*(.*)$", line, re.I)
         if re.match(r"^\W*status\W*:", line, re.I):
             break
         if untested is not None:  # one inline line, or the list right under `untested:`
-            if inline or fence or (not line and untested):
+            if inline or fence:
                 break
             if re.match(bullet, line):
                 untested.append(line)
-            elif line and untested and raw[:1].isspace():  # a wrapped bullet
+            elif line and untested and not gap and raw[:1].isspace() and not re.search(
+                    r"[.。!?！？]$", untested[-1]):  # a bullet wrapped mid-sentence
                 untested[-1] += " " + line
+            elif line and untested and not gap and raw[:1].isspace():
+                continue  # prose under a finished bullet: skip it, a later bullet still counts
             elif line:
                 break  # prose after the declaration
+            gap = not line and bool(untested)
         elif note:
             untested, inline = ([note.group(1)], True) if note.group(1) else ([], False)
         elif fence:
