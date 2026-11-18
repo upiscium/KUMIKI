@@ -449,8 +449,8 @@ def bounded(seconds: int) -> List[str]:
 
 def report(test: str, code: int, output: str, outcome: Dict[str, Any], sha: str,
            protected: Sequence[str] = ()) -> str:
-    changed = "".join("- protected file changed (allowed by the Issue): `%s`\n" % path
-                      for path in protected)
+    changed = "".join("- protected file changed (allowed by the Issue): `%s`\n"  # one line each
+                      % path.replace("\r", "\\r").replace("\n", "\\n") for path in protected)
     return ("kagari-mvi: test result recorded by the runner (not reported by Claude).\n\n"
             "- tested commit: `%s`\n" % sha + changed +
             "- test command: `%s` (run by the runner as the agent user)\n- exit code: %d\n"
