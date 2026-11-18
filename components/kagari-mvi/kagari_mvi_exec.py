@@ -6,6 +6,7 @@ with an explicit git dir and hooks disabled (D3).
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -135,22 +136,30 @@ def test_command(body: Optional[str]) -> Optional[str]:
 
 def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
     """Summarize Claude's stream-json: auth failure, final status, permission denials."""
-    result, plain = None, []
+    result, plain, reset_at = None, [], None
     for line in output.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             plain.append(line)  # stderr and other non-JSON text
             continue
+        if isinstance(event, dict):
+            info = (event.get("api_error_params") or {}).get("rate_limit_info") or {}
+            reset_at = info.get("resetsAt") or reset_at
         if isinstance(event, dict) and event.get("type") == "result":
             result = event
     errored = failed or result is None or bool(result.get("is_error"))
+    # Only the final result decides: a limit that was retried past, then another failure, is a failure.
+    limited = errored and (result or {}).get("api_error") == "usage_limit_reached"
     text = str((result or {}).get("result") or "")
     statuses = re.findall(r"status:\s*(COMPLETED|BLOCKED[^\n]*)", text)
     return {
         "purposes": test_purposes(text),
         # Only the final result and stderr: file contents and ids may contain "401".
         "errored": errored,
+        "limited": limited,
+        "resets": (datetime.datetime.fromtimestamp(reset_at, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                   if isinstance(reset_at, (int, float)) else text.strip() or "(unknown)"),
         "auth": errored and bool(AUTH_PATTERN.search("\n".join(plain + [text]))),
         "status": statuses[-1].strip() if statuses else "(none)",
         "completed": not errored and bool(statuses) and statuses[-1] == "COMPLETED",
@@ -206,6 +215,14 @@ def test_purposes(text: str) -> Optional[str]:
 
 class Blocked(Exception):
     """Stop processing and block the Issue with this comment."""
+
+
+class UsageLimit(Exception):
+    """Claude's usage limit was hit: nothing failed, retry once it resets (#481)."""
+
+    def __init__(self, resets: str) -> None:
+        super().__init__(resets)
+        self.resets = resets
 
 
 class AgentSteps:
@@ -296,6 +313,8 @@ class AgentSteps:
         with open(os.path.join(logs, log_name + ".jsonl"), "w", encoding="utf-8") as handle:
             handle.write(output)
         outcome = agent_outcome(output, failed)
+        if outcome["limited"]:  # before auth: a limit is not a login problem
+            raise UsageLimit(outcome["resets"])
         if outcome["auth"]:
             raise Blocked("Claude Code failed to authenticate: %s needs to log in again "
                           "(kagari-agent の再ログインが必要). Not retried.\n\n```\n%s\n```"

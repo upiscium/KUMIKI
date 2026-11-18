@@ -18,9 +18,10 @@ import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from kagari_mvi_cleanup import CleanupSteps
-from kagari_mvi_exec import (SAFE_GIT, AgentSteps, Blocked, CommandError, Runner,
+from kagari_mvi_exec import (SAFE_GIT, AgentSteps, Blocked, CommandError, Runner, UsageLimit,
                              acceptance_criteria, allowed_protected, missing_placement, report,
                              review_report, subprocess_runner, tail, test_command)
+from kagari_mvi_limit import LimitSteps
 
 TEST_REPORT_PREFIX = "kagari-mvi: test result recorded by the runner"
 
@@ -131,7 +132,7 @@ def check_actor(actor: Optional[str], allowed: Sequence[str]) -> Optional[str]:
 quote_path = lambda value: urllib.parse.quote(value, safe="")  # noqa: E731
 
 
-class Worker(AgentSteps, CleanupSteps):
+class Worker(AgentSteps, CleanupSteps, LimitSteps):
     def __init__(self, repo: str, run: Runner = subprocess_runner,
                  log: Callable[[str], None] = lambda message: print(message, file=sys.stderr),
                  agent_user: str = "kagari-agent", claude: str = "claude",
@@ -266,6 +267,8 @@ class Worker(AgentSteps, CleanupSteps):
             stage = "labels"
             self.add_labels(number, REVIEWED)
             self.remove_label(number, RUNNING)
+        except UsageLimit as limit:  # not a failure: put the Issue back (#481)
+            return self.defer_for_limit(number, limit, RUNNING)
         except Exception as error:  # noqa: BLE001 - every failure must end as blocked
             self.block_after_failure(number, stage, error)
             return 1
@@ -361,6 +364,8 @@ class Worker(AgentSteps, CleanupSteps):
                 raise Blocked(problem)
             self.add_labels(number, IMPLEMENTED)
             self.remove_label(number, RUNNING)
+        except UsageLimit as limit:  # not a failure: put the Issue back (#481)
+            return self.defer_for_limit(number, limit, RUNNING)
         except Exception as error:  # noqa: BLE001 - every failure must end as blocked
             self.block_after_failure(number, stage, error)
             return 1

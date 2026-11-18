@@ -186,6 +186,9 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 | 0 | 対象が無かった、処理が完了した、または処理を始める前に blocked にした |
 | 1 | 処理を始めた後に blocked にした、または gh / git が失敗した |
 | 2 | 引数が不正だった |
+| 3 | Claude の利用上限に当たったので、Issue を `blocked` にせず元に戻した（`run-once`・`review-once`、#481） |
+
+終了コード 3 は失敗ではありません。上限が戻れば次の実行が進みます。`run-once`・`review-once`・`cleanup-once` を 1 つの timer から順に呼ぶときは、3 で後ろの呼び出しを止めないでください（systemd なら `SuccessExitStatus=3`、シェルなら `|| [ $? -eq 3 ]`）。特に `cleanup-once` は、利用上限と関係なく動かせます。
 
 ## `run-once` の動作
 
@@ -216,6 +219,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
      - `Edit` と `Write` は worktree の中に限ります。headless なので、許可されていない操作は確認を待たずに拒否されます。
      - 保護するファイル（指示ファイル、`.claude/`、`.github/workflows/`）への `Edit` と `Write` は拒否します。うっかりの書き換えを減らすためのもので、Bash で書いた場合は次の commit の段階で止めます。Issue の `### 変更する保護ファイル` に項目が 1 つ以上ある場合は、この拒否ルールを付けず、commit の段階の確認だけで判定します。
    - 認証エラーの扱い：`Not logged in`、`Login expired`、`401` などで終わった場合は、`blocked` を付けて「kagari-agent の再ログインが必要」とコメントします。リトライはしません。
+   - 利用上限の扱い（#481）：Claude が利用上限のエラー（`usage_limit_reached`、HTTP 429）で終わった場合は、`blocked` にしません。実装の失敗ではなく、時間がたてば直るためです。`kagari:running` を外して Issue を元の状態に戻し、上限が戻る時刻を Issue にコメントして（同じ時刻のコメントは重ねません）、終了コード 3 で終わります。上限が戻った後の次の実行が、その Issue をもう一度取ります。認証エラーの判定より先に見分けます。
 6. **commit する**（段階 `commit`、`kagari-runner` が実行）
    - worktree の中にある `.git` ファイルは `kagari-agent` が書き換えられるので、使いません。git の管理ディレクトリを `--git-dir` で明示して指定します。
    - `core.hooksPath=/dev/null` と `core.fsmonitor=false` を指定し、`--no-verify` を付けて、すべての変更を commit します。ただし、テストやビルドで生成されるファイルと、パッケージのキャッシュ（`__pycache__`、`*.pyc`、`.pytest_cache`、`node_modules`、`.mypy_cache`、`.npm-cache`、`.npm`、`.cache`、`.yarn/cache`、`.pnpm-store`。どの階層にあっても）は commit しません。これらの場所にある変更は、リポジトリで管理しているファイルでも commit しません。npm のキャッシュが worktree の中に作られ、PR に入ったことがあるため（upiscium/MUSUBI#40）です。外した変更は通知しません。リポジトリで管理している `.cache/` などの中身を変える Issue では、その変更が commit に入らず、runner によるテストの再実行で失敗として表れることがあります。
@@ -271,7 +275,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 
 すべての変更に独立レビューを行うのが既定のルールです（ADR-0010 D3）。`review-once` を飛ばして人間が直接 Ready にする運用はしません。
 
-途中で失敗した場合や、認証エラーの場合は、`run-once` と同じく `blocked` にします。レビュアーが終了コード 0 で終わったのに、結果がエラーだった場合や、結果が無かった場合は、`blocked` にはしません。コメントに「reviewer session: ended with an error」と記録し、判定が無い受入条件を UNKNOWN にしたうえで、`reviewed` を付けます。
+途中で失敗した場合や、認証エラーの場合は、`run-once` と同じく `blocked` にします。利用上限に当たった場合は、`blocked` にも `reviewed` にもせず、`run-once` と同じく Issue を元に戻して終了コード 3 で終わります（#481）。レビュアーが終了コード 0 で終わったのに、結果がエラーだった場合や、結果が無かった場合は、`blocked` にはしません。コメントに「reviewer session: ended with an error」と記録し、判定が無い受入条件を UNKNOWN にしたうえで、`reviewed` を付けます。
 
 ## `cleanup-once` の動作（#432）
 
