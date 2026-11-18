@@ -265,8 +265,8 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - すべての受入条件が PASS である。
    - `TESTS` の判定が PASS である（#453）。
    - レビュアーのセッションがエラーで終わっていない。
-   - runner のテスト結果が、レビューした head に対するもので、終了コードが 0 である。
-   Ready にできなかった（GitHub が Draft のままを返した）場合は `blocked` にします。merge は人間だけが行います。
+   - runner のテスト結果が、レビューした head に対するもので、終了コードが 0 である。どちらも、コメントの最初のコードブロックより前の、runner が書いた行だけから読みます。テストの出力と Claude の申告はコードブロックの中にあり、`- exit code: 0` のような行を含められるためです。
+   Ready にできなかった（GitHub が Draft のままを返した、または GraphQL が失敗した）場合は、判定の表をコメントしてから `blocked` にします。merge は人間だけが行います。
 7. **ラベルを付ける**：判定の結果にかかわらず、`kagari:reviewed` を付けてから `running` を外します。merge するかどうかは User が決めます。
 
 すべての変更に独立レビューを行うのが既定のルールです（ADR-0010 D3）。`review-once` を飛ばして人間が直接 Ready にする運用はしません。
@@ -277,10 +277,10 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 
 人間が PR を merge した後に、その Issue の片付けをします。`run-once`・`review-once` と同じ timer から、順に呼んでください。
 
-1. **対象を数える**：`<workdir>/wt/<owner>__<repo>/` にある `issue-N`・`issue-N.verify`・`issue-N.review` から、Issue の番号を集めます。
-2. **PR の状態を調べる**：ブランチ `kagari/issue-N` の PR を、open と close の両方から探します。merge 済みの PR があり、open の PR が 1 つも無い場合だけ、次に進みます。open の PR がある、merge せずに close した、PR が見つからない、のどれかなら、何も消さずに残します。
-3. **消す**：`kagari-agent` のプロセスを止めてから、作業ディレクトリ（3 つとも）を消します。消し方は、前回の作業ディレクトリと同じです（#448、#456）。続けて、clone のローカルのブランチ `kagari/issue-N` と、リモートのブランチ（GitHub がまだ消していなければ）を消します。ラベルは変えません。
-4. **結果**：1 件でも失敗したら、残りの Issue も続けて処理したうえで、終了コード 1 で終わります。失敗した Issue は、次の実行でもう一度試します。
+1. **対象を数える**：`<workdir>/wt/<owner>__<repo>/` にある `issue-N`・`issue-N.verify`・`issue-N.review` と、clone に残っているローカルのブランチ `kagari/issue-N` から、Issue の番号を集めます。
+2. **PR の状態を調べる**：ブランチ `kagari/issue-N` の PR を、open と close の両方から探します。merge 済みの PR があり、open の PR が 1 つも無く、ローカルとリモートのブランチの先端が merge された PR の head と同じ場合だけ、次に進みます。open の PR がある、merge せずに close した、PR が見つからない、merge の後に新しい commit がある（後の実行が push の前に `blocked` で止まり、commit を残した場合など）、のどれかなら、何も消さずに残します。
+3. **消す**：リモートのブランチ（GitHub がまだ消していなければ）、作業ディレクトリ（3 つとも）、clone のローカルのブランチ `kagari/issue-N` の順に消します。作業ディレクトリは、`kagari-agent` のプロセスを止めてから、前回の作業ディレクトリと同じ方法で消します（#448、#456）。ローカルのブランチを最後にするのは、途中で失敗しても、次の実行で手順 1 がその番号を見つけられるようにするためです。ラベルは変えません。
+4. **結果**：1 件でも失敗したら（GitHub の API の失敗を含む）、残りの Issue も続けて処理したうえで、終了コード 1 で終わります。失敗した Issue は、次の実行でもう一度試します。
 
 ### 既知の限界
 

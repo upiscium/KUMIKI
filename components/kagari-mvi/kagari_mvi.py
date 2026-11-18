@@ -93,14 +93,24 @@ def check_body_unchanged(edited_at: Optional[str], approved_at: Optional[str]) -
             "body, then remove and add `%s` again." % (APPROVED, edited_at, approved_at, APPROVED))
 
 
+def report_header(test_report: str) -> str:
+    """The runner-written lines of its test comment: the test output and Claude's declaration
+    follow in code blocks and may contain any text, such as a fake `- exit code: 0`."""
+    return test_report.split("```", 1)[0]
+
+
+def runner_exit_code(test_report: str) -> Optional[int]:
+    found = re.search(r"^- exit code: (-?\d+)$", report_header(test_report), re.M)
+    return int(found.group(1)) if found else None
+
+
 def ready_decision(outcome: Dict[str, Any], fresh: bool, test_report: str) -> Tuple[bool, str]:
     """Ready only on every AC and TESTS PASS and a passing runner test of this head (ADR-0010 D3)."""
     why = [reason for failed, reason in (
         (any(status != "PASS" for status, _ in outcome["verdicts"]), "not every criterion is PASS"),
         (outcome["tests"][0] != "PASS", "TESTS is %s" % outcome["tests"][0]),
         (outcome["errored"], "the reviewer session ended with an error"),
-        (not fresh or not re.search(r"^- exit code: 0$", test_report, re.M),
-         "no passing runner test of this head"))
+        (not fresh or runner_exit_code(test_report) != 0, "no passing runner test of this head"))
         if failed]
     if why:
         return False, "\n- ready for review: no, the PR stays Draft (%s)\n" % "; ".join(why)
@@ -230,7 +240,7 @@ class Worker(AgentSteps, CleanupSteps):
             diff = self.api_text(self.repo_path("/pulls/%d" % pr["number"]),
                                  "application/vnd.github.diff")
             test_report = self.runner_test_report(pr["number"])
-            fresh = ("tested commit: `%s`" % head) in test_report
+            fresh = ("tested commit: `%s`" % head) in report_header(test_report)
             if not fresh:  # e.g. commits were pushed after the runner's test
                 test_report = ("WARNING: this runner test result is missing or for another commit "
                                "than the reviewed head %s. Do not use it as evidence.\n\n%s"
@@ -240,11 +250,18 @@ class Worker(AgentSteps, CleanupSteps):
             stage = "review"
             outcome = self.run_review(workdir, review_dir, number, criteria, diff, test_report)
             ready, note = ready_decision(outcome, fresh, test_report)
+            not_ready = None
             if ready:
                 stage = "ready"
-                self.mark_ready(pr["node_id"])
+                try:
+                    self.mark_ready(pr["node_id"])
+                except (CommandError, ValueError) as error:  # still post the verdicts, then block
+                    not_ready, note = error, "\n- ready for review: failed, the PR stays Draft\n"
             stage = "report"
             self.comment(pr["number"], review_report(head, criteria, outcome, fresh) + note)
+            if not_ready is not None:
+                stage = "ready"
+                raise not_ready
             stage = "labels"
             self.add_labels(number, REVIEWED)
             self.remove_label(number, RUNNING)
