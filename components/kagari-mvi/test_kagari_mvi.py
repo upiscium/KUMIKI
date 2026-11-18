@@ -162,6 +162,12 @@ class ReviewParseTest(unittest.TestCase):
         self.assertEqual(ex.acceptance_criteria(REVIEW_BODY), ["greet() returns Hello", "tests added"])
         self.assertEqual(ex.acceptance_criteria("no criteria"), [])
 
+    def test_rules_let_a_criterion_without_a_test_pass_only_via_untested_and_the_diff(self):
+        self.assertIn("`AC<n>: <why it has no test>`", ex.AGENT_RULES)  # the implementer says which and why
+        self.assertIn("listed under untested with a reason and you judged it\n  PASS from the diff", ex.REVIEW_RULES)
+        self.assertIn("a criterion has neither", ex.REVIEW_RULES)  # no test and no untested entry: FAIL
+        self.assertNotIn("every\n  criterion has a test;", ex.REVIEW_RULES)
+
     def test_tests_verdict_line_missing_or_conflicting_is_unknown(self):
         self.assertEqual(ex.tests_verdict("AC1: PASS — a\n**TESTS**: FAIL — test_a checks nothing"),
                          ("FAIL", "test_a checks nothing"))
