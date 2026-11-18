@@ -1,6 +1,6 @@
 # ADR-0009: KAGARI の責任範囲を決め、KAGARI v0.2 系を MVI で出す
 
-- **Status:** Accepted（2026-11-13、User 判断）。追補 2026-11-14（D4 の条件 1 の判断、#425）。D1-2・D4 条件 1 と 2・Consequences は ADR-0010 で一部改定
+- **Status:** Accepted（2026-11-13、User 判断）。追補 2026-11-14（D4 の条件 1 の判断、#425）、追補 2026-11-18（OAuth は今のまま、#480）。D1-2・D4 条件 1 と 2・Consequences は ADR-0010 で一部改定
 - **Human decision:** 2026-11-13 に、User が次のことを承認した。
   - KAGARI の目的は「簡単かつ安全に Agent 開発をすること」とし、攻撃への防御は目的にしない。責任を持つ範囲と持たない範囲を D1 のとおりとする。
   - Contract と照合する権限窓口（#418 の当初の設計、Draft PR #419）は作らず、push の前に保護するファイルの変更を確かめる軽い仕組みに置き換える。
@@ -86,5 +86,20 @@ D4 の v0.2.0 の条件について、次のことを記録する。条件 1 は
 - **再起動したときの二重取得**：実機で確かめた（`upiscium/kagari-mvi-sandbox` #42）。`run-once` を Claude の実行中に SIGKILL で止め、もう一度実行すると、`kagari:running` の Issue を選ばずに終わった。PR もブランチもできなかった。止まった Issue は自動では復旧しない（`components/kagari-mvi/README.md` の既知の限界のとおり）。
 - **条件 2（レビュー担当の切り替え）**：OpenCode は使わず、`review-once --reviewer tsumgi` で TSUMGI の API を直接呼ぶ形にする（#427）。OpenCode の指示文だけで約 9,000 トークンになり、TSUMGI の入力の上限（10,240 トークン）を超えるため（2026-11-14 に Adam で確認）。TSUMGI はファイルを読めず、大きな PR はレビューしない。条件 2 は「レビュー担当を TSUMGI に切り替えられる」と読み替える。
 - **条件 4（README の手順）**：v0.2.0 の条件から外す。ユーザー分離だけで動かす手順と systemd timer の手順は、必要になったときに書く。
+
+## 追補（2026-11-18、User 判断、#480）
+D4 の v0.2.0 の条件 1 のうち、保留していた「OAuth を長く使い続けられるか」を決める。
+
+- **決定**：`kagari-agent` の OAuth のログイン（サブスクリプション）を、今のまま使う。長期トークン（`CLAUDE_CODE_OAUTH_TOKEN`）への切り替えは、v0.2.0 の条件にしない。
+- **事実（2026-11-18 に LXC で確認）**：
+  - `sudo -u kagari-agent -H claude auth status` の `loginExpiresAt` は `2026-12-09T05:01:04.850Z` だった。
+  - `/srv/kagari/logs/*/*.jsonl`（`kagari-runner` が残す Claude の記録）のうち、`credential_expires_at` を含む 9 件が、すべて同じ `2026-12-09T05:01:04.850Z` だった。9 件の日付は調べていない。
+  - 認証情報のファイル（`/home/kagari-agent/.claude/.credentials.json`）は、同じ日の 13:26:51 UTC に書き換えられていた。その後も `loginExpiresAt` は同じ値だった。書き換えの理由（アクセストークンの更新か）は確かめていない。
+  - 認証エラーのときは、`blocked` になり、「`kagari-agent` の再ログインが必要」とコメントして、リトライしない（ADR-0007 D7）。sandbox の Issue #20 で確かめたが、使ったのは空の設定ディレクトリによる疑似的な認証エラーで、期限切れそのものではない。ADR-0007 の表に書いた PASS は、この疑似エラーでの結果である。
+- **推論（確かめていない）**：期限が切れても、同じ `blocked` で止まるだけで、誤った動きはしない。期限の日付が分かっているので、人間が事前に再ログインできる。
+- **運用**：期限は `claude auth status` の `loginExpiresAt` で確かめ、期限の前に `kagari-agent` で再ログインする。timer で無人運転する間は、期限の前に確かめる。再ログインの作業中は、`run-once`・`review-once` を動かさない（README の「1 つのホストに 1 つの KAGARI」のとおり）。
+- **未確認**：期限が切れた実際の挙動、再ログインをしたときに期限の日付がどう延びるか、自動実行を個人のサブスクリプションで続けることの規約上の扱い（ADR-0006 の未確認の項目のまま）。
+- **別の問題として扱う**：サブスクリプションの利用上限（5 時間ごとの上限）は、User の普段の使い方と同じ枠を共有する。2026-11-18 の `upiscium/kagari-mvi-sandbox` の Issue #45 の最初の `run-once` で、`kagari-agent` の Claude が `usage_limit_reached`（HTTP 429）を返し、`failed at stage claude` として `blocked` になった（その Issue のコメントと `/srv/kagari/logs/upiscium__kagari-mvi-sandbox/issue-45-claude.jsonl` に残っている）。上限のエラーを `blocked` にせず次の実行に回す改善は、別の Issue（#481）で扱う。
+- 長期トークンへの切り替えは、期限が実際に切れて再ログインの手間が問題になったときに、あらためて起票する。
 
 本 ADR は、Merge、Release、本番適用を承認するものではない。

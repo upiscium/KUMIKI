@@ -287,6 +287,8 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 KAGARI が責任を持たないもの（上の「KAGARI が責任を持つこと」）と、MVI でまだ扱っていないものです。
 
 - **止まった Issue**：`running` が付いたまま止まった Issue は、自動では復旧しません。
+- **Claude のログインの期限**（ADR-0009 追補 2026-11-18）：`kagari-agent` の Claude は OAuth（サブスクリプション）でログインしています。期限は `sudo -u kagari-agent -H claude auth status` の `loginExpiresAt` で確かめられます（2026-11-18 の時点で 2026-12-09 05:01 UTC）。認証エラーのときは、`blocked` にして再ログインを求め、リトライしません（空の設定ディレクトリによる疑似的な認証エラーで確かめました）。期限が切れた実際の挙動と、再ログインで期限がどう延びるかは、未確認です。timer で無人運転する間は、期限の前に `kagari-agent` で再ログインしてください。再ログインの作業中は、`run-once`・`review-once` を動かさないでください（上の「1 つのホストに 1 つの KAGARI」）。長期トークンへの切り替えは、v0.2.0 では扱いません。
+- **利用上限**：Claude の利用上限（5 時間ごとの上限など）は、User の普段の使い方と同じ枠を共有します。2026-11-18 に、`run-once` で `kagari-agent` が上限に当たり（`usage_limit_reached`、HTTP 429）、`failed at stage claude` として `blocked` になりました。上限が戻ってから、人間が `kagari:blocked` を外してやり直してください。`review-once` で上限に当たったときの動きは、未確認です。上限のエラーを `blocked` にしない改善は、別の Issue（#481）で扱います。
 - **承認と編集がほぼ同時の場合**：本文の編集と承認が同じ秒に起きた場合は、編集が先とみなして処理を進めます。比べるのは本文だけで、タイトルとコメントの変更は見ません（コメントは Claude に渡しません）。
 - **残ったブランチ**：PR を作る前に失敗した後で再実行すると、remote に `kagari/issue-N` が残っている場合があります。そのときは push が non-fast-forward で拒否され、`blocked` になります。force push はしません。再実行する前に、そのブランチを削除してください。
 - **target リポジトリの設定**：`--restricted` により、target リポジトリの設定ファイルは読み込みません。`.claude/settings.local.json` を commit しているリポジトリは対象にできません。target リポジトリの `CLAUDE.md` が読み込まれるかどうかは、未確認です。
