@@ -17,6 +17,10 @@ run-once repo *args:
 review-once repo *args:
     {{python}} {{quote(worker)}} review-once --repo {{quote(repo)}} --workdir {{quote(workdir)}} {{args}}
 
+# Delete the branches and working directories of OWNER/REPO's merged KAGARI PRs.
+cleanup-once repo *args:
+    {{python}} {{quote(worker)}} cleanup-once --repo {{quote(repo)}} --workdir {{quote(workdir)}} {{args}}
+
 # Run the unit tests (gh/git are faked).
 test:
     {{python}} {{quote(root / "components/kagari-mvi/test_kagari_mvi.py")}}

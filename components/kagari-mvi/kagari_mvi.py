@@ -12,10 +12,12 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from kagari_mvi_cleanup import CleanupSteps
 from kagari_mvi_exec import (SAFE_GIT, AgentSteps, Blocked, CommandError, Runner,
                              acceptance_criteria, allowed_protected, missing_placement, report,
                              review_report, subprocess_runner, tail, test_command)
@@ -91,6 +93,20 @@ def check_body_unchanged(edited_at: Optional[str], approved_at: Optional[str]) -
             "body, then remove and add `%s` again." % (APPROVED, edited_at, approved_at, APPROVED))
 
 
+def ready_decision(outcome: Dict[str, Any], fresh: bool, test_report: str) -> Tuple[bool, str]:
+    """Ready only on every AC and TESTS PASS and a passing runner test of this head (ADR-0010 D3)."""
+    why = [reason for failed, reason in (
+        (any(status != "PASS" for status, _ in outcome["verdicts"]), "not every criterion is PASS"),
+        (outcome["tests"][0] != "PASS", "TESTS is %s" % outcome["tests"][0]),
+        (outcome["errored"], "the reviewer session ended with an error"),
+        (not fresh or not re.search(r"^- exit code: 0$", test_report, re.M),
+         "no passing runner test of this head"))
+        if failed]
+    if why:
+        return False, "\n- ready for review: no, the PR stays Draft (%s)\n" % "; ".join(why)
+    return True, "\n- ready for review: yes, marked by the runner; a human decides the merge\n"
+
+
 def check_actor(actor: Optional[str], allowed: Sequence[str]) -> Optional[str]:
     """None if allowed, else the reason to block (comment text)."""
     if actor is None:
@@ -104,7 +120,7 @@ def check_actor(actor: Optional[str], allowed: Sequence[str]) -> Optional[str]:
 quote_path = lambda value: urllib.parse.quote(value, safe="")  # noqa: E731
 
 
-class Worker(AgentSteps):
+class Worker(AgentSteps, CleanupSteps):
     def __init__(self, repo: str, run: Runner = subprocess_runner,
                  log: Callable[[str], None] = lambda message: print(message, file=sys.stderr),
                  agent_user: str = "kagari-agent", claude: str = "claude",
@@ -139,6 +155,15 @@ class Worker(AgentSteps):
         if not found:
             raise ValueError("GraphQL did not return Issue #%d: %s" % (number, out.strip()))
         return found["lastEditedAt"]
+
+    def mark_ready(self, node_id: str) -> None:
+        """Draft -> Ready. REST has no such call, so GraphQL here too (#432, ADR-0010 D3)."""
+        out = self.run(["gh", "api", "--method", "POST", "-H", "Accept: application/vnd.github+json",
+                        "graphql", "-f", "query=mutation($id:ID!){markPullRequestReadyForReview("
+                        "input:{pullRequestId:$id}){pullRequest{isDraft}}}", "-f", "id=" + node_id])
+        done = ((json.loads(out).get("data") or {}).get("markPullRequestReadyForReview") or {})
+        if (done.get("pullRequest") or {}).get("isDraft") is not False:
+            raise ValueError("GraphQL did not mark the PR ready: %s" % out.strip())
 
     def api_text(self, path: str, accept: str) -> str:
         return self.run(["gh", "api", "--method", "GET", "-H", "Accept: " + accept, path])
@@ -214,8 +239,12 @@ class Worker(AgentSteps):
             review_dir = self.prepare_review_dir(workdir, number, head)  # unused by TSUMGI
             stage = "review"
             outcome = self.run_review(workdir, review_dir, number, criteria, diff, test_report)
+            ready, note = ready_decision(outcome, fresh, test_report)
+            if ready:
+                stage = "ready"
+                self.mark_ready(pr["node_id"])
             stage = "report"
-            self.comment(pr["number"], review_report(head, criteria, outcome, fresh))
+            self.comment(pr["number"], review_report(head, criteria, outcome, fresh) + note)
             stage = "labels"
             self.add_labels(number, REVIEWED)
             self.remove_label(number, RUNNING)
@@ -394,7 +423,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                       help="login allowed to add kagari:approved (repeat or comma-separate)")
     review = sub.add_parser("review-once", help="review at most one implemented Issue's PR")
     review.add_argument("--reviewer", choices=("claude", "tsumgi"), default="claude")
-    for command in (once, review):
+    cleanup = sub.add_parser("cleanup-once", help="delete branches and directories of merged PRs")
+    for command in (once, review, cleanup):
         command.add_argument("--repo", required=True, help="OWNER/REPO")
         command.add_argument("--workdir", required=True, help="directory for clones and worktrees")
         command.add_argument("--agent-user", default="kagari-agent",
@@ -416,6 +446,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         agent_config_dir=args.agent_config_dir, reviewer=getattr(args, "reviewer", "claude"))
         if args.command == "review-once":
             return worker.review_once(os.path.abspath(args.workdir))
+        if args.command == "cleanup-once":
+            return worker.cleanup_once(os.path.abspath(args.workdir))
         allowed = [name.strip() for value in args.allow_actor for name in value.split(",")
                    if name.strip()]
         return worker.run_once(allowed, os.path.abspath(args.workdir))

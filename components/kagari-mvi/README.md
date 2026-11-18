@@ -2,7 +2,7 @@
 
 ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件取り、Claude Code に実装させます。その後、テストを実行し直し、Draft PR を作ります（`run-once`）。Draft PR ができた Issue は、別の Claude セッションが受入条件ごとにレビューします（`review-once`）。
 
-- **構成**：1 ファイルあたり、本体は 500 行以内、テスト（`test_*.py`）は 800 行以内に保ちます。`just mvi::test` の `LineLimitTest` がこの上限を確かめます。超える場合は責任の単位でファイルを分け、理由を PR に書きます（ADR-0010 追補 2026-11-16。それまでの、本体 2 ファイルの合計に対する上限から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理を受け持ちます。テストは、`test_kagari_mvi.py`（Issue の選択・承認・本文と申告の読み取り・TSUMGI・行数の上限）、`test_kagari_mvi_run.py`（`run-once`）、`test_kagari_mvi_review.py`（`review-once`）に分け、共通の偽の runner と Issue の見本は `kagari_mvi_testkit.py` に置きます。`just mvi::test` と `python3 components/kagari-mvi/test_kagari_mvi.py` は、どちらも 3 つのテストのファイルをすべて実行します。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は、Issue 本文を最後に編集した時刻を取る 1 か所だけで使います（REST では取れないため。User 判断 2026-11-14）。
+- **構成**：1 ファイルあたり、本体は 500 行以内、テスト（`test_*.py`）は 800 行以内に保ちます。`just mvi::test` の `LineLimitTest` がこの上限を確かめます。超える場合は責任の単位でファイルを分け、理由を PR に書きます（ADR-0010 追補 2026-11-16。それまでの、本体 2 ファイルの合計に対する上限から変更）。`kagari_mvi.py` が GitHub とラベルの処理、`kagari_mvi_exec.py` が Claude・テスト・commit の処理、`kagari_mvi_cleanup.py` が merge 後の片付け（`cleanup-once`）を受け持ちます。テストは、`test_kagari_mvi.py`（Issue の選択・承認・本文と申告の読み取り・TSUMGI・行数の上限）、`test_kagari_mvi_run.py`（`run-once`）、`test_kagari_mvi_review.py`（`review-once`）、`test_kagari_mvi_cleanup.py`（Ready 化と `cleanup-once`）に分け、共通の偽の runner と Issue の見本は `kagari_mvi_testkit.py` に置きます。`just mvi::test` と `python3 components/kagari-mvi/test_kagari_mvi.py` は、どちらもすべてのテストのファイルを実行します。使うのは、Python の標準ライブラリと、subprocess から呼ぶ `gh api`（REST）・`git`・`sudo`・`claude` だけです。GraphQL は、Issue 本文を最後に編集した時刻を取る所（User 判断 2026-11-14）と、PR を Draft から Ready にする所（#432）の 2 か所だけで使います。どちらも REST に同じ機能が無いためです。
 - **TSUMGI の直接呼び出し**（#434、ADR-0010 D1）：編集を伴わない Leaf（今はレビュー）が使う TSUMGI の呼び出しは、`kagari_mvi_tsumgi.py` に分けています。分けたときは、本体 2 ファイルが当時の合計の上限に達していました（ADR-0010 Consequences）。
 - **状態の持ち方**：状態は GitHub Issue のラベルだけで持ちます（ADR-0007 D2）。DB、ref、ローカルの状態ファイルは使いません。既存の dispatch 経路と metadata にも依存しません。
 - **実行の単位**：1 回の実行で処理する Issue は最大 1 件です。systemd timer などから定期的に呼ぶ前提です。
@@ -10,7 +10,7 @@ ADR-0007 の MVI 経路で動く worker です。承認された Issue を 1 件
   - `kagari-runner`（GitHub の資格情報を持つ）が worker を動かします。
   - `kagari-agent`（Claude の資格情報だけを持つ）が、Claude とテストコマンドを動かします。
   - git の commit と push は `kagari-runner` が行います。
-- **1 つのホストに 1 つの KAGARI**：複数のリポジトリを、同じホストの 1 つの KAGARI で扱います。worktree・レビュー用の checkout・記録は `<workdir>/wt/<owner>__<repo>/`・`<workdir>/logs/<owner>__<repo>/` のようにリポジトリごとに分けるので、別のリポジトリに同じ番号の Issue があってもぶつかりません。ただし、`run-once` と `review-once` は、同じホストで同時に動かさないでください。テストの前に `kagari-agent` のプロセスをすべて止めるので、もう一方の実行を止めてしまいます（リポジトリを順に回す 1 つの timer で動かす）。
+- **1 つのホストに 1 つの KAGARI**：複数のリポジトリを、同じホストの 1 つの KAGARI で扱います。worktree・レビュー用の checkout・記録は `<workdir>/wt/<owner>__<repo>/`・`<workdir>/logs/<owner>__<repo>/` のようにリポジトリごとに分けるので、別のリポジトリに同じ番号の Issue があってもぶつかりません。ただし、`run-once`・`review-once`・`cleanup-once` は、同じホストで同時に動かさないでください。テストの前に `kagari-agent` のプロセスをすべて止めるので、もう一方の実行を止めてしまいます（リポジトリを順に回す 1 つの timer で動かす）。
   - **古い置き場所からの移行**：この変更より前に作った `<workdir>/wt/issue-N` の worktree は、clone に登録されたまま残ります。残っていると、同じ番号の Issue を処理するときに新しい場所で worktree を作れず、止まります。移行するときに、リポジトリごとに一度だけ消してください（`kagari-runner` として、`for w in /srv/kagari/wt/issue-*; do git -C /srv/kagari/repos/O__R worktree remove --force "$w"; done; git -C /srv/kagari/repos/O__R worktree prune`。消えずに残ったディレクトリは `rm -rf` してから `prune` する）。
 - **実行環境の前提**：同じホスト上の OS のユーザー分離（上の 2 ユーザー）だけです。2 つのユーザーは KAGARI 専用にしてください。LXC は MVI の実機確認に使った環境で、必須ではありません（ADR-0009 D2）。
 
@@ -160,6 +160,7 @@ just mvi::run-once OWNER/REPO        # 承認された Issue を最大 1 件処�
 just mvi::run-once OWNER/REPO --agent-config-dir DIR   # 追加の引数は kagari_mvi.py に渡る
 just mvi::review-once OWNER/REPO     # implemented の Issue の PR を最大 1 件レビューする
 just mvi::review-once OWNER/REPO --reviewer tsumgi   # レビューを TSUMGI（別系統のモデル）で行う
+just mvi::cleanup-once OWNER/REPO    # merge 済みの PR のブランチと作業ディレクトリを消す
 just mvi::test                       # 単体テスト（gh・git・sudo は偽物に差し替える）
 ```
 
@@ -260,9 +261,26 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
      - レビュー用の checkout（手順 3）は、TSUMGI では使いませんが、Claude のときと同じく作ります。
      - OpenCode は使いません。OpenCode が付け足す指示文だけで約 9,000 トークンになり、TSUMGI の上限を超えるためです（2026-11-14 に確認）。
 5. **PR にコメントする**：受入条件ごとの判定と根拠を表にして、PR にコメントします。コメントには、レビューした commit と、PASS 以外の件数も入れます。判定の行が無い受入条件は UNKNOWN と表示します。表の最後の行は `TESTS` の判定です。`TESTS:` の行が無いか、食い違う行が複数あれば UNKNOWN と表示します。「PASS 以外の件数」は受入条件だけを数えます。
-6. **ラベルを付ける**：判定の結果にかかわらず、`kagari:reviewed` を付けてから `running` を外します。merge するかどうかは User が決めます。
+6. **Ready にする**（段階 `ready`、ADR-0010 D3、#432）：次のすべてを満たすときだけ、GraphQL の `markPullRequestReadyForReview` で PR を Draft から Ready にします。1 つでも欠ければ Draft のままにし、手順 5 のコメントの末尾に、その理由を書きます（例：`the PR stays Draft (TESTS is UNKNOWN)`）。Ready にしたときも、そう書きます。
+   - すべての受入条件が PASS である。
+   - `TESTS` の判定が PASS である（#453）。
+   - レビュアーのセッションがエラーで終わっていない。
+   - runner のテスト結果が、レビューした head に対するもので、終了コードが 0 である。
+   Ready にできなかった（GitHub が Draft のままを返した）場合は `blocked` にします。merge は人間だけが行います。
+7. **ラベルを付ける**：判定の結果にかかわらず、`kagari:reviewed` を付けてから `running` を外します。merge するかどうかは User が決めます。
+
+すべての変更に独立レビューを行うのが既定のルールです（ADR-0010 D3）。`review-once` を飛ばして人間が直接 Ready にする運用はしません。
 
 途中で失敗した場合や、認証エラーの場合は、`run-once` と同じく `blocked` にします。レビュアーが終了コード 0 で終わったのに、結果がエラーだった場合や、結果が無かった場合は、`blocked` にはしません。コメントに「reviewer session: ended with an error」と記録し、判定が無い受入条件を UNKNOWN にしたうえで、`reviewed` を付けます。
+
+## `cleanup-once` の動作（#432）
+
+人間が PR を merge した後に、その Issue の片付けをします。`run-once`・`review-once` と同じ timer から、順に呼んでください。
+
+1. **対象を数える**：`<workdir>/wt/<owner>__<repo>/` にある `issue-N`・`issue-N.verify`・`issue-N.review` から、Issue の番号を集めます。
+2. **PR の状態を調べる**：ブランチ `kagari/issue-N` の PR を、open と close の両方から探します。merge 済みの PR があり、open の PR が 1 つも無い場合だけ、次に進みます。open の PR がある、merge せずに close した、PR が見つからない、のどれかなら、何も消さずに残します。
+3. **消す**：`kagari-agent` のプロセスを止めてから、作業ディレクトリ（3 つとも）を消します。消し方は、前回の作業ディレクトリと同じです（#448、#456）。続けて、clone のローカルのブランチ `kagari/issue-N` と、リモートのブランチ（GitHub がまだ消していなければ）を消します。ラベルは変えません。
+4. **結果**：1 件でも失敗したら、残りの Issue も続けて処理したうえで、終了コード 1 で終わります。失敗した Issue は、次の実行でもう一度試します。
 
 ### 既知の限界
 
