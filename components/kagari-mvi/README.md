@@ -210,7 +210,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
      - `--permission-prompts none` を付け、承認が必要な操作は自動で拒否します。
      - `--bare` は付けません。将来、`CLAUDE_CODE_OAUTH_TOKEN` に切り替えられるようにするためです。
      - 環境変数 `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` を設定します。
-     - 規則は `--append-system-prompt` で渡します。内容は「Issue の範囲だけを実装する」「commit はしない」「`status:` の行の直前に、テストごとの目的を申告する」「最後に `status: COMPLETED` または `status: BLOCKED: 理由` を出力する」です。申告の形は、`tests:` の下に 1 テスト 1 行で `- <テストの名前>: <何を保証する目的か> (AC<n>)`、続けて `untested: <テストで確かめていないこと、無ければ none>` です（#453）。
+     - 規則は `--append-system-prompt` で渡します。内容は「Issue の範囲だけを実装する」「commit はしない」「`status:` の行の直前に、テストごとの目的を申告する」「最後に `status: COMPLETED` または `status: BLOCKED: 理由` を出力する」です。申告の形は、`tests:` の下に 1 テスト 1 行で `- <テストの名前>: <何を保証する目的か> (AC<n>)`、続けて `untested: <テストで確かめていないこと、無ければ none>` です（#453）。テストで確かめられない受入条件（変わったファイルの範囲など）は、`untested:` に `AC<n>: <テストでは確かめようがない理由>` と書き（複数なら箇条書き）、レビュアーが差分で確かめます。テストで確かめられる受入条件には、テストが要ります（#478）。
      - Bash は原則として許可します（User 判断 2026-11-11）。ビルド、lint、テストなどを自由に実行できます。Bash は `kagari-agent` として動き、GitHub の資格情報を持たないので、安全の境界は OS のユーザー分離に置きます。
      - 拒否する操作：ネットワークや資格情報に関わるコマンド（`curl` `wget` `gh` `git push` `git remote` `ssh` `scp` `sudo` `su` `nc` `ncat` `socat` `telnet`）と、`Agent` `WebFetch` `WebSearch` `NotebookEdit` です。これは誤操作を防ぐためのもので、境界ではありません。
      - `Edit` と `Write` は worktree の中に限ります。headless なので、許可されていない操作は確認を待たずに拒否されます。
@@ -251,7 +251,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
    - 使えるツールは `--tools Read,Grep,Glob` だけで、Bash・Edit・Write・Web は存在しません。設定でも拒否します。
    - `--restricted` で、読めるのは checkout の中だけになります。
    - そのほかの起動設定は、実装と同じです（`--permission-prompts none`、MCP は空、subagent の深さは 1）。
-   - 規則：受入条件ごとに `AC<n>: PASS|FAIL|UNKNOWN — 根拠（file:line）` を 1 行ずつ出力し、根拠が足りなければ UNKNOWN にします。その後に、テスト結果のコメントにある実装役の申告について、`TESTS: PASS|FAIL|UNKNOWN — 根拠` を 1 行出力します。各テストの申告した目的が実際のテストの中身と合っていて、どの受入条件にもテストがあれば PASS、申告が無いか判断できなければ UNKNOWN です（#453）。
+   - 規則：受入条件ごとに `AC<n>: PASS|FAIL|UNKNOWN — 根拠（file:line）` を 1 行ずつ出力し、根拠が足りなければ UNKNOWN にします。その後に、テスト結果のコメントにある実装役の申告について、`TESTS: PASS|FAIL|UNKNOWN — 根拠` を 1 行出力します。各テストの申告した目的が実際のテストの中身と合っていて、どの受入条件にもテストがあるか、テストが無い受入条件は実装役が `untested:` に理由とともに挙げていて、テストでは確かめようがない（変わったファイルの範囲など）とレビュアーが認め、差分とファイルから PASS と判定していれば PASS です（#478）。目的が合わない、テストで確かめられるのにテストが無い、テストも `untested:` の申告も無い、のどれかの受入条件があれば FAIL、申告が無いか判断できなければ UNKNOWN です（#453）。
    - 記録は `<workdir>/logs/<owner>__<repo>/issue-N-review.jsonl` に残します。
    - **`--reviewer tsumgi` の場合**：Claude は起動せず、runner が TSUMGI（`https://tsumgi.arc.upiscium.dev/v1`、モデル `qwen3.6-35b-a3b`）の chat completions API に 1 回だけ問い合わせます（`curl`）。実装者（Claude）と別系統のモデルでレビューするためです（ADR-0007 D6、ADR-0009 D4 の条件 2）。
      - 渡すのは、上の 3 つの入力（受入条件、差分、テスト結果）だけです。TSUMGI はファイルを読めないので、根拠は差分とテスト結果の中から示します。差分の外にあるファイルを根拠にする受入条件は、UNKNOWN になりやすくなります。

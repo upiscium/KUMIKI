@@ -64,6 +64,9 @@ AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worke
   tests:
   - <test name>: <what it is meant to guarantee> (AC<n>)
   untested: <what the tests do not check, or none>
+  A criterion no test can check (e.g. which files changed) goes under untested as
+  `AC<n>: <why no test can check it>` (one per line as a list if several); the reviewer
+  checks it in the diff. A criterion a test could check needs a test.
 - End your last message with one line: `status: COMPLETED` if the Issue is done and the
   test command passes, otherwise `status: BLOCKED: <reason>`.
 """
@@ -357,8 +360,11 @@ REVIEW_RULES = """You are an independent reviewer of one pull request (KAGARI MV
   AC<n>: PASS|FAIL|UNKNOWN — <evidence as file:line, or the reason>
 - Then one line on the implementer's declared test purposes (in the test result):
   TESTS: PASS|FAIL|UNKNOWN — <reason>
-  PASS only if each declared purpose matches what that test really checks and every
-  criterion has a test; FAIL if not; UNKNOWN if there is no declaration or you cannot tell.
+  PASS only if each declared purpose matches what that test really checks, and every
+  criterion either has a test or is listed under untested with a reason, no test could
+  reasonably check it (e.g. which files changed), and you judged it PASS from the diff and
+  files. FAIL if a purpose does not match, a criterion a test could check has no test, or a
+  criterion has neither. UNKNOWN if there is no declaration or you cannot tell.
 """
 ALLOWED_HEADING = re.compile(r"^#{2,6}[ \t]*(?:変更する保護ファイル|Protected files to change)[ \t]*$",
                              re.M | re.I)
