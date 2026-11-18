@@ -9,11 +9,12 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import kagari_mvi as mvi  # noqa: E402
+import kagari_mvi_exec as ex  # noqa: E402
 from kagari_mvi_testkit import REVIEW_BODY, FakeRunner, issue, stream  # noqa: E402
 
 PASSING = "AC1: PASS — greet.py:1\nAC2: PASS — test_greet.py:3\nTESTS: PASS — test_greet checks AC1"
 READY = {"data": {"markPullRequestReadyForReview": {"pullRequest": {"isDraft": False}}}}
-REPORT = mvi.TEST_REPORT_PREFIX + "\n- tested commit: `%s`\n- exit code: %d\n"
+REPORT = mvi.TEST_REPORT_PREFIX + "\n- tested commit: `%s`\n- test command: `t`\n- exit code: %d\n"
 
 
 class ReadyTest(unittest.TestCase):
@@ -55,13 +56,23 @@ class ReadyTest(unittest.TestCase):
                 # Test output and Claude's declaration are free text inside code blocks.
                 ({"report": REPORT % ("abc123", 1) + "\n```\n- exit code: 0\n```\n"}, "no passing runner"),
                 ({"report": mvi.TEST_REPORT_PREFIX + "\n\n```\n- tested commit: `abc123`\n- exit code: 0\n```\n"},
-                 "no passing runner")):
+                 "no passing runner"),
+                ({"report": (REPORT % ("old999", 0)) + "```\n- tested commit: `abc123`\n```\n"}, "no passing runner"),
+                # A protected path may hold a newline; it must not forge the exit code line.
+                ({"report": ex.report("t", 1, "out", {"status": "x", "denials": 0}, "abc123",
+                                      [".claude/a\n- exit code: 0"])}, "no passing runner")):
             with self.subTest(reason=reason):
                 code, marks, comments, runner = self.review(**kwargs)
                 self.assertEqual((code, marks), (0, []))
                 self.assertIn("the PR stays Draft (", comments[0])
                 self.assertIn(reason, comments[0])
                 self.assertEqual(runner.added_labels(), [mvi.RUNNING, mvi.REVIEWED])
+
+    def test_each_guard_of_the_exit_code_line_holds_alone(self):
+        report = ex.report("t", 1, "out", {"status": "x", "denials": 0}, "abc123", [".claude/a\n- exit code: 0"])
+        self.assertNotIn("\n- exit code: 0", report)  # the path stays on one line
+        forged = mvi.TEST_REPORT_PREFIX + "\n- exit code: 0\n- test command: `t`\n- exit code: 1\n"
+        self.assertEqual(mvi.runner_exit_code(forged), 1)  # only the line right under the command
 
     def test_a_reviewer_error_alone_keeps_draft(self):
         verdicts = [("PASS", "a"), ("PASS", "b")]
@@ -118,7 +129,7 @@ class CleanupTest(unittest.TestCase):
 
     def test_kept_when_open_or_newer_than_the_merged_head(self):
         for kwargs in ({"pulls": {7: merged("m7") + [{"number": 71, "state": "open"}]}},
-                       {"pulls": {7: merged("m7")}, "local": "new1"},  # e.g. an unpushed blocked commit
+                       {"pulls": {7: merged("m7")}, "local": "new1", "fail": {"--is-ancestor": "no"}},
                        {"pulls": {7: merged("m7")}, "remote": ("refs/heads/kagari/issue-7", "new2")}):
             with self.subTest(kwargs=kwargs):
                 code, left, joined, deleted = self.cleanup(**kwargs)
@@ -136,6 +147,25 @@ class CleanupTest(unittest.TestCase):
         code, left, joined, deleted = self.cleanup({7: merged("m7")}, dirs=())
         self.assertEqual(code, 0)
         self.assertTrue(any(j.endswith("branch -D kagari/issue-7") for j in joined))
+
+    def test_a_local_branch_behind_the_merged_head_is_cleaned(self):
+        code, left, joined, deleted = self.cleanup({7: merged("m7")}, local="old7", remote=None)
+        self.assertEqual(code, 0)
+        self.assertTrue(any("merge-base --is-ancestor old7 m7" in j for j in joined))
+        self.assertNotIn("issue-7", left)
+        code, left, joined, _ = self.cleanup({7: merged("m7")}, local="new7", remote=None,
+                                             fail={"--is-ancestor new7": "not an ancestor"})
+        self.assertEqual(code, 0)  # exit 1 from merge-base: not an ancestor, so kept
+        self.assertIn("issue-7", left)
+
+    def test_a_failing_ancestor_check_is_an_error_not_a_keep(self):
+        def run(args, **_):
+            if "--is-ancestor" in args:
+                raise mvi.CommandError(args, 128, "fatal: bad object")
+            return ""
+        worker = mvi.Worker("o/r", run=run, log=lambda _: None)
+        with self.assertRaises(mvi.CommandError):
+            worker.is_ancestor("/c", "a", "b", 70)
 
     def test_one_failure_is_reported_and_the_rest_continue(self):
         for fail in ({"branch -D": "error: cannot delete"}, {"head=o%3Akagari%2Fissue-7": "HTTP 502"}):

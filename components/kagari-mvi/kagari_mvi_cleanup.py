@@ -25,8 +25,13 @@ class CleanupSteps:
     def cleanup_once(self, workdir: str) -> int:
         base = os.path.join(workdir, "wt", self.slug)
         clone = os.path.join(workdir, "repos", self.slug)
+        try:
+            numbers = self.leftover_numbers(base, clone)
+        except (CommandError, OSError) as error:
+            self.log("cleanup failed before any Issue: %s" % error)
+            return 1
         failed = 0
-        for number in self.leftover_numbers(base, clone):
+        for number in numbers:
             branch = "kagari/issue-%d" % number
             try:
                 reason = self.keep_reason(clone, branch)
@@ -57,11 +62,24 @@ class CleanupSteps:
         merged = [pull for pull in pulls if pull.get("merged_at")]
         if any(pull.get("state") == "open" for pull in pulls) or not merged:
             return "%s has no merged PR, or an open one" % branch
-        heads = {(pull.get("head") or {}).get("sha") for pull in merged}
-        tips = [tip for tip in (self.local_tip(clone, branch), self.remote_tip(branch)) if tip]
-        if any(tip not in heads for tip in tips):
+        heads = {(pull.get("head") or {}).get("sha"): pull["number"] for pull in merged}
+        remote, local = self.remote_tip(branch), self.local_tip(clone, branch)
+        if remote and remote not in heads:  # pushed after the merge
+            return "%s has commits after the merged PR" % branch
+        if local and local not in heads and not any(  # behind is fine: e.g. a human pushed, then merged
+                self.is_ancestor(clone, local, sha, number) for sha, number in heads.items()):
             return "%s has commits after the merged PR" % branch
         return None
+
+    def is_ancestor(self, clone: str, tip: str, head: str, pull: int) -> bool:
+        self.run(["git", "-C", clone] + SAFE_GIT + ["fetch", "origin", "pull/%d/head" % pull])
+        try:
+            self.run(["git", "-C", clone, "merge-base", "--is-ancestor", tip, head])
+        except CommandError as error:
+            if error.code == 1:  # not an ancestor; other codes are real failures
+                return False
+            raise
+        return True
 
     def local_tip(self, clone: str, branch: str) -> Optional[str]:
         if not os.path.isdir(os.path.join(clone, ".git")):

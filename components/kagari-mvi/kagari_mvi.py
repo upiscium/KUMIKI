@@ -100,7 +100,8 @@ def report_header(test_report: str) -> str:
 
 
 def runner_exit_code(test_report: str) -> Optional[int]:
-    found = re.search(r"^- exit code: (-?\d+)$", report_header(test_report), re.M)
+    # Right under the test command line, which the runner writes from the approved Issue.
+    found = re.search(r"^- test command: .*\n- exit code: (-?\d+)$", report_header(test_report), re.M)
     return int(found.group(1)) if found else None
 
 
@@ -255,7 +256,7 @@ class Worker(AgentSteps, CleanupSteps):
                 stage = "ready"
                 try:
                     self.mark_ready(pr["node_id"])
-                except (CommandError, ValueError) as error:  # still post the verdicts, then block
+                except (CommandError, ValueError, KeyError) as error:  # post the verdicts, then block
                     not_ready, note = error, "\n- ready for review: failed, the PR stays Draft\n"
             stage = "report"
             self.comment(pr["number"], review_report(head, criteria, outcome, fresh) + note)
