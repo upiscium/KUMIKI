@@ -136,7 +136,7 @@ def test_command(body: Optional[str]) -> Optional[str]:
 
 def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
     """Summarize Claude's stream-json: auth failure, final status, permission denials."""
-    result, plain, limited, reset_at = None, [], False, None
+    result, plain, reset_at = None, [], None
     for line in output.splitlines():
         try:
             event = json.loads(line)
@@ -144,19 +144,20 @@ def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
             plain.append(line)  # stderr and other non-JSON text
             continue
         if isinstance(event, dict):
-            limited = limited or event.get("api_error") == "usage_limit_reached"
             info = (event.get("api_error_params") or {}).get("rate_limit_info") or {}
             reset_at = info.get("resetsAt") or reset_at
         if isinstance(event, dict) and event.get("type") == "result":
             result = event
     errored = failed or result is None or bool(result.get("is_error"))
+    # Only the final result decides: a limit that was retried past, then another failure, is a failure.
+    limited = errored and (result or {}).get("api_error") == "usage_limit_reached"
     text = str((result or {}).get("result") or "")
     statuses = re.findall(r"status:\s*(COMPLETED|BLOCKED[^\n]*)", text)
     return {
         "purposes": test_purposes(text),
         # Only the final result and stderr: file contents and ids may contain "401".
         "errored": errored,
-        "limited": errored and limited,
+        "limited": limited,
         "resets": (datetime.datetime.fromtimestamp(reset_at, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
                    if isinstance(reset_at, (int, float)) else text.strip() or "(unknown)"),
         "auth": errored and bool(AUTH_PATTERN.search("\n".join(plain + [text]))),

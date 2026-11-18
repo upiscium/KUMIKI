@@ -36,6 +36,10 @@ class OutcomeTest(unittest.TestCase):
         for text, is_error in (("Not logged in · Please run /login", True), ("boom", True),
                                ("status: COMPLETED", False)):
             self.assertFalse(ex.agent_outcome(stream(text, is_error=is_error), False)["limited"], text)
+        # A limit seen earlier, then another failure at the end: the end decides, so it still blocks.
+        retried = limit_stream().split("\n")[0] + "\n" + stream("ran out of turns", is_error=True)
+        self.assertFalse(ex.agent_outcome(retried, False)["limited"])
+        self.assertFalse(ex.agent_outcome(limit_stream().split("\n")[0], True)["limited"])  # no result at all
         # The words alone are not enough: only the API's own error counts ...
         self.assertFalse(ex.agent_outcome(stream("hit the 5-hour usage limit", is_error=True), False)["limited"])
         # ... and only in a run that actually errored.

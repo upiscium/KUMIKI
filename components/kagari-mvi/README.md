@@ -188,6 +188,8 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 | 2 | 引数が不正だった |
 | 3 | Claude の利用上限に当たったので、Issue を `blocked` にせず元に戻した（`run-once`・`review-once`、#481） |
 
+終了コード 3 は失敗ではありません。上限が戻れば次の実行が進みます。`run-once`・`review-once`・`cleanup-once` を 1 つの timer から順に呼ぶときは、3 で後ろの呼び出しを止めないでください（systemd なら `SuccessExitStatus=3`、シェルなら `|| [ $? -eq 3 ]`）。特に `cleanup-once` は、利用上限と関係なく動かせます。
+
 ## `run-once` の動作
 
 1. **Issue を選ぶ**：対象は、open で、`kagari:approved` が付いていて、running / implemented / reviewed / blocked のどれも付いていない Issue です（PR は除きます）。その中で作成日時が最も古い 1 件を選びます。
