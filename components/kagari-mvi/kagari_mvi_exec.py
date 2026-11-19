@@ -6,23 +6,25 @@ with an explicit git dir and hooks disabled (D3).
 """
 from __future__ import annotations
 
-import datetime
 import json
 import os
-import re
 import shutil
 import subprocess
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import kagari_mvi_tsumgi as tsumgi
 from kagari_mvi_tsumgi import TSUMGI_MODEL, TSUMGI_URL  # noqa: F401 - used by callers and tests
+# Moved out in #490; re-exported so that kagari_mvi, the tests and the recipes keep their names.
+from kagari_mvi_issue import (ALLOWED_HEADING, CRITERIA_HEADING, PLACEMENT_HEADINGS,  # noqa: F401
+                              TEST_HEADING, acceptance_criteria, allowed_protected,
+                              missing_placement, section_items, section_text, test_command)
+from kagari_mvi_parse import (AUTH_PATTERN, PURPOSE_BYTES, PURPOSE_LINES, SENTENCE_END,  # noqa: F401
+                              TAIL_CHARS, TAIL_LINES, TESTS_LINE, VERDICT_LINE, agent_outcome,
+                              review_verdicts, tail, test_purposes, tests_verdict)
+from kagari_mvi_report import report, review_report  # noqa: F401
 
 TSUMGI_MAX_BYTES = tsumgi.max_input_bytes()  # a larger review input is not sent (#434)
 
-TAIL_LINES = 20
-TAIL_CHARS = 2000
-PURPOSE_LINES = 40  # Claude's declared test purposes stay small for comments and TSUMGI
-PURPOSE_BYTES = 3000
 GIT_IDENTITY = ["-c", "user.name=kagari-mvi", "-c", "user.email=kagari-mvi@localhost"]
 # The worktree is writable by the agent: never let it choose code that git runs here.
 SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] + GIT_IDENTITY
@@ -49,9 +51,6 @@ AGENT_SCRIPT = 'cd "$1" && umask 002 && shift && exec "$@"'
 # Tests: no login shell (agent-written ~/.profile is ignored) and a throwaway HOME.
 TEST_SCRIPT = ('cd "$1" && umask 002 && HOME=$(mktemp -d) && export HOME && '
                'exec timeout -k 10 "$3" sh -c "$2" 2>&1')  # $2 command, $3 seconds
-TEST_HEADING = re.compile(r"^#{2,6}[ \t]*(?:テストコマンド|Test command)[ \t]*$", re.M | re.I)
-AUTH_PATTERN = re.compile(r"login expired|not logged in|invalid api key|authentication_error|"
-                          r"oauth token|please run /login|api error:? *401\b|\b401 unauthorized", re.I)
 AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worker.
 - Implement only what the Issue asks. Edit files in the current directory only.
 - You may run shell commands (build, lint, tests). Do not commit: the host commits
@@ -110,10 +109,6 @@ def _command_env() -> Dict[str, str]:
     return env
 
 
-def tail(text: str) -> str:
-    return "\n".join(text.strip().splitlines()[-TAIL_LINES:])[-TAIL_CHARS:]
-
-
 def protected_paths(paths: Sequence[str]) -> List[str]:
     """Changed paths that a human must review before anything is pushed."""
     return [path for path in paths
@@ -121,103 +116,6 @@ def protected_paths(paths: Sequence[str]) -> List[str]:
             or path.startswith(".github/workflows/")]
 
 
-def test_command(body: Optional[str]) -> Optional[str]:
-    """First line of the first code block under a `### テストコマンド` heading."""
-    heading = TEST_HEADING.search(body or "")
-    if heading is None:
-        return None
-    section = (body or "")[heading.end():]
-    fence = re.search(r"^```[^\n]*\n(.*?)^```", section, re.M | re.S)
-    if fence is None or re.search(r"^#{1,6}\s", section[:fence.start()], re.M):
-        return None
-    lines = [line.strip() for line in fence.group(1).splitlines() if line.strip()]
-    return lines[0] if lines else None
-
-
-def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
-    """Summarize Claude's stream-json: auth failure, final status, permission denials."""
-    result, plain, reset_at = None, [], None
-    for line in output.splitlines():
-        try:
-            event = json.loads(line)
-        except ValueError:
-            plain.append(line)  # stderr and other non-JSON text
-            continue
-        if isinstance(event, dict):
-            info = (event.get("api_error_params") or {}).get("rate_limit_info") or {}
-            reset_at = info.get("resetsAt") or reset_at
-        if isinstance(event, dict) and event.get("type") == "result":
-            result = event
-    errored = failed or result is None or bool(result.get("is_error"))
-    # Only the final result decides: a limit that was retried past, then another failure, is a failure.
-    limited = errored and (result or {}).get("api_error") == "usage_limit_reached"
-    text = str((result or {}).get("result") or "")
-    statuses = re.findall(r"status:\s*(COMPLETED|BLOCKED[^\n]*)", text)
-    return {
-        "purposes": test_purposes(text),
-        # Only the final result and stderr: file contents and ids may contain "401".
-        "errored": errored,
-        "limited": limited,
-        "resets": (datetime.datetime.fromtimestamp(reset_at, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                   if isinstance(reset_at, (int, float)) else text.strip() or "(unknown)"),
-        "auth": errored and bool(AUTH_PATTERN.search("\n".join(plain + [text]))),
-        "status": statuses[-1].strip() if statuses else "(none)",
-        "completed": not errored and bool(statuses) and statuses[-1] == "COMPLETED",
-        "denials": len((result or {}).get("permission_denials") or []),
-        "detail": tail("\n".join(plain + [text])),  # readable: no raw stream-json
-        "text": text,
-    }
-
-
-# A sentence ends at . 。 ! ? ！ ？ … (before closing brackets or quotes), but not at an abbreviation's dot.
-SENTENCE_END = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\betc)(?<!\bvs)(?<!\bcf)"
-                          r"[.。!?！？…][)\]）」』\"'”’]*$", re.I)
-
-
-def test_purposes(text: str) -> Optional[str]:
-    """Claude's last `tests:` list and `untested:` note (#453), bounded: it is untrusted text."""
-    lines = text.replace("\r\n", "\n").splitlines()
-    starts = [i for i, line in enumerate(lines) if re.match(r"^\W*tests\W*:\W*$", line, re.I)]
-    if not starts:
-        return None
-    items: List[str] = []
-    untested: Optional[List[str]] = None
-    inline = gap = False
-    bullet = r"^(?:[-*+]|\d{1,2}[.)])\s+\S"  # `2026. ...` is prose, not item 2026
-    for raw in lines[starts[-1] + 1:]:
-        line, fence = raw.strip(), raw.strip()[:3] in ("```", "~~~")
-        note = re.match(r"^\W*untested\W*:\W*(.*)$", line, re.I)
-        if re.match(r"^\W*status\W*:", line, re.I):
-            break
-        if untested is not None:  # one inline line, or the list right under `untested:`
-            if inline or fence:
-                break
-            if re.match(bullet, line):
-                untested.append(line)
-            elif line and untested and not gap and raw[:1].isspace() and not SENTENCE_END.search(
-                    untested[-1]):  # a bullet wrapped mid-sentence
-                untested[-1] += " " + line
-            elif line and untested and not gap and raw[:1].isspace():
-                continue  # prose under a finished bullet: skip it, a later bullet still counts
-            elif line:
-                break  # prose after the declaration
-            gap = not line and bool(untested)
-        elif note:
-            untested, inline = ([note.group(1)], True) if note.group(1) else ([], False)
-        elif fence:
-            continue
-        elif re.match(bullet, line):
-            items.append(line)
-        elif re.match(r"^\d{3,}[.)]\s", line):
-            continue  # `100. ...` is neither an item nor the continuation of one
-        elif line and items:  # a wrapped item
-            items[-1] += " " + line
-    declared = "tests:\n%s\nuntested: %s" % ("\n".join(items), "; ".join(untested) if untested
-                                              else "(not declared)" if untested is None else "")
-    if len(declared.encode()) > PURPOSE_BYTES or len(declared.splitlines()) > PURPOSE_LINES:
-        cut = declared.encode()[:PURPOSE_BYTES].decode(errors="ignore")  # bytes: TSUMGI's budget
-        declared = "\n".join(cut.splitlines()[:PURPOSE_LINES]) + "\n(truncated by the runner)"
-    return declared if items or untested else None
 
 
 class Blocked(Exception):
@@ -392,102 +290,8 @@ REVIEW_RULES = """You are an independent reviewer of one pull request (KAGARI MV
   files. FAIL if a purpose does not match, a criterion a test could check has no test, or a
   criterion has neither. UNKNOWN if there is no declaration or you cannot tell.
 """
-ALLOWED_HEADING = re.compile(r"^#{2,6}[ \t]*(?:変更する保護ファイル|Protected files to change)[ \t]*$",
-                             re.M | re.I)
-CRITERIA_HEADING = re.compile(r"^#{2,6}[ \t]*(?:受入条件|Acceptance criteria)[ \t]*$", re.M | re.I)
-PLACEMENT_HEADINGS = [(names, re.compile(r"^#{2,6}[ \t]*(?:%s)[ \t]*$" % "|".join(names), re.M | re.I))
-                      for names in (("全体ロジック", "Overall logic"), ("置く理由", "Why here"),
-                                    ("却下した置き場所", "Rejected placements"))]
-# [^\w\n] / [ \t]: a verdict never spans lines (an empty evidence must not swallow the next line).
-VERDICT_LINE = re.compile(r"^[^\w\n]*AC(\d+)[^\w\n]*?[:：][^\w\n]*(PASS|FAIL|UNKNOWN)\b[*_]*[ \t]*"
-                          r"[-—–:：]*[ \t]*(.*)$", re.M | re.I)
-TESTS_LINE = re.compile(r"^[^\w\n]*TESTS[^\w\n]*?[:：][^\w\n]*(PASS|FAIL|UNKNOWN)\b[*_]*[ \t]*"
-                        r"[-—–:：]*[ \t]*(.*)$", re.M | re.I)
-
-
-def acceptance_criteria(body: Optional[str]) -> List[str]:
-    """List items (`- [ ] ...` or `- ...`) under a `### 受入条件` heading."""
-    return section_items(body, CRITERIA_HEADING)
-
-
-def allowed_protected(body: Optional[str]) -> List[str]:
-    """Protected paths the approved Issue lets Claude change; a trailing `/` covers a directory."""
-    paths = [re.match(r"`([^`]+)`|(\S+)", item) for item in section_items(body, ALLOWED_HEADING)]
-    return [re.sub(r"^(\./|/)+", "", match.group(1) or match.group(2)) for match in paths if match]
-
-
-def missing_placement(body: Optional[str]) -> List[str]:
-    """Placement headings (ADR-0011) that are absent or hold nothing but list markers."""
-    return [names[0] for names, pattern in PLACEMENT_HEADINGS
-            if not re.sub(r"[-*\s]|\[[ xX]\]", "", section_text(body, pattern) or "")]
-
-
-def section_text(body: Optional[str], pattern: "re.Pattern[str]") -> Optional[str]:
-    """Text from the heading to the next heading, or None without the heading."""
-    heading = pattern.search(body or "")
-    if heading is None:
-        return None
-    return re.split(r"^#{1,6}\s", (body or "")[heading.end():], maxsplit=1, flags=re.M)[0]
-
-
-def section_items(body: Optional[str], pattern: "re.Pattern[str]") -> List[str]:
-    section = section_text(body, pattern) or ""
-    items = re.findall(r"^\s*[-*]\s+(?:\[[ xX]\]\s*)?(.+?)\s*$", section, re.M)
-    return [item for item in items if item]
-
-
-def tests_verdict(text: str) -> Tuple[str, str]:
-    """The reviewer's `TESTS:` line; a missing or conflicting one counts as UNKNOWN."""
-    found = [(status.upper(), evidence.strip()) for status, evidence in TESTS_LINE.findall(text)]
-    if len({status for status, _ in found}) == 1:
-        return found[-1]
-    if not found:
-        return ("UNKNOWN", "(no TESTS verdict from the reviewer)")
-    return ("UNKNOWN", "(conflicting TESTS verdicts from the reviewer)")
-
-
-def review_verdicts(text: str, count: int) -> List[Tuple[str, str]]:
-    """(status, evidence) per criterion; a missing line counts as UNKNOWN."""
-    found: Dict[int, Tuple[str, str]] = {}
-    for n, status, evidence in VERDICT_LINE.findall(text):
-        verdict = (status.upper(), evidence.strip())
-        if int(n) in found and found[int(n)][0] != verdict[0]:
-            verdict = ("UNKNOWN", "(conflicting verdicts from the reviewer)")
-        found[int(n)] = verdict
-    return [found.get(i, ("UNKNOWN", "(no verdict from the reviewer)")) for i in range(1, count + 1)]
-
-
-def review_report(head: str, criteria: List[str], outcome: Dict[str, Any], fresh: bool) -> str:
-    verdicts, denials = outcome["verdicts"], outcome["denials"]
-    cell = lambda value: value.replace("|", "\\|").replace("\n", " ")  # noqa: E731
-    rows = ["| AC%d | %s | **%s** | %s |" % (i, cell(c), status, cell(evidence))
-            for i, (c, (status, evidence)) in enumerate(zip(criteria, verdicts), start=1)]
-    failing = sum(1 for status, _ in verdicts if status != "PASS")
-    rows.append("| TESTS | テストの目的（申告）と受入条件の対応 | **%s** | %s |" % (
-        outcome["tests"][0], cell(outcome["tests"][1])))
-    return ("kagari-mvi: independent review (%s, ADR-0007 D6).\n\n- reviewed head: `%s`\n"
-            "- not PASS: %d of %d\n- permission denials: %d\n- reviewer session: %s\n"
-            "- runner test result: %s\n\n| # | 受入条件 | 判定 | 根拠 |\n| --- | --- | --- | --- |\n%s\n"
-            % (outcome["reviewer"], head, failing, len(verdicts), denials,
-               "ended with an error" if outcome["errored"] else "ok",
-               "for this head" if fresh else "missing or for another commit (not evidence)",
-               "\n".join(rows)))
 
 
 def bounded(seconds: int) -> List[str]:
     """sudo does not relay SIGKILL: stop the agent-side process tree from inside."""
     return ["timeout", "-k", "10", str(seconds)]
-
-
-def report(test: str, code: int, output: str, outcome: Dict[str, Any], sha: str,
-           protected: Sequence[str] = ()) -> str:
-    changed = "".join("- protected file changed (allowed by the Issue): `%s`\n"  # one line each
-                      % path.replace("\r", "\\r").replace("\n", "\\n") for path in protected)
-    return ("kagari-mvi: test result recorded by the runner (not reported by Claude).\n\n"
-            "- tested commit: `%s`\n" % sha + changed +
-            "- test command: `%s` (run by the runner as the agent user)\n- exit code: %d\n"
-            "- Claude status: `%s`\n- permission denials: %d\n\n```\n%s\n```\n\n"
-            "テストの目的（Claude の申告。合否には使わない）：\n\n%s" % (
-                test, code, outcome["status"], outcome["denials"], tail(output).replace("```", "'''"),
-                "```\n%s\n```" % outcome["purposes"].replace("```", "'''")
-                if outcome.get("purposes") else "申告なし"))
