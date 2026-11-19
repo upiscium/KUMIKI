@@ -4,7 +4,6 @@ KUMIKI（組木）/ KAGARI（篝）の合意済み設計判断を記録します
 
 | ADR | Status | 対象 |
 | --- | --- | --- |
-| [0012 — KAGARI の導入の単位を、リポジトリからホストに広げる](0012-host-scoped-kagari.md) | Proposed | KAGARI を 1 ホストに 1 回導入し、リポジトリは「登録」する。着脱の標準操作（install/uninstall/status/repair、register/unregister）をホストに広げる（ADR-0002 K1〜K4 の対象の読み替え、ADR-0007 D3 の格上げ）。導入が扱うのはホスト準備・固定 checkout・timer・対象登録で、資格情報は含めない。uninstall は導入したものだけを外す。旧方式（リポジトリごとの導入器）は凍結 |
 | [0001 — Trusted AgentTeam と Ask 境界](0001-trusted-agentteam-and-human-decisions.md) | Accepted; implementation partial; #1 の具体化は ADR-0009 | 目的・安全性・自律操作・人間の判断 |
 | [0002 — 着脱可能な KAGARI と Project 所有権](0002-detachable-kagari-and-project-ownership.md) | Accepted; implementation pending | Install/Uninstall/Reinstall、Nix/Just/OpenCode、Repair |
 | [0003 — 自己更新可能な source 開発と統一復旧](0003-self-hosted-development-and-recovery.md) | Accepted principles; implementation choices pending | Source Guard、自律更新、既知・未知の障害への対処 |
@@ -16,6 +15,7 @@ KUMIKI（組木）/ KAGARI（篝）の合意済み設計判断を記録します
 | [0009 — KAGARI の責任範囲と v0.2 系](0009-kagari-responsibility-and-v02.md) | Accepted (2026-11-13); 追補 2026-11-14（dispatch 経路は凍結、二重取得は確認済み、OAuth は保留、レビューは TSUMGI、README の手順は条件から外す）; 追補 2026-11-18（OAuth は今のままと決定、#480）; ADR-0010 で一部改定 | 責任を持つ範囲（人間の関門・GitHub 資格情報の分離・誤操作の防止・検証）と持たない範囲・ユーザー分離だけの実行環境・v0.1 資産の扱い・v0.2.0 の条件・#337/#391 の扱い |
 | [0010 — 実行役を Claude Code と Pi に分け、許可台帳と運用ルールを足す](0010-executors-permission-ledger-and-rules.md) | Accepted (2026-11-15); 追補 2026-11-16（`kagari-mvi` の行数の上限を 1 ファイルあたり本体 500 行・テスト 800 行に変更） | 実行役（Claude Code・Pi・TSUMGI の直接呼び出し、OpenCode の終了）・許可台帳（同じ許可を何度も聞かない、回答を待つ）・Ready 化と運用ルール・秘密情報を要するテスト・並列化・v0.2.0 の範囲 |
 | [0011 — 人間のレビューは、ロジックを置く場所の判断に絞る](0011-human-review-placement-judgment.md) | Accepted (2026-11-16, PR #451); 追補 2026-11-17（全体ロジック・置く理由・却下した置き場所は Issue に書き、承認ラベルの時点で判断する。欠けた Issue は起動前に `blocked`）; 追補 2026-11-17 の 2 件目（承認依頼に当初の目的と目的とのずれを必須にし、CI の通過は書かない。項目の順序を改める） | 役割の分担（正しさはテスト、置き場所は人間）・承認依頼の項目（当初の目的・ロジックの概要・目的とのずれ・全体ロジック・置く理由・却下した置き場所・テストの保証範囲・却下した場合の影響） |
+| [0012 — KAGARI の導入の単位を、リポジトリからホストに広げる](0012-host-scoped-kagari.md) | Proposed | KAGARI を 1 ホストに 1 回導入し、リポジトリは「登録」する。着脱の標準操作（install/uninstall/status/repair、register/unregister）をホストに広げる（ADR-0002 K1〜K4 の対象の読み替え、ADR-0007 D3 の格上げ）。導入が扱うのはホスト準備・固定 checkout・timer・対象登録で、資格情報は含めない。uninstall は導入したものだけを外す。旧方式（リポジトリごとの導入器）は凍結 |
 
 **Decision tracking:** [Issue #254](https://github.com/upiscium/KUMIKI/issues/254)。既存の v4 [Issue #189](https://github.com/upiscium/KUMIKI/issues/189)、KUMIKI/KAGARI 改名 [#242](https://github.com/upiscium/KUMIKI/issues/242)、#221 / Draft PR #224、#250 と整合させる。
 
