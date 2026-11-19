@@ -190,6 +190,56 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 
 終了コード 3 は失敗ではありません。上限が戻れば次の実行が進みます。`run-once`・`review-once`・`cleanup-once` を 1 つの timer から順に呼ぶときは、3 で後ろの呼び出しを止めないでください（systemd なら `SuccessExitStatus=3`、シェルなら `|| [ $? -eq 3 ]`）。特に `cleanup-once` は、利用上限と関係なく動かせます。
 
+## timer で動かす（#489）
+
+1 つの timer から、`run-once` → `review-once` → `cleanup-once` を順に呼びます。3 つを同時に動かさないためです（「1 つのホストに 1 つの KAGARI」）。次の例は、`systemd-analyze verify` で構文を確かめました（2026-11-19）。verify は、`User=` のユーザーと `WorkingDirectory=` のディレクトリが存在すること、`just` が見つかることを確かめません。ホストに設定して動かすことは、まだ確かめていません。timer の初回の発火の時刻（`OnBootSec`・`OnUnitInactiveSec`）と、実行中の service に timer の時刻が重なったときの動きも、**未確認**です。`OWNER/REPO` と `PATH` は、環境に合わせて書き換えてください。
+
+`/etc/systemd/system/kagari-mvi.service`：
+
+```ini
+[Unit]
+Description=KAGARI MVI: run-once, review-once and cleanup-once for one repository
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kagari-runner
+WorkingDirectory=/home/kagari-runner/KUMIKI
+Environment=PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
+Environment=KAGARI_MVI_WORKDIR=/srv/kagari
+Environment=KAGARI_MVI_ALLOW_ACTOR=upiscium
+ExecStart=/usr/bin/env just mvi::run-once OWNER/REPO
+ExecStart=/usr/bin/env just mvi::review-once OWNER/REPO
+ExecStart=/usr/bin/env just mvi::cleanup-once OWNER/REPO
+SuccessExitStatus=3
+TimeoutStartSec=3h
+```
+
+`/etc/systemd/system/kagari-mvi.timer`：
+
+```ini
+[Unit]
+Description=KAGARI MVI: poll for approved Issues
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=10min
+Unit=kagari-mvi.service
+
+[Install]
+WantedBy=timers.target
+```
+
+- **`PATH`**：system service の既定の `PATH` には、nix の profile が入りません。`just` と、`just` が呼ぶ `python3`・`gh`・`git`・`sudo` を探せる `PATH` が要ります。例は、LXC（Ubuntu）の `kagari-runner` で `command -v just` が `/nix/var/nix/profiles/default/bin/just` だったための書き方です。`sudo -u kagari-runner -H sh -lc 'command -v just python3 gh git sudo'` で確かめて、ホストに合わせてください。
+- **`SuccessExitStatus=3`**：終了コード 3 は、Claude の利用上限に当たって Issue を元に戻したことを表し、失敗ではありません（#481）。これを成功として扱わないと、systemd が `ExecStart` の残りを飛ばし、利用上限と関係の無い `cleanup-once` まで止まります。それ以外の終了コード（1 と 2）は失敗として、残りを飛ばします。人間が見る必要があるためです。失敗しても timer は止まらず、10 分後にもう一度起動する想定です（`failed` の後の再起動は**未確認**）。手順 4〜9 の失敗では Issue に `kagari:blocked` が付き、そのラベルを外すまで再処理されません。繰り返し起動されるのは、`blocked` が付かない失敗（Issue の選択時の API の失敗、`cleanup-once` の失敗、ラベル操作そのものの失敗）です。`journalctl -u kagari-mvi.service` と、Issue の `blocked` のコメントを見てください。
+- **`TimeoutStartSec=3h`**：1 つのリポジトリの最悪は、`run-once` が約 1 時間（`AGENT_TIMEOUT`）とテストが約 30 分（`TEST_TIMEOUT`）、`review-once` が約 1 時間、`cleanup-once` が数分です。この値が、全部の `ExecStart=` の合計に掛かるのか、それぞれに掛かるのかは、**未確認**です。合計に掛かる場合に備えて、1 つのリポジトリで 3 時間にしています。リポジトリを増やすときは、増やした数に合わせて延ばしてください。`Type=oneshot` の既定は無制限なので、この値を超えると systemd が service を止めます。worker が止められたときにラベルを戻す処理が無ければ、処理中の Issue に `kagari:running` が残り、自動では復旧しません（「既知の限界」の「止まった Issue」と同じ状態です。この挙動は未確認）。
+- **順に呼ぶこと**：1 つの `Type=oneshot` の service に `ExecStart=` を並べると、前のものが終わってから次が始まります。`OnUnitInactiveSec` は、service が終わってから次の起動までの間隔なので、systemd の仕様上は実行が重ならない想定です（実機では**未確認**）。`run-once` は、最も古い承認の Issue を 1 件だけ処理します。間隔は 10 分を目安にし、利用上限に当たる間は、その間隔で再試行されます。
+- **複数のリポジトリ**：同じ service に、リポジトリごとに 3 行の `ExecStart=` を並べます。service と timer を分けて同時に動かすことは避けてください。`kagari-agent` のプロセスを止める処理が、もう一方の実行を止めてしまうためです（「1 つのホストに 1 つの KAGARI」）。途中で失敗（1 と 2）すると、後ろのリポジトリは飛ばされます。失敗を無視して先へ進めたいときは `ExecStart=-…` と書けますが、失敗が見えなくなるので、おすすめしません。
+- **ログインの期限**：`sudo -u kagari-agent -H claude auth status` の `loginExpiresAt` が、`kagari-agent` の Claude のログインの期限です。期限の前に再ログインしてください（ADR-0009 追補 2026-11-18）。
+- **導入**：先に、`WorkingDirectory=` の KUMIKI の checkout（`git clone` して `main` に合わせたもの）を `kagari-runner` の home に用意します。次に、2 つのファイルを置いたら、`systemctl daemon-reload` の後に、`systemctl enable --now kagari-mvi.timer` で、初回の有効化と開始を行います。
+- **再ログインの手順**：(1) `systemctl stop kagari-mvi.timer`（先に timer を止めて、新しい実行が始まらないようにする。実行中の service は止まりません）。(2) `systemctl is-active kagari-mvi.service` を、`inactive` か `failed` になるまで繰り返し確かめる（この 1 回のコマンドは待ってくれず、その時点の状態を返すだけです。実行中は `activating`）。(3) `kagari-agent` で再ログインする（コマンドは**未確認**です。対話の `claude` で `/login`、または `claude auth login` のどちらかです。2026-12-09 の期限の前に実際に再ログインして確かめ、確かめたら、ここを書き直します）。(4) `sudo -u kagari-agent -H claude auth status` で、期限が延びたことを確かめる。(5) `systemctl start kagari-mvi.timer`（初回の `enable` は済んでいるので、`start` だけで戻ります）。実行の途中で `systemctl stop kagari-mvi.service` をしたり、ホストを再起動したりすると、`kagari:running` が残り、自動では復旧しません（「既知の限界」）。
+
 ## `run-once` の動作
 
 1. **Issue を選ぶ**：対象は、open で、`kagari:approved` が付いていて、running / implemented / reviewed / blocked のどれも付いていない Issue です（PR は除きます）。その中で作成日時が最も古い 1 件を選びます。
