@@ -1,6 +1,6 @@
 # ADR-0007: Issue起点の最小E2E経路（MVI walking skeleton）をD8より先に通す
 
-- **Status:** Accepted（2026-11-11）; I-1〜I-3 実装済み、E2E-MVI-01 実施済み（2026-11-12）。D2 の「正とする経路」と D2a の凍結の扱いは ADR-0008 で決定（D7 追補 2026-11-12）。D3 の LXC は MVI の実機確認に限る（ADR-0009 D2）。D3 の「権限窓口は作らない」と D7 の `--permission-prompts none` は ADR-0010 D2 で改定。D1 の手順 6 の「承認依頼の4点」は ADR-0011 D2 の項目と読み替える。Known limitations の OAuth（Claude のログインの期限）は ADR-0009 追補 2026-11-18（#480）で「今のまま」と決定。D5・D7 の行数の上限は ADR-0010 追補 2026-11-16 で 1 ファイルあたり本体 500 行・テスト 800 行に改定。D7 の「ホストのセットアップはホストごとに 1 回」の手順は、ADR-0012 で標準の操作（install/uninstall/status/repair）に格上げ
+- **Status:** Accepted（2026-11-11）; I-1〜I-3 実装済み、E2E-MVI-01 実施済み（2026-11-12）。D2 の「正とする経路」と D2a の凍結の扱いは ADR-0008 で決定（D7 追補 2026-11-12）。D3 の LXC は MVI の実機確認に限る（ADR-0009 D2）。D3 の「権限窓口は作らない」と D7 の `--permission-prompts none` は ADR-0010 D2 で改定。D1 の手順 6 の「承認依頼の4点」は ADR-0011 D2 の項目と読み替える。Known limitations の OAuth（Claude のログインの期限）は ADR-0009 追補 2026-11-18（#480）で「今のまま」と決定。D5・D7 の行数の上限は ADR-0010 追補 2026-11-16 で 1 ファイルあたり本体 500 行・テスト 800 行に改定。D7 の「ホストのセットアップはホストごとに 1 回」の手順は、ADR-0012 で標準の操作（install/uninstall/status/repair）に格上げすると決定（実装は Epic #496）
 - **Human decision:** 案B（KUMIKI内に最小E2E経路を新設し、ADR-0006 D8より先に通す）を採用（2026-11-11 JST）。承認ラベルの付与をagentに許さないADR-0006の制約は維持する。
 - **Issues:** #403（I-0 LXC）、#404（I-1 骨格）、#405（I-2 Claude実装）、#406（I-3 レビュー）
 - **Related:** ADR-0001、ADR-0005、ADR-0006（D1〜D8）、#291、#340
