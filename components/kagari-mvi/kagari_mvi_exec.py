@@ -169,6 +169,11 @@ def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
     }
 
 
+# A sentence ends at . 。 ! ? ！ ？ … (before closing brackets or quotes), but not at an abbreviation's dot.
+SENTENCE_END = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\betc)(?<!\bvs)(?<!\bcf)"
+                          r"[.。!?！？…][)\]）」』\"'”’]*$", re.I)
+
+
 def test_purposes(text: str) -> Optional[str]:
     """Claude's last `tests:` list and `untested:` note (#453), bounded: it is untrusted text."""
     lines = text.replace("\r\n", "\n").splitlines()
@@ -189,8 +194,8 @@ def test_purposes(text: str) -> Optional[str]:
                 break
             if re.match(bullet, line):
                 untested.append(line)
-            elif line and untested and not gap and raw[:1].isspace() and not re.search(
-                    r"[.。!?！？]$", untested[-1]):  # a bullet wrapped mid-sentence
+            elif line and untested and not gap and raw[:1].isspace() and not SENTENCE_END.search(
+                    untested[-1]):  # a bullet wrapped mid-sentence
                 untested[-1] += " " + line
             elif line and untested and not gap and raw[:1].isspace():
                 continue  # prose under a finished bullet: skip it, a later bullet still counts
@@ -203,6 +208,8 @@ def test_purposes(text: str) -> Optional[str]:
             continue
         elif re.match(bullet, line):
             items.append(line)
+        elif re.match(r"^\d{3,}[.)]\s", line):
+            continue  # `100. ...` is neither an item nor the continuation of one
         elif line and items:  # a wrapped item
             items[-1] += " " + line
     declared = "tests:\n%s\nuntested: %s" % ("\n".join(items), "; ".join(untested) if untested
