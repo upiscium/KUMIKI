@@ -110,6 +110,18 @@ class RunOnceTest(unittest.TestCase):
         for tail, shown in (("- HW.\n  Needs a board.\n  Really.\n- net.\n  Thanks.\nDone.", "- HW.; - net."), ("- HW\n\n- net\n\n  more", "- HW; - net")):
             self.assertEqual(ex.test_purposes("tests:\n- t\nuntested:\n" + tail), "tests:\n- t\nuntested: " + shown)
         self.assertEqual(ex.test_purposes("tests:\n- t\nuntested:\n99. a\n2026. b"), "tests:\n- t\nuntested: 99. a")
+        tail = lambda *lines: "tests:\n- t\nuntested:\n" + "\n".join(lines)  # noqa: E731
+        for lines, shown in ((("- HW e.g.", "  the board", "- net"), "- HW e.g. the board; - net"),  # an abbreviation
+                             (("- HW i.e.", "  the board", "- net"), "- HW i.e. the board; - net"),
+                             (("- HW, net, etc.", "  and more", "- x"), "- HW, net, etc. and more; - x"),
+                             (("- A vs.", "  B", "- x"), "- A vs. B; - x"),
+                             (("- see cf.", "  README", "- x"), "- see cf. README; - x"),
+                             (("- HW slow.)", "  Thanks.", "- net"), "- HW slow.); - net"),
+                             (('- HW "slow."', "  Thanks.", "- net"), '- HW "slow."; - net'),
+                             (("- HW 遅い…", "  Thanks.", "- net"), "- HW 遅い…; - net")):
+            self.assertEqual(ex.test_purposes(tail(*lines)), "tests:\n- t\nuntested: " + shown)
+        three = ex.test_purposes("tests:\n- t: a\n100. t100\n2026. y\n99. t99\nuntested: none")
+        self.assertEqual(three, "tests:\n- t: a\n99. t99\nuntested: none")  # 100. and 2026. are dropped
         for count, cut in ((38, False), (39, True)):  # + `tests:` and `untested:` = 40 / 41 lines
             declared_lines = ex.test_purposes("tests:\n" + "- t\n" * count + "untested: none").splitlines()
             self.assertEqual((len(declared_lines), declared_lines[-1] == "(truncated by the runner)"),

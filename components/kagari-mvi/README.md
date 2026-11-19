@@ -213,7 +213,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
      - `--permission-prompts none` を付け、承認が必要な操作は自動で拒否します。
      - `--bare` は付けません。将来、`CLAUDE_CODE_OAUTH_TOKEN` に切り替えられるようにするためです。
      - 環境変数 `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` を設定します。
-     - 規則は `--append-system-prompt` で渡します。内容は「Issue の範囲だけを実装する」「commit はしない」「`status:` の行の直前に、テストごとの目的を申告する」「最後に `status: COMPLETED` または `status: BLOCKED: 理由` を出力する」です。申告の形は、`tests:` の下に 1 テスト 1 行で `- <テストの名前>: <何を保証する目的か> (AC<n>)`、続けて `untested: <テストで確かめていないこと、無ければ none>` です（#453）。テストで確かめられない受入条件（変わったファイルの範囲など）は、`untested:` に `AC<n>: <テストでは確かめようがない理由>` と書き（複数なら箇条書き）、レビュアーが差分で確かめます。テストで確かめられる受入条件には、テストが要ります（#478）。
+     - 規則は `--append-system-prompt` で渡します。内容は「Issue の範囲だけを実装する」「commit はしない」「`status:` の行の直前に、テストごとの目的を申告する」「最後に `status: COMPLETED` または `status: BLOCKED: 理由` を出力する」です。申告の形は、`tests:` の下に 1 テスト 1 行で `- <テストの名前>: <何を保証する目的か> (AC<n>)`、続けて `untested: <テストで確かめていないこと、無ければ none>` です（#453）。字下げした文章の後に続く箇条書きは、申告と関係が無くても `untested:` の項目として取ります（見分けられないため）。番号が 3 桁以上の行（`100. ...`）は、項目としても、前の項目の続きとしても取りません。テストで確かめられない受入条件（変わったファイルの範囲など）は、`untested:` に `AC<n>: <テストでは確かめようがない理由>` と書き（複数なら箇条書き）、レビュアーが差分で確かめます。テストで確かめられる受入条件には、テストが要ります（#478）。
      - Bash は原則として許可します（User 判断 2026-11-11）。ビルド、lint、テストなどを自由に実行できます。Bash は `kagari-agent` として動き、GitHub の資格情報を持たないので、安全の境界は OS のユーザー分離に置きます。
      - 拒否する操作：ネットワークや資格情報に関わるコマンド（`curl` `wget` `gh` `git push` `git remote` `ssh` `scp` `sudo` `su` `nc` `ncat` `socat` `telnet`）と、`Agent` `WebFetch` `WebSearch` `NotebookEdit` です。これは誤操作を防ぐためのもので、境界ではありません。
      - `Edit` と `Write` は worktree の中に限ります。headless なので、許可されていない操作は確認を待たずに拒否されます。
