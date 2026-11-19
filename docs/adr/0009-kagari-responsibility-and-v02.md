@@ -58,7 +58,7 @@
      - 承認した後に Issue 本文が変わったら、実行せずに止める（#422）。
      - GitHub Actions の secrets の危険を README に書く。
      - dispatch 経路を削除するかを判断する。あわせて #337・#391 の扱いを決める（下記）。
-     - OAuth を長く使い続けられるか（ADR-0007 Known limitations）と、再起動したときに同じ Issue を二重に取得しないこと（ADR-0007 Acceptance evidence、一部確認）を、KUMIKI の前に確かめるかを判断する。
+     - OAuth を長く使い続けられるか（ADR-0007 Known limitations）と、再起動したときに同じ Issue を二重に取得しないこと（ADR-0007 Acceptance evidence、一部確認）を、KUMIKI の前に確かめるかを判断する（OAuth は追補 2026-11-18 で「今のまま」と決定）。
      - ADR-0008 D4 にあったレビュアーの起動の乗っ取りと、Bash による Claude の資格情報の流出は、D1-3 で責任の外と決まったので、判断済みとする。
   2. レビュー担当を OpenCode と TSUMGI に切り替えられる（ADR-0007 D6 の 2 周目）。
   3. KUMIKI 自身を対象にして、E2E を一周させる。
