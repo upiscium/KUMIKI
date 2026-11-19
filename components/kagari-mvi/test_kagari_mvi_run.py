@@ -116,6 +116,8 @@ class RunOnceTest(unittest.TestCase):
                              (("- HW, net, etc.", "  and more", "- x"), "- HW, net, etc. and more; - x"),
                              (("- A vs.", "  B", "- x"), "- A vs. B; - x"),
                              (("- see cf.", "  README", "- x"), "- see cf. README; - x"),
+                             (("- HW E.G.", "  the board", "- x"), "- HW E.G. the board; - x"),  # case-insensitive
+                             (("- see ETC.", "  more", "- x"), "- see ETC. more; - x"),
                              (("- HW slow.)", "  Thanks.", "- net"), "- HW slow.); - net"),
                              (('- HW "slow."', "  Thanks.", "- net"), '- HW "slow."; - net'),
                              (("- HW 遅い…", "  Thanks.", "- net"), "- HW 遅い…; - net")):
