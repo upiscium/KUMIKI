@@ -1,6 +1,6 @@
 # ADR-0002: 着脱可能で再導入できる KAGARI と Project 所有権
 
-- **Status:** Accepted (2026-10-10); implementation pending
+- **Status:** Accepted (2026-10-10); implementation pending; 2026-11-20：対象を Project からホストに広げる（K1・K2・K4。K3 は対象のリポジトリに何も置かないことで満たす。Project を対象とする記述は、旧方式の契約として残る）。ADR-0012 を参照
 - **Decision:** [#254](https://github.com/upiscium/Templates/issues/254)
 - **Related:** #142, #146, #159, #194, #242, #26
 
