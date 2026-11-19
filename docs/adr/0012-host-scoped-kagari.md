@@ -24,7 +24,7 @@ KAGARI は 1 ホストに 1 回導入する。リポジトリには導入しな�
 `install` が扱う（= KAGARI が所有する）ものを、次に限る。
 - 実行ユーザー（`kagari-runner`、`kagari-agent`）、共有グループ、`kagari-agent` として実行するための sudoers の 1 行
 - `/srv/kagari` とその下の 3 つのディレクトリ（`wt`・`repos`・`logs`）
-- KUMIKI の checkout（版の決め方は「未決の事項」）
+- KUMIKI の固定した checkout（導入時に版を記録する。更新の方法は「未決の事項」）
 - systemd の service と timer（`run-once` → `review-once` → `cleanup-once` を順に呼ぶ）
 - 対象リポジトリの登録（一覧と、許可する actor）
 
@@ -54,23 +54,24 @@ KAGARI は 1 ホストに 1 回導入する。リポジトリには導入しな�
 - `unregister` は、ホストの登録からリポジトリを外すだけで、リポジトリ上のラベル・Issue・PR には触れない。
 
 ### D5 — 対象のリポジトリには、何も置かない
-`register` が対象のリポジトリに行うのは、ラベルの作成だけとする。ファイルを置かない（ADR-0002 K3、kagari-mvi の README「既知の限界」）。Claude の設定は、`--restricted` によって読み込ませない。`.claude/settings.local.json` を commit しているリポジトリは対象にできない（README のとおり、検出して `blocked` にする）。`register` は、この前提を診断する。
+`register` が対象のリポジトリに行うのは、ラベルの作成だけとする。ファイルを置かない（ADR-0002 K3、kagari-mvi の README「既知の限界」）。Claude の設定は、`--restricted` によって読み込ませない。`.claude/settings.local.json` を commit しているリポジトリは対象にできない。現在は、`run-once` が Claude を起動する前に検出して `blocked` にする（README）。`register` でこの前提を診断するのは、この ADR が新たに決めること。
 
 ### D6 — 旧方式は凍結する
 リポジトリごとの導入器（`tools/kagari_bootstrap.py`、`docs/kagari-external-bootstrap.md`、`docs/agent-core-admin.md`、リポジトリ内の `.kagari`）は、この ADR で**新たに**凍結する。新しい作業は行わず、コードと文書は残す。削除は、別の判断と Issue で行う。コードを消さないので、いつでも戻せる。ADR-0002 K1〜K4 のうち、Project を対象とする記述は、旧方式の契約として残る。
 
 ## Consequences
 
-- 複数のリポジトリが、1 つの `kagari-agent` と 1 つの KAGARI を共有する。worktree はリポジトリごとに分かれ、テストは使い捨ての HOME で動く。ただし、リポジトリ間の隔離は保証しない（D1）。たとえば、public リポジトリの Issue の承認で動いたセッションから、同じホストの private リポジトリの worktree（`wt` は group-writable）が読める。どのリポジトリを登録するかの責任は、User が負う。
+- 複数のリポジトリが、1 つの `kagari-agent` と 1 つの KAGARI を共有する。worktree はリポジトリごとに分かれ、テストは使い捨ての HOME で動く。ただし、リポジトリ間の隔離は保証しない（D1）。たとえば、public リポジトリの Issue の承認で動いたセッションから、同じホストの private リポジトリの worktree が読める（README の権限設定、`wt` が `3770` で `kagari-agent` が共有グループに属することからの推論。実機では未確認）。どのリポジトリを登録するかの責任は、User が負う。
 - 「同時に動かさない」は、1 つの timer から順に呼ぶ構成にすることで守る。強制はしない。手動で `run-once` などを同時に動かすことは防げず、実行が重ならないことは実機では未確認である（kagari-mvi の README）。
 - 対象リポジトリを増やす作業は `register` だけになる。導入の作業はホストに 1 回で済む。
+- `install` を実装するまでは、README の手作業の「削除」（`/srv/kagari` を `rm -rf` する）が、D4 の既定（残す）と食い違う。実装の Issue で、README を D4 に合わせる。
 - この ADR の merge 後に、ADR-0002 と ADR-0007 の Status に「ADR-0012 で改定」という参照を足す。別の PR で行う（Epic #496 に記録する）。
 
 ## 未決の事項
 
 - **実装の形**：NixOS では導入が宣言的な設定（module）になり、命令的な `install` と二重になる。LXC（Ubuntu）は命令的な導入が自然である。どちらを正にするか、両方を持つかは、実装の最初の Issue で User に諮る。
 - **既存のホストの取り込み**：すでに手作業で組んだホスト（LXC の `kagari-mvi`）には、導入の記録が無い。`install` が既存のものを引き受けるのか、`repair` が人の変更を戻してよいのか（D4 の「人が変更したもの」との関係）、記録を置く場所と、紛失したときの扱いを決める。
-- **KUMIKI の checkout の版と更新**：現在は `main` に合わせている。版を固定するか、更新を `reinstall` で行うか、`upgrade` を設けるかを決める。
+- **KUMIKI の checkout の更新**：現在の運用は `main` に合わせている。固定した版（D2）への移行と、更新を `reinstall` で行うか、`upgrade` を設けるかを決める。
 - **`register` の前提の診断**：`settings.local.json` が無いこと（D5）に加え、ADR-0008 D4（KUMIKI 自身を対象にする前の前提条件）、対象リポジトリの GitHub Actions の secrets（ADR-0007 の Known limitations）を、`register` または `status` で診断するかを決める。
 - **対象リポジトリの一覧の置き場所**：ホストの設定ファイル、または timer の `ExecStart=` 行。現在は、README の `ExecStart=` を並べる方式（#489）。
 - 複数のホストにまたがる運用は、この ADR の範囲外とする。
