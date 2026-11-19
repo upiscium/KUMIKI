@@ -186,7 +186,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 | 0 | 対象が無かった、処理が完了した、または処理を始める前に blocked にした |
 | 1 | 処理を始めた後に blocked にした、または gh / git が失敗した |
 | 2 | 引数が不正だった |
-| 3 | Claude の利用上限に当たったので、Issue を `blocked` にせず元に戻した（`run-once`・`review-once`、#481） |
+| 3 | Claude の利用上限に当たったので、Issue を `blocked` にせず元に戻した（`run-once`・`review-once`、#481。`review-once` は既定の Claude のレビュアーだけで、`--reviewer tsumgi` は Claude を使わないので対象外） |
 
 終了コード 3 は失敗ではありません。上限が戻れば次の実行が進みます。`run-once`・`review-once`・`cleanup-once` を 1 つの timer から順に呼ぶときは、3 で後ろの呼び出しを止めないでください（systemd なら `SuccessExitStatus=3`、シェルなら `|| [ $? -eq 3 ]`）。特に `cleanup-once` は、利用上限と関係なく動かせます。
 
@@ -275,7 +275,7 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 
 すべての変更に独立レビューを行うのが既定のルールです（ADR-0010 D3）。`review-once` を飛ばして人間が直接 Ready にする運用はしません。
 
-途中で失敗した場合や、認証エラーの場合は、`run-once` と同じく `blocked` にします。利用上限に当たった場合は、`blocked` にも `reviewed` にもせず、`run-once` と同じく Issue を元に戻して終了コード 3 で終わります（#481）。レビュアーが終了コード 0 で終わったのに、結果がエラーだった場合や、結果が無かった場合は、`blocked` にはしません。コメントに「reviewer session: ended with an error」と記録し、判定が無い受入条件を UNKNOWN にしたうえで、`reviewed` を付けます。
+途中で失敗した場合や、認証エラーの場合は、`run-once` と同じく `blocked` にします。利用上限に当たった場合は、`blocked` にも `reviewed` にもせず、`run-once` と同じく Issue を元に戻して終了コード 3 で終わります（#481。`--reviewer tsumgi` は Claude を使わないので、この動きの対象ではありません）。レビュアーが終了コード 0 で終わったのに、結果がエラーだった場合や、結果が無かった場合は、`blocked` にはしません。コメントに「reviewer session: ended with an error」と記録し、判定が無い受入条件を UNKNOWN にしたうえで、`reviewed` を付けます。
 
 ## `cleanup-once` の動作（#432）
 
