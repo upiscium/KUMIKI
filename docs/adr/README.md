@@ -4,6 +4,7 @@ KUMIKI（組木）/ KAGARI（篝）の合意済み設計判断を記録します
 
 | ADR | Status | 対象 |
 | --- | --- | --- |
+| [0012 — KAGARI の導入の単位を、リポジトリからホストに広げる](0012-host-scoped-kagari.md) | Proposed | KAGARI を 1 ホストに 1 回導入し、リポジトリは「登録」する。着脱の標準操作（install/uninstall/status/repair、register/unregister）をホストに広げる（ADR-0002 K1〜K4 の対象の読み替え、ADR-0007 D3 の格上げ）。導入が扱うのはホスト準備・固定 checkout・timer・対象登録で、資格情報は含めない。uninstall は導入したものだけを外す。旧方式（リポジトリごとの導入器）は凍結 |
 | [0001 — Trusted AgentTeam と Ask 境界](0001-trusted-agentteam-and-human-decisions.md) | Accepted; implementation partial; #1 の具体化は ADR-0009 | 目的・安全性・自律操作・人間の判断 |
 | [0002 — 着脱可能な KAGARI と Project 所有権](0002-detachable-kagari-and-project-ownership.md) | Accepted; implementation pending | Install/Uninstall/Reinstall、Nix/Just/OpenCode、Repair |
 | [0003 — 自己更新可能な source 開発と統一復旧](0003-self-hosted-development-and-recovery.md) | Accepted principles; implementation choices pending | Source Guard、自律更新、既知・未知の障害への対処 |
