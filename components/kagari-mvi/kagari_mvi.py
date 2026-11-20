@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from kagari_mvi_cleanup import CleanupSteps
 from kagari_mvi_exec import SAFE_GIT, AgentSteps, Blocked, CommandError, Runner, UsageLimit, subprocess_runner
+import kagari_mvi_host as host
 from kagari_mvi_issue import acceptance_criteria, allowed_protected, missing_placement, test_command
 from kagari_mvi_limit import LimitSteps
 from kagari_mvi_parse import tail
@@ -347,6 +348,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                       help="login allowed to add kagari:approved (repeat or comma-separate)")
     review = sub.add_parser("review-once", help="review at most one implemented Issue's PR")
     review.add_argument("--reviewer", choices=("claude", "tsumgi"), default="claude")
+    host.add_parser(sub)
     cleanup = sub.add_parser("cleanup-once", help="delete branches and directories of merged PRs")
     for command in (once, review, cleanup):
         command.add_argument("--repo", required=True, help="OWNER/REPO")
@@ -360,6 +362,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.command in ("install", "status", "uninstall"):
+        return host.main(args)
     try:
         if args.command == "ensure-labels":
             worker = Worker(args.repo)

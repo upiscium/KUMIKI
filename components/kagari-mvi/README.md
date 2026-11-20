@@ -119,7 +119,11 @@ sudo -n -u kagari-agent -H -- sh -lc 'command -v claude && claude --version'
 - `claude` が見つからない場合は、`kagari-agent` の `~/.profile` で PATH を通すか、`run-once` に `--claude /絶対パス` を渡してください。
 - I-1 のときに作った `/srv/kagari` が残っている場合は、`sudo rm -rf /srv/kagari` で消してから作り直してください。中にあるのはテストの状態だけです。
 
-### 削除
+### 標準の操作 `install` / `status` / `uninstall`（#500、ADR-0012）
+
+`python3 components/kagari-mvi/kagari_mvi.py install [--dry-run]`、`status`、`uninstall [--purge]` が、上の手作業と同じものを導入・確認・削除します。`install` は冪等で、先に計画を出します（`--dry-run` は何も変えません）。導入したものと指紋は、受領書 `/var/lib/kagari/receipt.json` に記録します。置き場所を `/srv/kagari` の外にしたのは、`--purge` で作業ディレクトリを消しても記録が残るようにするためです。`uninstall` は、受領書にあり変更されていないものだけを外し、人が変更したもの・受領書に無いものは診断して残します。既定ではユーザー・共有グループ・`/srv/kagari` の下を残し、残したものは受領書に残るため、後から `--purge` で消せます（ログインも消えると表示します）。GitHub の資格情報と Claude のログインは導入せず、`status` が診断するだけです。systemd の service は、対象リポジトリの登録（別 Issue）まで `ExecStart=/bin/true` です。
+
+### 削除（手作業）
 
 ```sh
 sudo rm -f /etc/sudoers.d/kagari-mvi
