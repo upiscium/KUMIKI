@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from kagari_mvi_cleanup import CleanupSteps
 from kagari_mvi_exec import SAFE_GIT, AgentSteps, Blocked, CommandError, Runner, UsageLimit, subprocess_runner
+from kagari_mvi_host import Host
 from kagari_mvi_issue import acceptance_criteria, allowed_protected, missing_placement, test_command
 from kagari_mvi_limit import LimitSteps
 from kagari_mvi_parse import tail
@@ -355,12 +356,25 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                              help="user that runs Claude and tests")
         command.add_argument("--claude", default="claude", help="claude executable for the agent user")
         command.add_argument("--agent-config-dir", help="CLAUDE_CONFIG_DIR for the agent (testing only)")
+    host = [sub.add_parser(name, help=text) for name, text in (
+        ("install", "create what KAGARI owns on this host (ADR-0012)"),
+        ("status", "show owned things, the receipt diff and credential diagnostics"),
+        ("uninstall", "remove only what the receipt lists and is unchanged"))]
+    for command in host:
+        command.add_argument("--root", default="/", help="host root (testing only)")
+    host[0].add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
+    host[0].add_argument("--kumiki-ref", default="main", help="KUMIKI revision to pin")
+    host[2].add_argument("--purge", action="store_true", help="also remove users, group and /srv/kagari")
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
+        if args.command in ("install", "status", "uninstall"):
+            host = Host(args.root, kumiki_ref=getattr(args, "kumiki_ref", "main"))
+            return {"install": lambda: host.install(args.dry_run), "status": host.status,
+                    "uninstall": lambda: host.uninstall(args.purge)}[args.command]()
         if args.command == "ensure-labels":
             worker = Worker(args.repo)
             created = worker.ensure_labels()

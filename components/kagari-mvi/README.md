@@ -119,6 +119,10 @@ sudo -n -u kagari-agent -H -- sh -lc 'command -v claude && claude --version'
 - `claude` が見つからない場合は、`kagari-agent` の `~/.profile` で PATH を通すか、`run-once` に `--claude /絶対パス` を渡してください。
 - I-1 のときに作った `/srv/kagari` が残っている場合は、`sudo rm -rf /srv/kagari` で消してから作り直してください。中にあるのはテストの状態だけです。
 
+### 標準の操作（ADR-0012 D3）
+
+`kagari_mvi.py install [--dry-run]` / `status` / `uninstall [--purge]` が、上の手作業と同じものを作り、外します（実行は root で行います）。導入したものと内容の指紋は、受領書 `/var/lib/kagari-mvi/receipt.json` に記録します。置き場所を `/srv/kagari` の外にしたのは、既定の `uninstall` が `/srv/kagari` を残しても、受領書の管理が作業ディレクトリと混ざらないようにするためです。`uninstall` は、受領書にあり変更されていないものだけを外し、ユーザー・グループ・`/srv/kagari` の下は `--purge` まで残します（`--purge` は home の Claude のログインも消します）。対象リポジトリの一覧は `/etc/kagari-mvi/targets`（1 行に `OWNER/REPO ACTOR`）で、登録の操作は別 Issue です。
+
 ### 削除
 
 ```sh
