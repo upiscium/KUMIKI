@@ -29,17 +29,19 @@ KEPT_KINDS = ("group", "user", "dir")  # kept by default (ADR-0012 D4)
 
 def unit_texts() -> Dict[str, str]:
     cmd = "/usr/bin/python3 %s/components/kagari-mvi/kagari_mvi.py" % CHECKOUT
-    loop = ('while read -r r a; do [ -n "$$r" ] || continue; '
-            + "; ".join('%s %s --repo "$$r" --workdir /srv/kagari%s' % (cmd, name, extra)
-                        for name, extra in (("run-once", ' --allow-actor "$$a"'),
-                                            ("review-once", ""), ("cleanup-once", "")))
-            + "; done < " + TARGETS)
+    # Exit 3 (usage limit, #481) is not a failure and must not stop the calls after it; any other
+    # non-zero code is remembered and makes the service fail, so that it stays visible (README).
+    loop = ('rc=0; while read -r r a; do [ -n "$$r" ] || continue; '
+            + " ".join('%s %s --repo "$$r" --workdir /srv/kagari%s || [ $$? -eq 3 ] || rc=1;' % (cmd, name, extra)
+                       for name, extra in (("run-once", ' --allow-actor "$$a"'),
+                                           ("review-once", ""), ("cleanup-once", "")))
+            + " done < " + TARGETS + "; exit $$rc")
     return {
         SERVICE: ("[Unit]\nDescription=KAGARI MVI: run-once, review-once, cleanup-once in order\n"
-                  "ConditionPathExists=%s\n\n[Service]\nType=oneshot\nUser=%s\n"
+                  "ConditionPathExists=%s\n\n[Service]\nType=oneshot\nUser=%s\nTimeoutStartSec=3h\n"
                   "ExecStart=/bin/sh -c '%s'\n" % (TARGETS, RUNNER, loop)),
         TIMER: ("[Unit]\nDescription=KAGARI MVI timer\n\n[Timer]\nOnBootSec=5min\n"
-                "OnUnitActiveSec=10min\n\n[Install]\nWantedBy=timers.target\n"),
+                "OnUnitInactiveSec=10min\n\n[Install]\nWantedBy=timers.target\n"),
         SUDOERS: "%s ALL=(%s) NOPASSWD: ALL\n" % (RUNNER, AGENT),
     }
 
@@ -48,6 +50,8 @@ class Host:
     def __init__(self, root: str = "/", run: Runner = subprocess_runner, out: Callable[[str], None] = print,
                  kumiki_url: str = KUMIKI_URL, kumiki_ref: str = "main",
                  now: Callable[[], float] = time.time) -> None:
+        if kumiki_ref.startswith("-"):
+            raise ValueError("the KUMIKI revision must not start with `-`: %s" % kumiki_ref)
         self.root, self.run, self.out = root, run, out
         self.kumiki_url, self.kumiki_ref, self.now = kumiki_url, kumiki_ref, now
         self.texts = unit_texts()
@@ -86,8 +90,12 @@ class Host:
         with open(temp, "w", encoding="utf-8") as handle:
             handle.write(self.texts[target])
         os.chmod(temp, mode)
-        if target == SUDOERS:
-            self.run(["visudo", "-cf", temp])
+        try:
+            if target == SUDOERS:
+                self.run(["visudo", "-cf", temp])
+        except CommandError:
+            os.remove(temp)
+            raise
         os.replace(temp, path)
 
     def create(self, item: str) -> None:
@@ -102,7 +110,7 @@ class Host:
             self.run(["chown", "%s:%s" % (RUNNER, GROUP), self.p(target)])
         elif kind == "checkout":
             os.makedirs(os.path.dirname(self.p(target)), exist_ok=True)
-            self.run(["git", "clone", self.kumiki_url, self.p(target)])
+            self.run(["git", "clone", "--", self.kumiki_url, self.p(target)])
             self.run(["git", "-C", self.p(target), "checkout", "--detach", self.kumiki_ref])
         else:
             self.write_file(target, 0o440 if kind == "sudoers" else 0o644)
@@ -143,24 +151,35 @@ class Host:
     def plan(self) -> List[str]:
         return [item for item in IDS if self.fingerprint(item) is None]
 
+    def timer_to_enable(self, plan: List[str]) -> bool:
+        """True when the units were just created, or exist but the timer is not enabled (a retry)."""
+        if any(item.startswith("unit:") for item in plan):
+            return True
+        present = all(os.path.isfile(self.p(path)) for path in (SERVICE, TIMER))
+        return present and not self.ok(["systemctl", "is-enabled", "kagari-mvi.timer"])
+
     def install(self, dry_run: bool = False) -> int:
         receipt, plan = self.load(), self.plan()
         for item in IDS:
             if item not in plan and item not in receipt:
                 self.out("exists, not in the receipt (not adopted): %s" % item)
-        self.out("plan:" if plan else "plan: nothing to do")
+        enable = self.timer_to_enable(plan)
+        self.out("plan:" if plan or enable else "plan: nothing to do")
         for item in plan:
             self.out("  create %s" % item)
-        if dry_run or not plan:
+        if enable:
+            self.out("  enable kagari-mvi.timer")
+        if dry_run:
             return 0
         for item in plan:
             self.create(item)
             receipt[item] = self.fingerprint(item) or ""
-        if any(item.startswith("unit:") for item in plan):
+            self.save(receipt)  # at once: a failure later on must not lose what was created
+        if enable:
             self.run(["systemctl", "daemon-reload"])
             self.run(["systemctl", "enable", "--now", "kagari-mvi.timer"])
-        self.save(receipt)
-        self.out("installed %d item(s)" % len(plan))
+        if plan:
+            self.out("installed %d item(s)" % len(plan))
         return 0
 
     def state(self, item: str, receipt: Dict[str, str]) -> str:

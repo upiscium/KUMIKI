@@ -1,9 +1,12 @@
+import contextlib
+import io
 import json
 import os
 import tempfile
 import time
 import unittest
 
+import kagari_mvi as mvi
 import kagari_mvi_host as host
 from kagari_mvi_exec import CommandError
 
@@ -14,6 +17,7 @@ class FakeSystem:
     def __init__(self, root, gh_ok=False):
         self.root, self.gh_ok = root, gh_ok
         self.users, self.groups, self.calls = set(), set(), []
+        self.enabled, self.fail_on, self.visudo = False, None, []  # fail_on: (command, last argument)
 
     def __call__(self, args, cwd=None, input=None, timeout=None):
         args = list(args)
@@ -28,7 +32,19 @@ class FakeSystem:
             return ""
         if name == "git" and "rev-parse" in args:
             return "abc123\n"
+        if name == "systemctl" and args[1] == "is-enabled":
+            if not self.enabled:
+                raise CommandError(args, 1, "disabled")
+            return ""
+        if name == "visudo":  # was the file already live when it was checked?
+            self.visudo.append((args[-1], os.path.exists(os.path.join(self.root, "etc/sudoers.d/kagari-mvi"))))
+        if self.fail_on and self.fail_on == (name, last):
+            raise CommandError(args, 1, "injected failure")
         self.calls.append(args)
+        if name == "systemctl" and args[1] == "enable":
+            self.enabled = True
+        elif name == "systemctl" and args[1] == "disable":
+            self.enabled = False
         if name == "useradd":
             self.users.add(last)
         elif name == "userdel":
@@ -57,6 +73,10 @@ class HostTest(unittest.TestCase):
     def path(self, target):
         return self.host.p(target)
 
+    def read(self, target):
+        with open(self.path(target)) as handle:
+            return handle.read()
+
     def edit_sudoers(self, text):
         os.chmod(self.path(host.SUDOERS), 0o640)
         with open(self.path(host.SUDOERS), "a") as handle:
@@ -81,12 +101,12 @@ class HostTest(unittest.TestCase):
 
     def test_second_install_changes_nothing(self):
         self.host.install()
-        calls, receipt = list(self.sys.calls), open(self.path(host.RECEIPT)).read()
+        calls, receipt = list(self.sys.calls), self.read(host.RECEIPT)
         stamp = os.stat(self.path(host.RECEIPT)).st_mtime_ns
         self.lines.clear()
         self.host.install()
         self.assertEqual(self.sys.calls, calls)
-        self.assertEqual(open(self.path(host.RECEIPT)).read(), receipt)
+        self.assertEqual(self.read(host.RECEIPT), receipt)
         self.assertEqual(os.stat(self.path(host.RECEIPT)).st_mtime_ns, stamp)
         self.assertEqual(self.lines, ["plan: nothing to do"])
 
@@ -151,6 +171,65 @@ class HostTest(unittest.TestCase):
         self.host.status()
         self.assertTrue(any(line.startswith("modified") and host.SUDOERS in line for line in self.lines))
         self.assertTrue(any("expired" in line for line in self.lines))
+
+    def test_a_failure_halfway_keeps_the_receipt_of_what_was_created(self):
+        self.sys.fail_on = ("useradd", host.AGENT)
+        with self.assertRaises(CommandError):
+            self.host.install()
+        recorded = self.host.load()
+        self.assertEqual(sorted(recorded), ["group:" + host.GROUP, "user:" + host.RUNNER])
+        self.sys.fail_on = None
+        self.lines.clear()
+        self.host.install()  # the same command finishes the job, without uninstalling first
+        self.assertEqual(sorted(self.host.load()), sorted(host.IDS))
+        self.assertFalse(any("not in the receipt" in line for line in self.lines))
+
+    def test_a_failed_timer_enable_is_retried_by_the_next_install(self):
+        self.sys.fail_on = ("systemctl", "kagari-mvi.timer")
+        with self.assertRaises(CommandError):
+            self.host.install()
+        self.assertFalse(self.sys.enabled)
+        self.sys.fail_on = None
+        before = len(self.sys.calls)
+        self.lines.clear()
+        self.host.install()
+        self.assertTrue(self.sys.enabled)
+        self.assertEqual([c[1] for c in self.sys.calls[before:]], ["daemon-reload", "enable"])
+        self.assertIn("  enable kagari-mvi.timer", self.lines)
+        self.assertEqual(sorted(self.host.load()), sorted(host.IDS))
+
+    def test_sudoers_holds_only_the_runner_to_agent_rule_and_is_checked_before_it_is_live(self):
+        self.host.install()
+        with open(self.path(host.SUDOERS)) as handle:
+            self.assertEqual(handle.read(), "kagari-runner ALL=(kagari-agent) NOPASSWD: ALL\n")
+        self.assertEqual(os.stat(self.path(host.SUDOERS)).st_mode & 0o7777, 0o440)
+        checked, live = self.sys.visudo[0]
+        self.assertTrue(checked.endswith(".new"))  # sudoers.d ignores a name with a dot
+        self.assertFalse(live)
+
+    def test_a_sudoers_file_that_fails_the_check_is_never_installed(self):
+        self.sys.fail_on = ("visudo", self.path(host.SUDOERS) + ".new")
+        with self.assertRaises(CommandError):
+            self.host.install()
+        self.assertFalse(os.path.exists(self.path(host.SUDOERS)))
+        self.assertFalse(os.path.exists(self.path(host.SUDOERS) + ".new"))
+        self.assertNotIn("sudoers:" + host.SUDOERS, self.host.load())
+
+    def test_the_units_follow_the_readme_example(self):
+        texts = host.unit_texts()
+        service, timer = texts[host.SERVICE], texts[host.TIMER]
+        self.assertIn("TimeoutStartSec=3h", service)
+        self.assertIn("[ $$? -eq 3 ] || rc=1;", service)  # exit 3 is not a failure, others stay visible
+        self.assertIn("exit $$rc", service)
+        self.assertEqual(service.count("--repo"), 3)
+        self.assertIn("OnUnitInactiveSec=10min", timer)
+        self.assertNotIn("OnUnitActiveSec", timer)
+
+    def test_root_is_not_a_command_line_option_and_a_revision_cannot_look_like_an_option(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            mvi.parse_args(["install", "--root", "/tmp/elsewhere"])
+        with self.assertRaises(ValueError):
+            host.Host(self.root, kumiki_ref="--upload-pack=x")
 
 
 AGENT = host.AGENT

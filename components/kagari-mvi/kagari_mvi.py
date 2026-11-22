@@ -360,8 +360,6 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         ("install", "create what KAGARI owns on this host (ADR-0012)"),
         ("status", "show owned things, the receipt diff and credential diagnostics"),
         ("uninstall", "remove only what the receipt lists and is unchanged"))]
-    for command in host:
-        command.add_argument("--root", default="/", help="host root (testing only)")
     host[0].add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
     host[0].add_argument("--kumiki-ref", default="main", help="KUMIKI revision to pin")
     host[2].add_argument("--purge", action="store_true", help="also remove users, group and /srv/kagari")
@@ -372,7 +370,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
         if args.command in ("install", "status", "uninstall"):
-            host = Host(args.root, kumiki_ref=getattr(args, "kumiki_ref", "main"))
+            host = Host(kumiki_ref=getattr(args, "kumiki_ref", "main"))
             return {"install": lambda: host.install(args.dry_run), "status": host.status,
                     "uninstall": lambda: host.uninstall(args.purge)}[args.command]()
         if args.command == "ensure-labels":
