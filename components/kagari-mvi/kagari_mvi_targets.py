@@ -30,10 +30,13 @@ def check_names(repo: str, actors: List[str]) -> None:
 
 def read_lines(path: str) -> List[str]:
     try:
-        with open(path, encoding="utf-8") as handle:
-            return handle.read().splitlines()
+        with open(path, encoding="utf-8", newline="") as handle:
+            parts = handle.read().split("\n")  # not splitlines(): it also splits at \x0b, \x1c, U+2028 ...
     except FileNotFoundError:
         return []
+    if parts[-1] == "":
+        parts.pop()
+    return [part[:-1] if part.endswith("\r") else part for part in parts]
 
 
 def entry(line: str) -> Optional[List[str]]:
@@ -61,7 +64,10 @@ def check_writable(path: str) -> None:
     """Fail before any label is made: the list is written as root (the labels use kagari-runner's login)."""
     probe = os.path.dirname(path)
     while not os.path.isdir(probe):
-        probe = os.path.dirname(probe)
+        parent = os.path.dirname(probe)
+        if parent == probe:  # a relative root with nothing under it: "" or "/" would loop forever
+            raise PermissionError("cannot write %s: no existing parent directory" % path)
+        probe = parent
     if not os.access(probe, os.W_OK):
         raise PermissionError("cannot write %s: run register / unregister as root" % path)
 
@@ -88,7 +94,7 @@ def locked(path: str) -> Iterator[None]:
 def write_lines(path: str, lines: List[str]) -> None:
     ensure_dir(path)
     temp = path + ".new"
-    with open(temp, "w", encoding="utf-8") as handle:
+    with open(temp, "w", encoding="utf-8", newline="") as handle:
         handle.write("".join(line + "\n" for line in lines))
     os.chmod(temp, 0o644)
     os.replace(temp, path)
