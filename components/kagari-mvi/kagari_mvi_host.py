@@ -219,11 +219,39 @@ class Host:
         present = all(os.path.isfile(self.p(path)) for path in (SERVICE, TIMER))
         return present and not self.ok(["systemctl", "is-enabled", "kagari-mvi.timer"])
 
-    def install(self, dry_run: bool = False) -> int:
+    def expected(self, item: str) -> Optional[str]:
+        """What KAGARI would make (None = cannot tell offline: users, group, checkout need other rules)."""
+        kind, target = item.split(":", 1)
+        if kind == "dir":
+            return "mode %o" % DIRS[target]
+        if kind in ("sudoers", "unit"):
+            return "sha256 " + hashlib.sha256(self.texts[target].encode("utf-8")).hexdigest()
+        return None
+
+    def matches(self, item: str) -> bool:
+        """True when the existing item is what install would have made (so it may be adopted)."""
+        kind, target = item.split(":", 1)
+        now = self.fingerprint(item)
+        if now is None or now.startswith("unreadable") or os.path.islink(self.p(target)):
+            return False
+        if kind == "checkout":
+            return not now.endswith(" dirty")  # a clean git checkout; the pinned revision is changed by reinstall
+        want = self.expected(item)
+        return True if want is None else now == want  # user / group: the dedicated name is the identity
+
+    def install(self, dry_run: bool = False, adopt: bool = False) -> int:
         receipt, plan = self.load(), self.plan()
         for item in IDS:
             if item not in plan and item not in receipt:
-                self.out("exists, not in the receipt (not adopted): %s" % item)
+                if adopt and self.matches(item):
+                    self.out("adopt %s" % item if not dry_run else "  would adopt %s" % item)
+                    if not dry_run:
+                        receipt[item] = self.fingerprint(item) or ""
+                        self.save(receipt)
+                elif adopt:
+                    self.out("diagnostic: %s differs from what KAGARI makes; not adopted, left as is" % item)
+                else:
+                    self.out("exists, not in the receipt (not adopted): %s" % item)
         enable = self.timer_to_enable(plan)
         self.out("plan:" if plan or enable else "plan: nothing to do")
         for item in plan:
@@ -258,6 +286,46 @@ class Host:
         legacy = receipt[item] == "present" and item.split(":", 1)[0] in ("user", "group")  # before #508
         return "ok" if now == receipt[item] or legacy else "modified"
 
+    def repair(self) -> int:
+        """Restore what is missing or absent without `uninstall`; never touch what a person changed."""
+        receipt, stuck = self.load(), 0
+        todo = []
+        for item in IDS:
+            state = self.state(item, receipt)
+            if state in ("missing", "absent"):
+                todo.append(item)
+            elif state != "ok":
+                stuck += 1
+                why = {"modified": "was changed after install", "unrecorded": "is not in the receipt (try `install --adopt`)",
+                       "unreadable": "could not be read (git failed)"}[state]
+                self.out("diagnostic: %s %s; not restored. Check it, then fix it by hand or remove it and run repair" % (item, why))
+        self.out("repair plan:" if todo else "repair: nothing is missing")
+        for item in todo:
+            self.out("  restore %s" % item)
+        try:
+            for item in todo:
+                try:
+                    self.create(item)
+                except ValueError as error:  # a conflict is a diagnosis, not a reason to stop the others
+                    stuck += 1
+                    self.out("diagnostic: %s not restored: %s" % (item, error))
+                    continue
+                receipt[item] = self.fingerprint(item) or ""
+                self.save(receipt)
+            if self.timer_to_enable(todo):
+                self.run(["systemctl", "daemon-reload"])
+                self.run(["systemctl", "enable", "--now", "kagari-mvi.timer"])
+        finally:
+            self.save(receipt)
+        if stuck:
+            self.out("%d item(s) need your confirmation" % stuck)
+        return 1 if stuck else 0
+
+    def reinstall(self) -> int:
+        """`uninstall` (default: logs, work directories and logins are kept) then `install`."""
+        self.uninstall()
+        return self.install()
+
     def credentials(self) -> List[str]:
         found = []
         if not self.ok(["gh", "--version"]):
@@ -283,7 +351,11 @@ class Host:
     def status(self) -> int:
         receipt = self.load()
         for item in IDS:
-            self.out("%-10s %s" % (self.state(item, receipt), item))
+            state = self.state(item, receipt)
+            self.out("%-10s %s" % (state, item))
+            if state == "unrecorded":
+                self.out("diagnostic: %s %s" % (item, "matches what KAGARI makes: `install --adopt` records it"
+                                                 if self.matches(item) else "differs from what KAGARI makes: not adoptable"))
         try:
             with open(self.p(TARGETS), encoding="utf-8") as handle:
                 listed = [fields for fields in (line.split() for line in handle) if fields and not fields[0].startswith("#")]
