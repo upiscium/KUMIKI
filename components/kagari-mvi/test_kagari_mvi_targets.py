@@ -1,0 +1,121 @@
+import os
+import subprocess
+import tempfile
+import unittest
+
+import kagari_mvi as mvi
+import kagari_mvi_host as host
+import kagari_mvi_targets as targets
+from kagari_mvi_exec import CommandError
+from kagari_mvi_testkit import FakeRunner
+
+
+class TargetsTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root, self.lines = tmp.name, []
+        self.listing = os.path.join(self.root, host.TARGETS.lstrip("/"))
+        self.labels = {"GET": [], "POST": None}
+        self.make_runner()
+
+    def make_runner(self, local_settings=False, existing=()):
+        routes = {("GET", "repos/o/r/labels"): [{"name": n} for n in existing],
+                  ("POST", "repos/o/r/labels"): {}}
+        self.fake = FakeRunner(routes)
+        inner = self.fake
+
+        def run(args, **kw):
+            if "contents/" in args[-1]:
+                if local_settings:
+                    return "{}"
+                raise CommandError(args, 1, "gh: Not Found (HTTP 404)")
+            return inner(args, **kw)
+        self.run = run
+
+    def register(self, repo="o/r", actors=None):
+        return targets.register(repo, actors, root=self.root, run=self.run, out=self.lines.append,
+                                ensure_labels=lambda: mvi.Worker(repo, run=self.run).ensure_labels())
+
+    def listed(self):
+        return targets.read_targets(self.listing)
+
+    def test_register_adds_the_repo_and_creates_labels_and_a_second_call_changes_nothing(self):
+        self.register(actors=["alice"])
+        self.assertEqual(self.listed(), {"o/r": "alice"})
+        self.assertEqual(len(self.fake.api_calls("POST", "repos/o/r/labels")), len(mvi.LABELS))
+        with open(self.listing) as handle:
+            before = handle.read()
+        self.make_runner(existing=list(mvi.LABELS))  # labels now exist
+        self.register(actors=["alice"])
+        with open(self.listing) as handle:
+            self.assertEqual(handle.read(), before)
+        self.assertEqual(self.fake.api_calls("POST", "repos/o/r/labels"), [])
+        self.assertTrue(self.lines[-1].startswith("already registered"))
+
+    def test_the_actor_defaults_to_the_owner_and_a_different_actor_is_refused(self):
+        self.register()
+        self.assertEqual(self.listed(), {"o/r": "o"})
+        with self.assertRaises(ValueError):
+            self.register(actors=["mallory"])
+        self.assertEqual(self.listed(), {"o/r": "o"})
+
+    def test_unregister_removes_only_the_list_entry(self):
+        self.register()
+        self.register("o/s")
+        self.fake.calls.clear()
+        targets.unregister("o/r", root=self.root, out=self.lines.append)
+        self.assertEqual(list(self.listed()), ["o/s"])
+        self.assertEqual(self.fake.calls, [])  # no gh call: labels, Issues and PRs are untouched
+        targets.unregister("o/r", root=self.root, out=self.lines.append)  # idempotent
+        self.assertEqual(self.lines[-1], "not registered: o/r")
+
+    def test_a_repo_that_commits_settings_local_json_is_not_registered(self):
+        self.make_runner(local_settings=True)
+        with self.assertRaises(ValueError) as caught:
+            self.register()
+        self.assertIn("settings.local.json", str(caught.exception))
+        self.assertFalse(os.path.exists(self.listing))
+        self.assertEqual(self.fake.calls, [])  # and no label is created
+
+    def test_a_failed_check_other_than_not_found_registers_nothing(self):
+        def run(args, **kw):
+            raise CommandError(args, 1, "HTTP 500")
+        with self.assertRaises(CommandError):
+            targets.register("o/r", None, root=self.root, run=run)
+        self.assertFalse(os.path.exists(self.listing))
+
+    def test_bad_names_are_refused(self):
+        for repo in ("o", "o/r/x", "o/ r", "/r", "o/;rm"):
+            with self.assertRaises(ValueError, msg=repo):
+                self.register(repo)
+        with self.assertRaises(ValueError):
+            self.register(actors=["a b"])
+
+    def test_the_timer_processes_every_registered_repo_in_order(self):
+        for repo in ("a/x", "b/y"):
+            self.register(repo, ["alice"] if repo == "a/x" else None)
+        log, fake = os.path.join(self.root, "calls.log"), os.path.join(self.root, "fake.sh")
+        with open(fake, "w") as handle:
+            handle.write('#!/bin/sh\ncat > /dev/null\necho "$*" >> %s\n' % log)
+        os.chmod(fake, 0o755)
+        text = host.unit_texts()[host.SERVICE]
+        body = text.split("ExecStart=/bin/sh -c '", 1)[1].rsplit("'\n", 1)[0].replace("$$", "$")
+        body = body.replace("/usr/bin/python3 %s/components/kagari-mvi/kagari_mvi.py" % host.CHECKOUT, fake)
+        body = body.replace(host.TARGETS, self.listing)
+        self.assertEqual(subprocess.run(["sh", "-c", body]).returncode, 0)
+        with open(log) as handle:
+            calls = handle.read().splitlines()
+        self.assertEqual([c.split()[0:3] for c in calls],
+                         [[e, "--repo", r] for r in ("a/x", "b/y") for e in ("run-once", "review-once", "cleanup-once")])
+        self.assertTrue(calls[0].endswith("--allow-actor alice"))
+        self.assertTrue(calls[3].endswith("--allow-actor b"))
+
+    def test_the_cli_parses_register_and_unregister(self):
+        args = mvi.parse_args(["register", "o/r", "--allow-actor", "x"])
+        self.assertEqual((args.command, args.target, args.allow_actor), ("register", "o/r", ["x"]))
+        self.assertEqual(mvi.parse_args(["unregister", "o/r"]).target, "o/r")
+
+
+if __name__ == "__main__":
+    unittest.main()

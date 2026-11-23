@@ -3,7 +3,7 @@
 Owned things -> plan -> run -> receipt. The receipt is /var/lib/kagari-mvi/receipt.json: it is
 outside /srv/kagari, so it survives a `--purge`-less uninstall of the directories and is never
 mixed with the work and log directories that are kept. `root` and `run` can be replaced, so
-the tests change no real host. Registering target repositories is not here (another Issue).
+the tests change no real host. Registering target repositories is in kagari_mvi_targets.py.
 """
 from __future__ import annotations
 
@@ -284,6 +284,15 @@ class Host:
         receipt = self.load()
         for item in IDS:
             self.out("%-10s %s" % (self.state(item, receipt), item))
+        try:
+            with open(self.p(TARGETS), encoding="utf-8") as handle:
+                listed = [line.split() for line in handle if line.strip() and not line.startswith("#")]
+        except FileNotFoundError:
+            listed = []
+        for fields in listed:  # the list is edited by register / unregister
+            self.out("target     %s (actor %s)" % (fields[0], fields[1] if len(fields) > 1 else "-"))
+        if not listed:
+            self.out("diagnostic: no target repository is registered (run `register OWNER/REPO`)")
         for line in self.credentials():
             self.out("diagnostic: " + line)
         return 0
