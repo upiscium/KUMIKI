@@ -42,6 +42,8 @@ class FakeSystem:
         if self.fail_on and self.fail_on == (name, last):
             raise CommandError(args, 1, "injected failure")
         self.calls.append(args)
+        if name == "chown":  # a chown may clear setgid: only a chmod after it keeps the mode
+            os.chmod(last, os.stat(last).st_mode & 0o777)
         if name == "systemctl" and args[1] == "enable":
             self.enabled = True
         elif name == "systemctl" and args[1] == "disable":
@@ -225,7 +227,7 @@ class HostTest(unittest.TestCase):
         if os.path.exists(log):
             os.remove(log)  # one run, one log
         with open(fake, "w") as handle:  # records its arguments, exits with the code set for the command
-            handle.write('#!/bin/sh\necho "$*" >> %s\ncase "$1" in\n%s\n*) exit 0;;\nesac\n' % (
+            handle.write('#!/bin/sh\ncat > /dev/null\necho "$*" >> %s\ncase "$1" in\n%s\n*) exit 0;;\nesac\n' % (
                 log, "\n".join("%s) exit %d;;" % (name, code) for name, code in codes.items())))
         os.chmod(fake, 0o755)
         with open(listing, "w") as handle:
@@ -253,7 +255,7 @@ class HostTest(unittest.TestCase):
             code, calls = self.run_service("a/x alice\nb/y bob\n", {entry: 1})
             self.assertEqual((code, len(calls)), (1, 6), entry)
 
-    def test_the_service_skips_comments_and_blank_lines_and_a_missing_list_is_not_run(self):
+    def test_the_service_skips_comments_and_blank_lines(self):
         code, calls = self.run_service("# a comment\n\na/x alice\n", {})
         self.assertEqual((code, len(calls)), (0, 3))
 
@@ -277,6 +279,36 @@ class HostTest(unittest.TestCase):
         self.sys.fail_on = None
         self.host.install()
         self.assertEqual(self.host.state("checkout:" + host.CHECKOUT, self.host.load()), "ok")
+
+    def test_a_directory_that_was_already_there_is_never_removed_by_a_failed_checkout(self):
+        os.makedirs(self.path(host.CHECKOUT))
+        keep = os.path.join(self.path(host.CHECKOUT), "precious.txt")
+        with open(keep, "w") as handle:
+            handle.write("not ours")
+        with self.assertRaises(ValueError):
+            self.host.install()
+        self.assertTrue(os.path.exists(keep))
+        self.assertNotIn("checkout:" + host.CHECKOUT, self.host.load())
+
+    def test_an_empty_directory_that_was_already_there_stays_after_a_failed_checkout(self):
+        os.makedirs(self.path(host.CHECKOUT))
+        self.sys.fail_on = ("git", "main")
+        with self.assertRaises(CommandError):
+            self.host.install()
+        self.assertTrue(os.path.isdir(self.path(host.CHECKOUT)))
+        self.assertEqual(os.listdir(self.path(host.CHECKOUT)), [])
+
+    def test_a_service_file_removed_before_a_failure_is_not_forgotten_by_the_next_uninstall(self):
+        self.host.install()
+        self.sys.fail_on = ("systemctl", "daemon-reload")  # after the service file is gone
+        with self.assertRaises(CommandError):
+            self.host.uninstall()
+        self.assertFalse(os.path.exists(self.path(host.SERVICE)))
+        self.sys.fail_on = None
+        self.lines.clear()
+        self.host.uninstall()
+        self.assertIn("already gone: unit:" + host.SERVICE, self.lines)
+        self.assertNotIn("unit:" + host.SERVICE, self.host.load())
 
     def test_a_half_made_directory_is_removed_so_that_the_next_install_makes_it_whole(self):
         self.sys.fail_on = ("chown", self.path("/srv/kagari/wt"))

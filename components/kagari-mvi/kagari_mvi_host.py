@@ -32,7 +32,7 @@ def unit_texts() -> Dict[str, str]:
     # Exit 3 (usage limit, #481) is not a failure and must not stop the calls after it; any other
     # non-zero code is remembered and makes the service fail, so that it stays visible (README).
     loop = ('rc=0; while read -r r a || [ -n "$$r" ]; do case "$$r" in ""|"#"*) continue;; esac; '
-            + " ".join('%s %s --repo "$$r" --workdir /srv/kagari%s || [ $$? -eq 3 ] || rc=1;' % (cmd, name, extra)
+            + " ".join('%s %s --repo "$$r" --workdir /srv/kagari%s </dev/null || [ $$? -eq 3 ] || rc=1;' % (cmd, name, extra)
                        for name, extra in (("run-once", ' --allow-actor "$$a"'),
                                            ("review-once", ""), ("cleanup-once", "")))
             + " done < " + TARGETS + "; exit $$rc")
@@ -105,21 +105,38 @@ class Host:
         elif kind == "user":
             self.run(["useradd", "--create-home", "--shell", "/bin/bash", "--groups", GROUP, target])
         elif kind == "dir":
-            os.makedirs(self.p(target), exist_ok=True)
+            path, existed = self.p(target), os.path.isdir(self.p(target))
+            os.makedirs(path, exist_ok=True)
+            done = False
             try:
-                self.run(["chown", "%s:%s" % (RUNNER, GROUP), self.p(target)])
-                os.chmod(self.p(target), DIRS[target])  # last: chown may clear setgid
-            except Exception:
-                os.rmdir(self.p(target))  # half made: the next install makes it whole
-                raise
+                self.run(["chown", "%s:%s" % (RUNNER, GROUP), path])
+                os.chmod(path, DIRS[target])  # last: chown may clear setgid
+                done = True
+            finally:
+                if not done and not existed:  # half made, and made by this call: the next install makes it whole
+                    try:
+                        os.rmdir(path)
+                    except OSError:
+                        pass  # keep the original error
         elif kind == "checkout":
-            os.makedirs(os.path.dirname(self.p(target)), exist_ok=True)
+            path = self.p(target)
+            if os.path.lexists(path) and (not os.path.isdir(path) or os.listdir(path)):
+                # Never delete what this call did not make: a directory that is already there stays.
+                raise ValueError("%s exists and is not an empty directory (no .git): remove or adopt it by hand" % path)
+            existed = os.path.isdir(path)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            done = False
             try:
-                self.run(["git", "clone", "--", self.kumiki_url, self.p(target)])
-                self.run(["git", "-C", self.p(target), "checkout", "--detach", self.kumiki_ref])
-            except Exception:
-                shutil.rmtree(self.p(target), ignore_errors=True)  # a wrong revision must not stay
-                raise
+                self.run(["git", "clone", "--", self.kumiki_url, path])
+                self.run(["git", "-C", path, "checkout", "--detach", self.kumiki_ref])
+                done = True
+            finally:
+                if not done:  # a wrong revision must not stay behind
+                    shutil.rmtree(path, ignore_errors=True)
+                    if existed:
+                        os.makedirs(path, exist_ok=True)  # it was an empty directory before: leave it so
+                    if os.path.exists(path) and os.listdir(path):
+                        self.out("diagnostic: could not remove the half-made checkout %s" % path)
         else:
             self.write_file(target, 0o440 if kind == "sudoers" else 0o644)
 
