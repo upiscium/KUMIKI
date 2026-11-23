@@ -22,6 +22,7 @@ from kagari_mvi_issue import acceptance_criteria, allowed_protected, missing_pla
 from kagari_mvi_limit import LimitSteps
 from kagari_mvi_parse import tail
 from kagari_mvi_report import report, review_report
+import kagari_mvi_targets as targets  # noqa: E402
 # Moved out in #490; re-exported so that the tests and the recipes keep their names.
 from kagari_mvi_state import (APPROVED, BLOCKED, EXCLUDED, IMPLEMENTED, LABELS, REVIEWED, RUNNING,  # noqa: F401
                               TEST_REPORT_PREFIX, approval_actor, check_actor, check_body_unchanged,
@@ -356,6 +357,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                              help="user that runs Claude and tests")
         command.add_argument("--claude", default="claude", help="claude executable for the agent user")
         command.add_argument("--agent-config-dir", help="CLAUDE_CONFIG_DIR for the agent (testing only)")
+    register = sub.add_parser("register", help="add OWNER/REPO to the host's target list and create its labels")
+    register.add_argument("target", metavar="OWNER/REPO")
+    register.add_argument("--allow-actor", action="append", help="login allowed to approve (default: OWNER)")
+    unregister = sub.add_parser("unregister", help="remove OWNER/REPO from the target list only")
+    unregister.add_argument("target", metavar="OWNER/REPO")
     host = [sub.add_parser(name, help=text) for name, text in (
         ("install", "create what KAGARI owns on this host (ADR-0012)"),
         ("status", "show owned things, the receipt diff and credential diagnostics"),
@@ -373,6 +379,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             host = Host(kumiki_ref=getattr(args, "kumiki_ref", "main"))
             return {"install": lambda: host.install(args.dry_run), "status": host.status,
                     "uninstall": lambda: host.uninstall(args.purge)}[args.command]()
+        if args.command == "register":
+            run = targets.runner_as_service_user()
+            return targets.register(args.target, args.allow_actor, run=run,
+                                    ensure_labels=lambda: Worker(args.target, run=run).ensure_labels())
+        if args.command == "unregister":
+            return targets.unregister(args.target)
         if args.command == "ensure-labels":
             worker = Worker(args.repo)
             created = worker.ensure_labels()

@@ -121,7 +121,7 @@ sudo -n -u kagari-agent -H -- sh -lc 'command -v claude && claude --version'
 
 ### 標準の操作（ADR-0012 D3）
 
-`kagari_mvi.py install [--dry-run]` / `status` / `uninstall [--purge]` が、上の手作業と同じものを作り、外します（実行は root で行います）。導入したものと内容の指紋（ファイルは sha256、`/srv/kagari` の下はモード、checkout は HEAD のリビジョンと `git status --porcelain` が空であること〔clean〕、ユーザーは uid・gid、グループは gid）は、受領書 `/var/lib/kagari-mvi/receipt.json` に記録します。置き場所を `/srv/kagari` の外にしたのは、既定の `uninstall` が `/srv/kagari` を残しても、受領書の管理が作業ディレクトリと混ざらないようにするためです。`uninstall` は、受領書にあり変更されていないものだけを外し、ユーザー・グループ・`/srv/kagari` の下は `--purge` まで残します（`--purge` は home の Claude のログインも消します）。`install` は、所有物を 1 つ作るたびに受領書へ記録します。途中で失敗しても、同じ `install` をもう一度実行すれば、続きから終わります（`uninstall` を先にする必要はありません）。例外：checkout の場所（`/opt/kagari/kumiki`）に空でないディレクトリやファイルがあると、`install` はそこで止まります（`--dry-run` が `conflict` と表示します）。手で片づけるか、取り込んでから再実行します。checkout が失敗したとき、元から空だったディレクトリは、中身だけを消して残します。シンボリックリンクの `/srv/kagari` の下と checkout は、`create` が拒否し、`uninstall` が外さず診断します。未コミットの編集がある checkout、別の uid・gid で作り直されたユーザー・グループも、外さず診断します。`status` は、`gh` が無いこと、`kagari-agent` の Claude Code が `--restricted` を使えない版であることも診断します（導入や更新はしません）。timer が有効になっていなければ、`install` が有効にし直します。生成する service は、「timer で動かす」の例と同じ `TimeoutStartSec=3h`、`OnBootSec=5min`、`OnUnitInactiveSec=10min` を使います。例との違いは、失敗の扱いです：例（`ExecStart=` を並べる）は、失敗（1 と 2）で残りを飛ばしますが、生成する service は、終了コード 3 を失敗にせず、1 つの呼び出しが失敗しても残りの呼び出しと残りのリポジトリを続け、最後に service を失敗にします（失敗は見える形で残る）。一覧の最終行が改行で終わらなくても読み、空行と `#` で始まる行は飛ばします。ホストのルートを変える `--root` は、コマンドラインには出していません（実ホストのユーザーや systemd に作用するため、テストの中だけで使います）。対象リポジトリの一覧は `/etc/kagari-mvi/targets`（1 行に `OWNER/REPO ACTOR`）で、登録の操作は別 Issue です。#500 が書いた受領書（ユーザーとグループを `present` と記録している）も、存在すれば変更なしと見なします（uid・gid の記録は、新しく作ったものから）。`git` が失敗して checkout の状態を読めないとき（`dubious ownership` など）は、変更なしとは見なさず、外しません。`status` は、Claude Code の `--restricted` の有無を、`kagari-agent` のログインシェル（`sh -lc`、1 分の制限つき）で `claude --help` を実行して確かめます。実機（`useradd`・`systemctl`・`visudo`・`install -d -m 3770` の setgid と sticky）での動作は、#500 の実機確認（新しい LXC）で確かめました。未確認なのは、この `claude --help` による確認、旧い形式の受領書の実機での扱い、`git` が失敗するときの実機での動きです。
+`kagari_mvi.py install [--dry-run]` / `status` / `uninstall [--purge]` が、上の手作業と同じものを作り、外します（実行は root で行います）。導入したものと内容の指紋（ファイルは sha256、`/srv/kagari` の下はモード、checkout は HEAD のリビジョンと `git status --porcelain` が空であること〔clean〕、ユーザーは uid・gid、グループは gid）は、受領書 `/var/lib/kagari-mvi/receipt.json` に記録します。置き場所を `/srv/kagari` の外にしたのは、既定の `uninstall` が `/srv/kagari` を残しても、受領書の管理が作業ディレクトリと混ざらないようにするためです。`uninstall` は、受領書にあり変更されていないものだけを外し、ユーザー・グループ・`/srv/kagari` の下は `--purge` まで残します（`--purge` は home の Claude のログインも消します）。`install` は、所有物を 1 つ作るたびに受領書へ記録します。途中で失敗しても、同じ `install` をもう一度実行すれば、続きから終わります（`uninstall` を先にする必要はありません）。例外：checkout の場所（`/opt/kagari/kumiki`）に空でないディレクトリやファイルがあると、`install` はそこで止まります（`--dry-run` が `conflict` と表示します）。手で片づけるか、取り込んでから再実行します。checkout が失敗したとき、元から空だったディレクトリは、中身だけを消して残します。シンボリックリンクの `/srv/kagari` の下と checkout は、`create` が拒否し、`uninstall` が外さず診断します。未コミットの編集がある checkout、別の uid・gid で作り直されたユーザー・グループも、外さず診断します。`status` は、`gh` が無いこと、`kagari-agent` の Claude Code が `--restricted` を使えない版であることも診断します（導入や更新はしません）。timer が有効になっていなければ、`install` が有効にし直します。生成する service は、「timer で動かす」の例と同じ `TimeoutStartSec=3h`、`OnBootSec=5min`、`OnUnitInactiveSec=10min` を使います。例との違いは、失敗の扱いです：例（`ExecStart=` を並べる）は、失敗（1 と 2）で残りを飛ばしますが、生成する service は、終了コード 3 を失敗にせず、1 つの呼び出しが失敗しても残りの呼び出しと残りのリポジトリを続け、最後に service を失敗にします（失敗は見える形で残る）。一覧の最終行が改行で終わらなくても読み、空行と `#` で始まる行は飛ばします。ホストのルートを変える `--root` は、コマンドラインには出していません（実ホストのユーザーや systemd に作用するため、テストの中だけで使います）。対象リポジトリの一覧は `/etc/kagari-mvi/targets`（1 行に `OWNER/REPO ACTOR`）で、`register` / `unregister` で編集します（「timer で動かす」）。#500 が書いた受領書（ユーザーとグループを `present` と記録している）も、存在すれば変更なしと見なします（uid・gid の記録は、新しく作ったものから）。`git` が失敗して checkout の状態を読めないとき（`dubious ownership` など）は、変更なしとは見なさず、外しません。`status` は、Claude Code の `--restricted` の有無を、`kagari-agent` のログインシェル（`sh -lc`、1 分の制限つき）で `claude --help` を実行して確かめます。実機（`useradd`・`systemctl`・`visudo`・`install -d -m 3770` の setgid と sticky）での動作は、#500 の実機確認（新しい LXC）で確かめました。未確認なのは、この `claude --help` による確認、旧い形式の受領書の実機での扱い、`git` が失敗するときの実機での動きです。
 
 ### 削除
 
@@ -194,7 +194,24 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 
 終了コード 3 は失敗ではありません。上限が戻れば次の実行が進みます。`run-once`・`review-once`・`cleanup-once` を 1 つの timer から順に呼ぶときは、3 で後ろの呼び出しを止めないでください（systemd なら `SuccessExitStatus=3`、シェルなら `|| [ $? -eq 3 ]`）。特に `cleanup-once` は、利用上限と関係なく動かせます。
 
-## timer で動かす（#489）
+## timer で動かす（#489、#501）
+
+**標準の方式：対象一覧（#501、ADR-0012 D1・D5）。** 対象リポジトリは、ホストの 1 つのファイル `/etc/kagari-mvi/targets`（1 行に `OWNER/REPO ACTOR`）に置きます。`install` が作る timer の service は、1 つのコマンドでこの一覧を順に読み、各リポジトリに `run-once` → `review-once` → `cleanup-once` を呼びます。リポジトリごとの `ExecStart=` を手で書き足す必要はありません。対象リポジトリには何も置きません。
+
+```sh
+sudo python3 kagari_mvi.py register OWNER/REPO [--allow-actor LOGIN]   # 一覧へ追記し、kagari:* ラベルを作る
+sudo python3 kagari_mvi.py unregister OWNER/REPO                       # 一覧から外すだけ
+sudo python3 kagari_mvi.py status                                      # 一覧（target 行）も表示する
+```
+
+- `register` は冪等です。2 回目は一覧を変えません（ラベルが足りなければ作り直します）。`--allow-actor` を省くと、`OWNER` を承認できる人にします（繰り返しか、コンマ区切りで複数）。登録済みで承認者が違うときは、変えずに止まります（先に `unregister`）。root で実行すると、`gh` は timer と同じ `kagari-runner` の資格情報で呼びます。
+- `unregister` は一覧からだけ外します。ラベル・Issue・PR には触れません（実行中の Issue も、そのままです）。
+- **一覧の扱い**：`register`・`unregister` は root で実行します（一覧 `/etc/kagari-mvi/targets` を書くため。root でなければ、ラベルを作る前に止まります）。`OWNER/REPO` と `LOGIN` は、英数字・`.`・`_`・`-` だけで、先頭は英数字です（空白・改行・`$`・引用符は受け付けません）。GitHub の名前は大文字小文字を区別しないので、`O/R` と `o/r` は同じリポジトリです（一覧には最初に書いた綴りが残ります）。一覧を書き換えても、コメントの行と空行は残ります。同時に実行しても、更新が失われないように、書く直前に一覧を読み直し、ロック（`/etc/kagari-mvi/targets.lock`）を使います。`/etc/kagari-mvi` は、ない場合に 0755 で作ります。一覧は、KAGARI が所有するもの（受領書に載るもの）ではないので、`uninstall` は一覧を残します（`--purge` でも消しません）。
+- **未確認**：`register`・`unregister` の実機での動作（root から `kagari-runner` の資格情報で `gh` を呼ぶ `sudo` の扱い、ロック、systemd での一覧の読み込み）は、未確認です。
+- **前提の診断**：`register` は、既定ブランチに `.claude/settings.local.json` が commit されていないことを確かめ、あれば登録しません（あとで `blocked` になるため）。この確認は `register` のときだけで、`status` はしません（`status` はネットワークを使わず、ホストの状態だけを診断します）。ADR-0008 D4 のその他の前提条件と、対象リポジトリの Actions の secrets は、`kagari-runner` の資格情報では確かめられない（secrets は読めない）ので、診断しません。手で確かめてください。
+- 一覧の読み方：空行と `#` で始まる行は飛ばし、最終行が改行で終わらなくても読みます。
+
+以降は、一覧を使わず `just` で `ExecStart=` を手で並べる、#489 の方式です（`install` を使わない場合の参考。標準ではありません）。
 
 1 つの timer から、`run-once` → `review-once` → `cleanup-once` を順に呼びます。3 つを同時に動かさないためです（「1 つのホストに 1 つの KAGARI」）。次の例は、`systemd-analyze verify` で構文を確かめました（2026-11-19）。verify は、`User=` のユーザーと `WorkingDirectory=` のディレクトリが存在すること、`just` が見つかることを確かめません。ホストに設定して動かすことは、まだ確かめていません。timer の初回の発火の時刻（`OnBootSec`・`OnUnitInactiveSec`）と、実行中の service に timer の時刻が重なったときの動きも、**未確認**です。`OWNER/REPO` と `PATH` は、環境に合わせて書き換えてください。
 
