@@ -31,7 +31,7 @@ def unit_texts() -> Dict[str, str]:
     cmd = "/usr/bin/python3 %s/components/kagari-mvi/kagari_mvi.py" % CHECKOUT
     # Exit 3 (usage limit, #481) is not a failure and must not stop the calls after it; any other
     # non-zero code is remembered and makes the service fail, so that it stays visible (README).
-    loop = ('rc=0; while read -r r a; do [ -n "$$r" ] || continue; '
+    loop = ('rc=0; while read -r r a || [ -n "$$r" ]; do case "$$r" in ""|"#"*) continue;; esac; '
             + " ".join('%s %s --repo "$$r" --workdir /srv/kagari%s || [ $$? -eq 3 ] || rc=1;' % (cmd, name, extra)
                        for name, extra in (("run-once", ' --allow-actor "$$a"'),
                                            ("review-once", ""), ("cleanup-once", "")))
@@ -106,12 +106,20 @@ class Host:
             self.run(["useradd", "--create-home", "--shell", "/bin/bash", "--groups", GROUP, target])
         elif kind == "dir":
             os.makedirs(self.p(target), exist_ok=True)
-            os.chmod(self.p(target), DIRS[target])
-            self.run(["chown", "%s:%s" % (RUNNER, GROUP), self.p(target)])
+            try:
+                self.run(["chown", "%s:%s" % (RUNNER, GROUP), self.p(target)])
+                os.chmod(self.p(target), DIRS[target])  # last: chown may clear setgid
+            except Exception:
+                os.rmdir(self.p(target))  # half made: the next install makes it whole
+                raise
         elif kind == "checkout":
             os.makedirs(os.path.dirname(self.p(target)), exist_ok=True)
-            self.run(["git", "clone", "--", self.kumiki_url, self.p(target)])
-            self.run(["git", "-C", self.p(target), "checkout", "--detach", self.kumiki_ref])
+            try:
+                self.run(["git", "clone", "--", self.kumiki_url, self.p(target)])
+                self.run(["git", "-C", self.p(target), "checkout", "--detach", self.kumiki_ref])
+            except Exception:
+                shutil.rmtree(self.p(target), ignore_errors=True)  # a wrong revision must not stay
+                raise
         else:
             self.write_file(target, 0o440 if kind == "sudoers" else 0o644)
 
@@ -214,20 +222,22 @@ class Host:
         receipt = self.load()
         if purge:
             self.out("--purge: the users' home directories go too, so the Claude login of %s is deleted" % AGENT)
-        for item in reversed(IDS):
-            kind, state = item.split(":", 1)[0], self.state(item, receipt)
-            if state == "unrecorded":
-                self.out("diagnostic: %s is not in the receipt; left as is" % item)
-            elif state == "modified":
-                self.out("diagnostic: %s was changed after install; left as is" % item)
-            elif state == "missing":
-                self.out("already gone: %s" % item)
-                del receipt[item]
-            elif state == "ok" and kind in KEPT_KINDS and not purge:
-                self.out("kept: %s (use --purge to remove)" % item)
-            elif state == "ok":
-                self.remove(item, purge)
-                del receipt[item]
-                self.out("removed: %s" % item)
-        self.save(receipt)
+        try:
+            for item in reversed(IDS):
+                kind, state = item.split(":", 1)[0], self.state(item, receipt)
+                if state == "unrecorded":
+                    self.out("diagnostic: %s is not in the receipt; left as is" % item)
+                elif state == "modified":
+                    self.out("diagnostic: %s was changed after install; left as is" % item)
+                elif state == "missing":
+                    self.out("already gone: %s" % item)
+                    del receipt[item]
+                elif state == "ok" and kind in KEPT_KINDS and not purge:
+                    self.out("kept: %s (use --purge to remove)" % item)
+                elif state == "ok":
+                    self.remove(item, purge)
+                    del receipt[item]
+                    self.out("removed: %s" % item)
+        finally:
+            self.save(receipt)  # also after a failure: what is gone must not stay in the receipt
         return 0
