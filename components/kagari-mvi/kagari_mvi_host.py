@@ -48,12 +48,15 @@ def unit_texts() -> Dict[str, str]:
 
 class Host:
     def __init__(self, root: str = "/", run: Runner = subprocess_runner, out: Callable[[str], None] = print,
-                 kumiki_url: str = KUMIKI_URL, kumiki_ref: str = "main",
+                 kumiki_url: str = KUMIKI_URL, kumiki_ref: Optional[str] = None,
                  now: Callable[[], float] = time.time) -> None:
-        if kumiki_ref.startswith("-"):
+        if kumiki_ref and kumiki_ref.startswith("-"):
             raise ValueError("the KUMIKI revision must not start with `-`: %s" % kumiki_ref)
         self.root, self.run, self.out = root, run, out
-        self.kumiki_url, self.kumiki_ref, self.now = kumiki_url, kumiki_ref, now
+        self.kumiki_url, self.now = kumiki_url, now
+        self.recorded_ref = self.load_ref()
+        self.kumiki_ref = kumiki_ref or self.recorded_ref or "main"  # repair / reinstall keep the pin unless told
+        self.made_checkout = False  # the receipt's pin changes only when a checkout is made here
         self.texts = unit_texts()
 
     def p(self, path: str) -> str:
@@ -147,6 +150,7 @@ class Host:
                 self.run(["git", "clone", "--", self.kumiki_url, path])
                 self.run(["git", "-C", path, "checkout", "--detach", self.kumiki_ref])
                 done = True
+                self.made_checkout = True
             finally:
                 if not done:  # a wrong revision must not stay behind
                     try:
@@ -191,6 +195,14 @@ class Host:
             if kind == "unit" and target == SERVICE:
                 self.run(["systemctl", "daemon-reload"])
 
+    def load_ref(self) -> Optional[str]:
+        try:
+            with open(self.p(RECEIPT), encoding="utf-8") as handle:
+                ref = json.load(handle).get("kumiki_ref")
+            return ref if isinstance(ref, str) and ref and not ref.startswith("-") else None
+        except (OSError, ValueError, AttributeError):
+            return None
+
     def load(self) -> Dict[str, str]:
         try:
             with open(self.p(RECEIPT), encoding="utf-8") as handle:
@@ -206,7 +218,8 @@ class Host:
             return
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"items": items, "kumiki_ref": self.kumiki_ref, "updated": int(self.now())},
+            pinned = self.kumiki_ref if self.made_checkout or not self.recorded_ref else self.recorded_ref
+            json.dump({"items": items, "kumiki_ref": pinned, "updated": int(self.now())},
                       handle, indent=2, sort_keys=True)
 
     def plan(self) -> List[str]:
@@ -219,11 +232,60 @@ class Host:
         present = all(os.path.isfile(self.p(path)) for path in (SERVICE, TIMER))
         return present and not self.ok(["systemctl", "is-enabled", "kagari-mvi.timer"])
 
-    def install(self, dry_run: bool = False) -> int:
+    def expected(self, item: str) -> Optional[str]:
+        """What KAGARI would make (None = cannot tell offline: users, group, checkout need other rules)."""
+        kind, target = item.split(":", 1)
+        if kind == "dir":
+            return "mode %o" % DIRS[target]
+        if kind in ("sudoers", "unit"):
+            return "sha256 " + hashlib.sha256(self.texts[target].encode("utf-8")).hexdigest()
+        return None
+
+    def owner_of(self, target: str) -> Optional[str]:
+        try:
+            return self.run(["stat", "-c", "%U:%G", self.p(target)]).strip()
+        except CommandError:
+            return None
+
+    def origin_of(self, target: str) -> Optional[str]:
+        try:
+            return self.run(["git", "-C", self.p(target), "remote", "get-url", "origin"]).strip()
+        except CommandError:
+            return None
+
+    def matches(self, item: str) -> bool:
+        """True when the existing item is what install would have made (so it may be adopted).
+
+        A user or a group is never adopted: a name cannot show who made it, and once it is in the
+        receipt `uninstall --purge` would run `userdel --remove` on it (and on its home directory)."""
+        kind, target = item.split(":", 1)
+        now = self.fingerprint(item)
+        if kind in ("user", "group") or now is None or now.startswith("unreadable") or os.path.islink(self.p(target)):
+            return False
+        if kind == "checkout":  # clean, and it is KUMIKI: uninstall removes the whole directory
+            return not now.endswith(" dirty") and self.origin_of(target) == self.kumiki_url
+        if kind == "dir" and self.owner_of(target) != "%s:%s" % (RUNNER, GROUP):
+            return False
+        return now == self.expected(item)
+
+    def install(self, dry_run: bool = False, adopt: bool = False) -> int:
         receipt, plan = self.load(), self.plan()
         for item in IDS:
             if item not in plan and item not in receipt:
-                self.out("exists, not in the receipt (not adopted): %s" % item)
+                if adopt and self.matches(item):
+                    self.out("adopt %s" % item if not dry_run else "  would adopt %s" % item)
+                    if not dry_run:
+                        receipt[item] = self.fingerprint(item) or ""
+                        if item.startswith("checkout:") and not self.recorded_ref:
+                            self.recorded_ref = receipt[item].split()[1]  # its real revision: repair restores that, not main
+                        self.save(receipt)
+                elif adopt and item.split(":", 1)[0] in ("user", "group"):
+                    self.out("note: %s exists and is never adopted (--purge would delete it and its home); "
+                             "remove it by hand if it is not wanted" % item)
+                elif adopt:
+                    self.out("diagnostic: %s differs from what KAGARI makes; not adopted, left as is" % item)
+                else:
+                    self.out("exists, not in the receipt (not adopted): %s" % item)
         enable = self.timer_to_enable(plan)
         self.out("plan:" if plan or enable else "plan: nothing to do")
         for item in plan:
@@ -258,6 +320,64 @@ class Host:
         legacy = receipt[item] == "present" and item.split(":", 1)[0] in ("user", "group")  # before #508
         return "ok" if now == receipt[item] or legacy else "modified"
 
+    def repair(self) -> int:
+        """Restore what is missing or absent without `uninstall`; never touch what a person changed."""
+        receipt, stuck = self.load(), 0
+        todo = []
+        for item in IDS:
+            state = self.state(item, receipt)
+            if state in ("missing", "absent"):
+                todo.append(item)
+            elif state == "unrecorded" and item.split(":", 1)[0] in ("user", "group"):
+                self.out("note: %s exists and is not in the receipt (users and groups are never adopted)" % item)
+            elif state != "ok":
+                stuck += 1
+                why = {"modified": "was changed after install", "unrecorded": "is not in the receipt (try `install --adopt`)",
+                       "unreadable": "could not be read (git failed)"}[state]
+                self.out("diagnostic: %s %s; not restored. Check it, then fix it by hand or remove it and run repair" % (item, why))
+        self.out("repair plan:" if todo else "repair: nothing is missing")
+        for item in todo:
+            self.out("  restore %s" % item)
+        try:
+            for item in todo:
+                try:
+                    self.create(item)
+                except ValueError as error:  # a conflict is a diagnosis, not a reason to stop the others
+                    stuck += 1
+                    self.out("diagnostic: %s not restored: %s" % (item, error))
+                    continue
+                receipt[item] = self.fingerprint(item) or ""
+                self.save(receipt)
+            if any(item.startswith("unit:") for item in todo):  # not a timer that a person stopped
+                self.run(["systemctl", "daemon-reload"])
+                self.run(["systemctl", "enable", "--now", "kagari-mvi.timer"])
+        finally:
+            self.save(receipt)
+        if stuck:
+            self.out("%d item(s) need your confirmation" % stuck)
+        return 1 if stuck else 0
+
+    def reinstall(self) -> int:
+        """`uninstall` (default: logs, work directories and logins are kept) then `install`."""
+        if self.service_busy():
+            self.out("refused: kagari-mvi.service is running; wait for it to finish (or stop it), then reinstall")
+            return 1
+        self.uninstall()
+        code = self.install()
+        receipt = self.load()
+        left = [item for item in IDS if self.state(item, receipt) != "ok"
+                and not (self.state(item, receipt) == "unrecorded" and item.split(":", 1)[0] in ("user", "group"))]
+        for item in left:
+            self.out("diagnostic: %s is not in order after reinstall (%s): check it by hand" % (item, self.state(item, receipt)))
+        return code or (1 if left else 0)
+
+    def service_busy(self) -> bool:
+        try:
+            state = self.run(["systemctl", "show", "-p", "ActiveState", "--value", "kagari-mvi.service"]).strip()
+        except CommandError:
+            return False
+        return state in ("active", "activating", "deactivating", "reloading")
+
     def credentials(self) -> List[str]:
         found = []
         if not self.ok(["gh", "--version"]):
@@ -283,7 +403,11 @@ class Host:
     def status(self) -> int:
         receipt = self.load()
         for item in IDS:
-            self.out("%-10s %s" % (self.state(item, receipt), item))
+            state = self.state(item, receipt)
+            self.out("%-10s %s" % (state, item))
+            if state == "unrecorded":
+                self.out("diagnostic: %s %s" % (item, "matches what KAGARI makes: `install --adopt` records it"
+                                                 if self.matches(item) else "differs from what KAGARI makes, or is a user / group: not adoptable"))
         try:
             with open(self.p(TARGETS), encoding="utf-8") as handle:
                 listed = [fields for fields in (line.split() for line in handle) if fields and not fields[0].startswith("#")]
@@ -302,17 +426,27 @@ class Host:
         if purge:
             self.out("--purge: the users' home directories go too, so the Claude login of %s is deleted" % AGENT)
         done = False
+        left: List[str] = []  # items that stay as they are: a directory with one of them inside stays too
         try:
             for item in reversed(IDS):
                 kind, state = item.split(":", 1)[0], self.state(item, receipt)
-                if kind in ("dir", "checkout") and state != "missing" and os.path.islink(self.p(item.split(":", 1)[1])):
+                here = self.p(item.split(":", 1)[1])
+                inside = [other for other in left if self.p(other.split(":", 1)[1]).startswith(here + os.sep)]
+                if kind in ("dir", "checkout") and state != "missing" and os.path.islink(here):
+                    left.append(item)
                     self.out("diagnostic: %s is a symbolic link; left as is" % item)
                 elif state == "unrecorded":
+                    left.append(item)
                     self.out("diagnostic: %s is not in the receipt; left as is" % item)
                 elif state == "unreadable":
+                    left.append(item)
                     self.out("diagnostic: %s could not be read (git failed); left as is" % item)
                 elif state == "modified":
+                    left.append(item)
                     self.out("diagnostic: %s was changed after install; left as is" % item)
+                elif state == "ok" and inside:
+                    left.append(item)
+                    self.out("diagnostic: %s contains %s, which is left as is; not removed" % (item, inside[0]))
                 elif state == "missing":
                     if item == "unit:" + TIMER:  # the file was removed by hand: the timer may still run
                         self.ok(["systemctl", "disable", "--now", "kagari-mvi.timer"])

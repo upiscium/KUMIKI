@@ -365,9 +365,13 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     host = [sub.add_parser(name, help=text) for name, text in (
         ("install", "create what KAGARI owns on this host (ADR-0012)"),
         ("status", "show owned things, the receipt diff and credential diagnostics"),
-        ("uninstall", "remove only what the receipt lists and is unchanged"))]
+        ("uninstall", "remove only what the receipt lists and is unchanged"),
+        ("repair", "restore what is missing without uninstall; diagnose what was changed"),
+        ("reinstall", "uninstall (keeps logs, work, logins) then install; --kumiki-ref re-pins the checkout"))]
     host[0].add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
-    host[0].add_argument("--kumiki-ref", default="main", help="KUMIKI revision to pin")
+    host[0].add_argument("--kumiki-ref", help="KUMIKI revision to pin (default: the one in the receipt, else main)")
+    host[0].add_argument("--adopt", action="store_true", help="record existing things that match into the receipt")
+    host[4].add_argument("--kumiki-ref", help="KUMIKI revision to pin (default: the one in the receipt, else main)")
     host[2].add_argument("--purge", action="store_true", help="also remove users, group and /srv/kagari")
     return parser.parse_args(argv)
 
@@ -375,10 +379,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        if args.command in ("install", "status", "uninstall"):
-            host = Host(kumiki_ref=getattr(args, "kumiki_ref", "main"))
-            return {"install": lambda: host.install(args.dry_run), "status": host.status,
-                    "uninstall": lambda: host.uninstall(args.purge)}[args.command]()
+        if args.command in ("install", "status", "uninstall", "repair", "reinstall"):
+            host = Host(kumiki_ref=getattr(args, "kumiki_ref", None))
+            return {"install": lambda: host.install(args.dry_run, args.adopt), "status": host.status,
+                    "uninstall": lambda: host.uninstall(args.purge), "repair": host.repair,
+                    "reinstall": host.reinstall}[args.command]()
         if args.command == "register":
             run = targets.runner_as_service_user()
             return targets.register(args.target, args.allow_actor, run=run,
