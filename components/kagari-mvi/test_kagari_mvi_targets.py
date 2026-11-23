@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -185,6 +186,95 @@ class TargetsTest(unittest.TestCase):
         host.Host(self.root, run=lambda args, **kw: "", out=shown.append).status()
         self.assertIn("target     x/y (actor alice)", shown)
         self.assertFalse(any(line.startswith("target") and "#" in line for line in shown))
+
+    def write_listing(self, text):
+        os.makedirs(os.path.dirname(self.listing), exist_ok=True)
+        with open(self.listing, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+
+    def read_raw(self):
+        with open(self.listing, encoding="utf-8", newline="") as handle:
+            return handle.read()
+
+    def test_special_characters_in_a_comment_do_not_split_the_line(self):
+        comment = "# a\x0bb\x0cc\x1cd\x1de\x1ef\x85g\u2028h\u2029i"
+        self.write_listing(comment + "\nx/y alice\n")
+        self.register()
+        self.assertEqual(self.read_raw(), comment + "\nx/y alice\no/r o\n")
+        targets.unregister("x/y", root=self.root, out=self.lines.append)
+        self.assertEqual(self.read_raw(), comment + "\no/r o\n")
+        self.assertEqual(list(self.listed()), ["o/r"])
+
+    def test_a_crlf_list_is_kept_intact_and_becomes_lf(self):
+        self.write_listing("# note\r\nx/y alice\r\n\r\nz/w bob\r\n")
+        self.assertEqual(targets.read_targets(self.listing), {"x/y": "alice", "z/w": "bob"})
+        self.register()
+        self.assertEqual(self.read_raw(), "# note\nx/y alice\n\nz/w bob\no/r o\n")
+        self.write_listing("# note\r\nx/y alice\r\nz/w bob\r\n")
+        targets.unregister("x/y", root=self.root, out=self.lines.append)
+        self.assertEqual(self.read_raw(), "# note\nz/w bob\n")
+
+    def test_the_lock_is_exclusive_taken_before_the_write_and_released_on_error(self):
+        events = []
+        real_flock, real_write = targets.fcntl.flock, targets.write_lines
+        seen = {}
+
+        def flock(fd, op):
+            events.append(("flock", op))
+            seen["fd"] = fd
+            return real_flock(fd, op)
+
+        def write(path, lines):
+            events.append(("write",))
+            return real_write(path, lines)
+        with mock.patch.object(targets.fcntl, "flock", flock), mock.patch.object(targets, "write_lines", write):
+            self.register()
+        self.assertEqual(events, [("flock", targets.fcntl.LOCK_EX), ("write",)])
+        with self.assertRaises(KeyError):
+            with targets.locked(self.listing):
+                raise KeyError("boom")
+        with self.assertRaises(OSError):
+            os.fstat(seen["fd"])  # the descriptor was closed: the lock is released
+        with open(self.listing + ".lock") as other:  # and another holder can take it at once
+            targets.fcntl.flock(other, targets.fcntl.LOCK_EX | targets.fcntl.LOCK_NB)
+
+    def test_register_waits_while_another_process_holds_the_lock(self):
+        os.makedirs(os.path.dirname(self.listing))
+        code = ("import fcntl,sys,time\nf=open(sys.argv[1],'a')\nfcntl.flock(f,fcntl.LOCK_EX)\n"
+                "print('held',flush=True)\ntime.sleep(1.0)\n")
+        proc = subprocess.Popen(["python3", "-c", code, self.listing + ".lock"], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(proc.stdout.close)
+        self.addCleanup(proc.wait)
+        self.assertEqual(proc.stdout.readline().strip(), "held")
+        start = time.monotonic()
+        self.register()
+        self.assertGreaterEqual(time.monotonic() - start, 0.5)
+        self.assertEqual(list(self.listed()), ["o/r"])
+
+    def test_check_writable_ends_for_a_relative_root_with_nothing_under_it(self):
+        for path in ("nothing-here-512/etc/kagari-mvi/targets", "/nonexistent-512/a/targets"):
+            with mock.patch("os.path.isdir", return_value=False):
+                with self.assertRaises((PermissionError, ValueError)):
+                    targets.check_writable(path)
+        with self.assertRaises((PermissionError, ValueError)):
+            targets.check_writable("nothing-here-512/etc/targets")
+
+    def test_unregister_without_permission_touches_neither_labels_nor_the_list(self):
+        self.register()
+        before, calls = self.read_raw(), len(self.fake.calls)
+        with mock.patch("os.access", return_value=False), self.assertRaises(PermissionError):
+            targets.unregister("o/r", root=self.root, out=self.lines.append)
+        self.assertEqual(self.read_raw(), before)
+        self.assertEqual(len(self.fake.calls), calls)
+
+    def test_a_real_http_404_means_the_file_is_absent_and_registration_goes_on(self):
+        def run(args, **kw):
+            if "contents/" in args[-1]:
+                raise CommandError(args, 1, "gh: Not Found (HTTP 404)")
+            return "[]"
+        self.assertFalse(targets.commits_local_settings("o/r", run))
+        targets.register("o/r", None, root=self.root, run=run, out=self.lines.append)
+        self.assertEqual(self.listed(), {"o/r": "o"})
 
 
 if __name__ == "__main__":
