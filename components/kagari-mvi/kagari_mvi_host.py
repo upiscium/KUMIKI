@@ -84,9 +84,13 @@ class Host:
         if kind == "checkout":
             if not os.path.isdir(os.path.join(path, ".git")):
                 return None
-            rev = "rev " + self.run(["git", "-C", path, "rev-parse", "HEAD"]).strip()
+            try:
+                rev = "rev " + self.run(["git", "-C", path, "rev-parse", "HEAD"]).strip()
+                dirty = bool(self.run(["git", "-C", path, "status", "--porcelain"]).strip())
+            except CommandError:  # e.g. `dubious ownership`: never read as clean, so never removed
+                return "unreadable (git failed)"
             # An uncommitted edit or an untracked file is a change by hand: not "unchanged".
-            return rev if not self.run(["git", "-C", path, "status", "--porcelain"]).strip() else rev + " dirty"
+            return rev + " dirty" if dirty else rev
         if not os.path.isfile(path):
             return None
         with open(path, "rb") as handle:
@@ -163,7 +167,10 @@ class Host:
         else:  # an empty directory before: keep the directory itself (owner, mode, mount), empty it
             for name in os.listdir(path):
                 entry = os.path.join(path, name)
-                shutil.rmtree(entry, ignore_errors=True) if not os.path.islink(entry) else os.remove(entry)
+                if os.path.islink(entry) or not os.path.isdir(entry):
+                    os.remove(entry)  # rmtree does nothing to a regular file
+                else:
+                    shutil.rmtree(entry, ignore_errors=True)
         if os.path.exists(path) and os.listdir(path):
             self.out("diagnostic: could not remove the half-made checkout %s" % path)
 
@@ -244,7 +251,10 @@ class Host:
         now = self.fingerprint(item)
         if item not in receipt:
             return "absent" if now is None else "unrecorded"
-        return "missing" if now is None else ("ok" if now == receipt[item] else "modified")
+        if now is None:
+            return "missing"
+        legacy = receipt[item] == "present" and item.split(":", 1)[0] in ("user", "group")  # before #508
+        return "ok" if now == receipt[item] or legacy else "modified"
 
     def credentials(self) -> List[str]:
         found = []
@@ -253,7 +263,7 @@ class Host:
         elif not self.ok(["sudo", "-n", "-u", RUNNER, "-H", "gh", "auth", "status"]):
             found.append("GitHub credential for %s: not set (log in by hand; not installed)" % RUNNER)
         try:
-            helped = self.run(["sudo", "-n", "-u", AGENT, "-H", "claude", "--help"])
+            helped = self.run(["sudo", "-n", "-u", AGENT, "-H", "--", "sh", "-lc", "claude --help"], timeout=60)
             if "--restricted" not in helped:
                 found.append("Claude Code for %s: no --restricted option (update it by hand; not updated)" % AGENT)
         except CommandError:

@@ -21,6 +21,7 @@ class FakeSystem:
         self.enabled, self.fail_on, self.visudo = False, None, []  # fail_on: (command, last argument)
         self.uids, self.dirty, self.no_gh = {}, "", False
         self.claude_help = "Usage: claude [--restricted]"
+        self.claude_calls, self.git_fails = [], False
 
     def __call__(self, args, cwd=None, input=None, timeout=None):
         args = list(args)
@@ -34,12 +35,15 @@ class FakeSystem:
             raise CommandError(args, 127, "command not found")
         if name == "gh":
             return ""
-        if name == "sudo" and "claude" in args:
+        if name == "sudo" and any("claude" in arg for arg in args):
+            self.claude_calls.append((args, timeout))
             return self.claude_help
         if name == "sudo":  # gh auth status
             if not self.gh_ok:
                 raise CommandError(args, 1, "not logged in")
             return ""
+        if name == "git" and self.git_fails and ("rev-parse" in args or "status" in args):
+            raise CommandError(args, 128, "fatal: detected dubious ownership")
         if name == "git" and "rev-parse" in args:
             return "abc123\n"
         if name == "git" and "status" in args:
@@ -69,6 +73,8 @@ class FakeSystem:
             self.groups.discard(last)
         elif name == "git" and args[1] == "clone":
             os.makedirs(os.path.join(last, ".git"))
+            with open(os.path.join(last, "README"), "w") as handle:  # a regular file next to .git
+                handle.write("x")
         return ""
 
 
@@ -348,6 +354,49 @@ class HostTest(HostBase):
             mvi.parse_args(["install", "--root", "/tmp/elsewhere"])
         with self.assertRaises(ValueError):
             host.Host(self.root, kumiki_ref="--upload-pack=x")
+
+
+    def test_a_receipt_from_before_the_uid_fingerprint_still_matches_and_purge_still_works(self):
+        self.host.install()
+        receipt = self.host.load()
+        for item in receipt:
+            if item.split(":", 1)[0] in ("user", "group"):
+                receipt[item] = "present"  # what #500 wrote
+        self.host.save(receipt)
+        self.assertEqual(self.host.state("user:" + host.AGENT, receipt), "ok")
+        self.assertEqual(self.host.state("group:" + host.GROUP, receipt), "ok")
+        self.host.uninstall(purge=True)
+        self.assertEqual((self.sys.users, self.sys.groups), (set(), set()))
+
+    def test_a_failed_checkout_leaves_no_regular_file_in_a_directory_that_was_empty_before(self):
+        os.makedirs(self.path(host.CHECKOUT))
+        self.sys.fail_on = ("git", "main")  # the clone made .git and a README, then the checkout failed
+        with self.assertRaises(CommandError):
+            self.host.install()
+        self.assertEqual(os.listdir(self.path(host.CHECKOUT)), [])
+        self.sys.fail_on = None
+        self.host.install()  # no `conflict`: the next install makes the checkout whole
+        self.assertEqual(self.host.state("checkout:" + host.CHECKOUT, self.host.load()), "ok")
+
+    def test_a_failing_git_is_not_read_as_a_clean_checkout_and_does_not_stop_the_others(self):
+        self.host.install()
+        self.sys.git_fails = True
+        self.lines.clear()
+        self.assertEqual(self.host.status(), 0)  # no traceback
+        self.assertTrue(any(line.startswith("modified") and host.CHECKOUT in line for line in self.lines))
+        self.lines.clear()
+        self.host.uninstall(purge=True)
+        self.assertTrue(os.path.isdir(self.path(host.CHECKOUT)))  # left as is
+        self.assertTrue(any("checkout:" + host.CHECKOUT in line and "left as is" in line for line in self.lines))
+        self.assertEqual((self.sys.users, self.sys.groups), (set(), set()))  # the items after it went on
+        self.assertFalse(os.path.exists(self.path("/srv/kagari")))
+
+    def test_status_asks_claude_through_a_login_shell_with_a_time_limit(self):
+        self.host.status()
+        args, timeout = self.sys.claude_calls[-1]
+        self.assertEqual(args[-3:], ["sh", "-lc", "claude --help"])
+        self.assertIn(host.AGENT, args)
+        self.assertEqual(timeout, 60)
 
 
 AGENT = host.AGENT
