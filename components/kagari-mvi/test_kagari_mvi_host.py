@@ -19,6 +19,8 @@ class FakeSystem:
         self.root, self.gh_ok = root, gh_ok
         self.users, self.groups, self.calls = set(), set(), []
         self.enabled, self.fail_on, self.visudo = False, None, []  # fail_on: (command, last argument)
+        self.uids, self.dirty, self.no_gh = {}, "", False
+        self.claude_help = "Usage: claude [--restricted]"
 
     def __call__(self, args, cwd=None, input=None, timeout=None):
         args = list(args)
@@ -26,13 +28,22 @@ class FakeSystem:
         if name == "getent":
             if last not in (self.users if args[1] == "passwd" else self.groups):
                 raise CommandError(args, 2, "")
+            uid = self.uids.setdefault(last, 1000 + len(self.uids))
+            return "%s:x:%d:%d:\n" % (last, uid, uid) if args[1] == "passwd" else "%s:x:%d:\n" % (last, uid)
+        if name == "gh" and self.no_gh:
+            raise CommandError(args, 127, "command not found")
+        if name == "gh":
             return ""
+        if name == "sudo" and "claude" in args:
+            return self.claude_help
         if name == "sudo":  # gh auth status
             if not self.gh_ok:
                 raise CommandError(args, 1, "not logged in")
             return ""
         if name == "git" and "rev-parse" in args:
             return "abc123\n"
+        if name == "git" and "status" in args:
+            return self.dirty
         if name == "systemctl" and args[1] == "is-enabled":
             if not self.enabled:
                 raise CommandError(args, 1, "disabled")
@@ -61,7 +72,7 @@ class FakeSystem:
         return ""
 
 
-class HostTest(unittest.TestCase):
+class HostBase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -85,6 +96,8 @@ class HostTest(unittest.TestCase):
         with open(self.path(host.SUDOERS), "a") as handle:
             handle.write(text)
 
+
+class HostTest(HostBase):
     def test_plan_of_an_empty_host_lists_every_owned_thing(self):
         self.assertEqual(self.host.install(dry_run=True), 0)
         for item in host.IDS:
@@ -338,6 +351,128 @@ class HostTest(unittest.TestCase):
 
 
 AGENT = host.AGENT
+
+class HardeningTest(HostBase):
+    """#508: fingerprints and clean-up that do not trust names alone."""
+
+    def test_uninstall_leaves_a_checkout_with_uncommitted_edits_and_says_so(self):
+        self.host.install()
+        self.sys.dirty = " M components/kagari-mvi/kagari_mvi.py\n"
+        self.lines.clear()
+        self.host.uninstall()
+        self.assertTrue(any("was changed after install" in line and host.CHECKOUT in line for line in self.lines))
+        self.assertIn("checkout:" + host.CHECKOUT, self.host.load())
+        self.assertNotIn("removed: checkout:" + host.CHECKOUT, self.lines)
+
+    def test_purge_does_not_remove_a_user_recreated_under_the_same_name(self):
+        self.host.install()
+        self.sys.uids[host.AGENT] = 5555  # same name, another uid
+        self.lines.clear()
+        self.host.uninstall(purge=True)
+        self.assertTrue(any("was changed after install" in line and host.AGENT in line for line in self.lines))
+        self.assertIn(host.AGENT, self.sys.users)
+        self.assertNotIn("removed: user:" + host.AGENT, self.lines)
+        self.assertIn("removed: user:" + host.RUNNER, self.lines)
+
+    def test_create_refuses_and_remove_does_not_follow_a_symbolic_link(self):
+        os.makedirs(self.path("/srv"))
+        os.makedirs(self.path("/elsewhere"))
+        os.symlink(self.path("/elsewhere"), self.path("/srv/kagari"))
+        with self.assertRaises(ValueError):
+            self.host.create("dir:/srv/kagari")
+        with self.assertRaises(ValueError):
+            self.host.remove("dir:/srv/kagari", True)
+        self.assertTrue(os.path.isdir(self.path("/elsewhere")))
+        os.makedirs(self.path("/opt/kagari"))
+        os.symlink(self.path("/elsewhere"), self.path(host.CHECKOUT))
+        with self.assertRaises(ValueError):
+            self.host.create("checkout:" + host.CHECKOUT)
+        with self.assertRaises(ValueError):
+            self.host.remove("checkout:" + host.CHECKOUT, True)
+        self.assertEqual(self.sys.calls, [])
+
+    def test_uninstall_leaves_a_symbolic_link_in_place_of_the_checkout(self):
+        self.host.install()
+        os.makedirs(self.path("/elsewhere/.git"))
+        real = self.path(host.CHECKOUT)
+        os.rename(real, real + ".moved")
+        os.symlink(self.path("/elsewhere"), real)
+        self.lines.clear()
+        self.host.uninstall()
+        self.assertTrue(any("symbolic link" in line for line in self.lines))
+        self.assertTrue(os.path.isdir(self.path("/elsewhere/.git")))
+
+    def test_dry_run_shows_a_conflict_at_the_checkout_place(self):
+        os.makedirs(self.path(host.CHECKOUT))
+        with open(os.path.join(self.path(host.CHECKOUT), "x.txt"), "w") as handle:
+            handle.write("x")
+        self.host.install(dry_run=True)
+        self.assertTrue(any(line.startswith("  conflict checkout:") for line in self.lines))
+        self.assertNotIn("  create checkout:" + host.CHECKOUT, self.lines)
+
+    def test_a_failed_checkout_keeps_the_owner_and_mode_of_an_empty_directory(self):
+        path = self.path(host.CHECKOUT)
+        os.makedirs(path)
+        os.chmod(path, 0o2750)
+        before = os.stat(path)
+        self.sys.fail_on = ("git", "main")
+        with self.assertRaises(CommandError):
+            self.host.install()
+        after = os.stat(path)
+        self.assertEqual((after.st_ino, after.st_uid, after.st_gid, after.st_mode),
+                         (before.st_ino, before.st_uid, before.st_gid, before.st_mode))
+        self.assertEqual(os.listdir(path), [])
+
+    def test_an_error_in_clean_up_does_not_hide_the_original_error(self):
+        self.sys.fail_on = ("git", "main")
+        original = host.shutil.rmtree
+        host.shutil.rmtree = lambda *a, **k: (_ for _ in ()).throw(OSError("clean-up broke"))
+        self.addCleanup(setattr, host.shutil, "rmtree", original)
+        with self.assertRaises(CommandError) as caught:
+            self.host.install()
+        self.assertEqual(caught.exception.output, "injected failure")
+
+    def test_a_failing_receipt_save_does_not_hide_the_error_of_uninstall(self):
+        self.host.install()
+        self.sys.fail_on = ("systemctl", "kagari-mvi.timer")
+        self.host.save = lambda items: (_ for _ in ()).throw(OSError("disk full"))
+        with self.assertRaises(CommandError):
+            self.host.uninstall()
+
+    def test_the_timer_is_disabled_even_when_its_file_was_removed_by_hand(self):
+        self.host.install()
+        os.remove(self.path(host.TIMER))
+        self.sys.calls.clear()
+        self.host.uninstall()
+        self.assertIn(["systemctl", "disable", "--now", "kagari-mvi.timer"], self.sys.calls)
+
+    def test_status_diagnoses_a_missing_gh_and_a_claude_without_restricted(self):
+        self.sys.no_gh, self.sys.claude_help = True, "Usage: claude [--print]"
+        self.host.status()
+        self.assertTrue(any("gh command: not found" in line for line in self.lines))
+        self.assertTrue(any("no --restricted" in line for line in self.lines))
+        self.assertEqual(self.sys.calls, [])
+
+    def test_status_does_not_warn_about_a_claude_that_has_restricted(self):
+        self.host.status()
+        self.assertFalse(any("--restricted" in line for line in self.lines))
+
+    def test_run_once_without_gh_ends_with_a_message_not_a_traceback(self):
+        import kagari_mvi_exec as ex
+        with tempfile.TemporaryDirectory() as empty:
+            old, os.environ["PATH"] = os.environ["PATH"], empty
+            try:
+                with self.assertRaises(CommandError) as caught:
+                    ex.subprocess_runner(["gh", "--version"])
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code = mvi.main(["run-once", "--repo", "o/r", "--workdir", empty, "--allow-actor", "a"])
+            finally:
+                os.environ["PATH"] = old
+        self.assertIn("not found", caught.exception.output)
+        self.assertEqual(code, 1)
+        self.assertIn("not found", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

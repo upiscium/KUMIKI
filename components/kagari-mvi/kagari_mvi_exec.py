@@ -92,6 +92,8 @@ def subprocess_runner(args: Sequence[str], cwd: Optional[str] = None,
         proc = subprocess.run(list(args), cwd=cwd, input=input, capture_output=True,
                               text=True, env=_command_env(), timeout=timeout, start_new_session=True,
                               stdin=subprocess.DEVNULL if input is None else None)
+    except FileNotFoundError:
+        raise CommandError(args, 127, "command not found: %s (install it first)" % args[0])
     except subprocess.TimeoutExpired as error:
         partial = "".join(part.decode(errors="replace") if isinstance(part, bytes) else part
                           for part in (error.stdout, error.stderr) if part)
