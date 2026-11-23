@@ -2,6 +2,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 import kagari_mvi as mvi
 import kagari_mvi_host as host
@@ -86,11 +87,13 @@ class TargetsTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.listing))
 
     def test_bad_names_are_refused(self):
-        for repo in ("o", "o/r/x", "o/ r", "/r", "o/;rm"):
+        for repo in ("o", "o/r/x", "o/ r", "/r", "o/;rm", "o/r\n", "o\n/r", "o/r\n o", "o/.."):
             with self.assertRaises(ValueError, msg=repo):
                 self.register(repo)
-        with self.assertRaises(ValueError):
-            self.register(actors=["a b"])
+        for actor in ("a b", "a\nb", "a\n b", "-x", "a;b"):  # (a trailing newline is stripped: harmless)
+            with self.assertRaises(ValueError, msg=repr(actor)):
+                self.register(actors=[actor])
+        self.assertFalse(os.path.exists(self.listing))  # nothing reached the list
 
     def test_the_timer_processes_every_registered_repo_in_order(self):
         for repo in ("a/x", "b/y"):
@@ -115,6 +118,73 @@ class TargetsTest(unittest.TestCase):
         args = mvi.parse_args(["register", "o/r", "--allow-actor", "x"])
         self.assertEqual((args.command, args.target, args.allow_actor), ("register", "o/r", ["x"]))
         self.assertEqual(mvi.parse_args(["unregister", "o/r"]).target, "o/r")
+
+
+    def test_only_an_http_404_means_the_file_is_absent(self):
+        def run(args, **kw):
+            raise CommandError(args, 1, "dial tcp 10.0.0.1:4040: i/o timeout")  # a "404" that is no HTTP 404
+        with self.assertRaises(CommandError):
+            targets.register("o/r", None, root=self.root, run=run)
+        self.assertFalse(os.path.exists(self.listing))
+
+    def test_a_missing_permission_stops_before_any_label_is_made(self):
+        with mock.patch("os.access", return_value=False), self.assertRaises(PermissionError):
+            self.register()
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse(os.path.exists(self.listing))
+
+    def test_the_directory_is_readable_by_the_service_user_even_with_a_strict_umask(self):
+        old = os.umask(0o077)
+        self.addCleanup(os.umask, old)
+        self.register()
+        folder = os.path.dirname(self.listing)
+        self.assertEqual(os.stat(folder).st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(self.listing).st_mode & 0o777, 0o644)
+
+    def test_the_same_repository_in_another_case_is_one_entry(self):
+        self.register("O/R")
+        self.make_runner()
+        self.register("o/r", ["O"])  # the owner's default is O: the same actor
+        self.assertEqual(self.listed(), {"O/R": "O"})
+        self.assertTrue(self.lines[-1].startswith("already registered: O/R"))
+        targets.unregister("o/r", root=self.root, out=self.lines.append)  # finds it in any case
+        self.assertEqual(self.listed(), {})
+
+    def test_comments_and_blank_lines_stay_when_the_list_is_rewritten(self):
+        os.makedirs(os.path.dirname(self.listing))
+        with open(self.listing, "w") as handle:
+            handle.write("# my note\n\nx/y alice\n  # indented note\nz/w bob")  # the last line has no newline
+        self.register()
+        with open(self.listing) as handle:
+            self.assertEqual(handle.read().splitlines(),
+                             ["# my note", "", "x/y alice", "  # indented note", "z/w bob", "o/r o"])
+        targets.unregister("x/y", root=self.root, out=self.lines.append)
+        with open(self.listing) as handle:
+            self.assertEqual(handle.read().splitlines(), ["# my note", "", "  # indented note", "z/w bob", "o/r o"])
+
+    def test_a_change_made_while_register_waits_for_github_is_not_lost(self):
+        def labels():  # the network call: meanwhile another register added a repository
+            os.makedirs(os.path.dirname(self.listing), exist_ok=True)
+            with open(self.listing, "a") as handle:
+                handle.write("p/q carol\n")
+            return []
+        targets.register("o/r", None, root=self.root, run=self.run, out=self.lines.append, ensure_labels=labels)
+        self.assertEqual(self.listed(), {"p/q": "carol", "o/r": "o"})
+
+    def test_unregister_does_not_remove_another_repository_with_a_longer_name(self):
+        self.register()
+        self.register("o/r2")
+        targets.unregister("o/r", root=self.root, out=self.lines.append)
+        self.assertEqual(list(self.listed()), ["o/r2"])
+
+    def test_status_does_not_list_an_indented_comment_as_a_target(self):
+        os.makedirs(os.path.dirname(self.listing))
+        with open(self.listing, "w") as handle:
+            handle.write("  # not a repository\nx/y alice\n")
+        shown = []
+        host.Host(self.root, run=lambda args, **kw: "", out=shown.append).status()
+        self.assertIn("target     x/y (actor alice)", shown)
+        self.assertFalse(any(line.startswith("target") and "#" in line for line in shown))
 
 
 if __name__ == "__main__":

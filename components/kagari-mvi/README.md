@@ -206,6 +206,8 @@ sudo python3 kagari_mvi.py status                                      # 一覧�
 
 - `register` は冪等です。2 回目は一覧を変えません（ラベルが足りなければ作り直します）。`--allow-actor` を省くと、`OWNER` を承認できる人にします（繰り返しか、コンマ区切りで複数）。登録済みで承認者が違うときは、変えずに止まります（先に `unregister`）。root で実行すると、`gh` は timer と同じ `kagari-runner` の資格情報で呼びます。
 - `unregister` は一覧からだけ外します。ラベル・Issue・PR には触れません（実行中の Issue も、そのままです）。
+- **一覧の扱い**：`register`・`unregister` は root で実行します（一覧 `/etc/kagari-mvi/targets` を書くため。root でなければ、ラベルを作る前に止まります）。`OWNER/REPO` と `LOGIN` は、英数字・`.`・`_`・`-` だけで、先頭は英数字です（空白・改行・`$`・引用符は受け付けません）。GitHub の名前は大文字小文字を区別しないので、`O/R` と `o/r` は同じリポジトリです（一覧には最初に書いた綴りが残ります）。一覧を書き換えても、コメントの行と空行は残ります。同時に実行しても、更新が失われないように、書く直前に一覧を読み直し、ロック（`/etc/kagari-mvi/targets.lock`）を使います。`/etc/kagari-mvi` は、ない場合に 0755 で作ります。一覧は、KAGARI が所有するもの（受領書に載るもの）ではないので、`uninstall` は一覧を残します（`--purge` でも消しません）。
+- **未確認**：`register`・`unregister` の実機での動作（root から `kagari-runner` の資格情報で `gh` を呼ぶ `sudo` の扱い、ロック、systemd での一覧の読み込み）は、未確認です。
 - **前提の診断**：`register` は、既定ブランチに `.claude/settings.local.json` が commit されていないことを確かめ、あれば登録しません（あとで `blocked` になるため）。この確認は `register` のときだけで、`status` はしません（`status` はネットワークを使わず、ホストの状態だけを診断します）。ADR-0008 D4 のその他の前提条件と、対象リポジトリの Actions の secrets は、`kagari-runner` の資格情報では確かめられない（secrets は読めない）ので、診断しません。手で確かめてください。
 - 一覧の読み方：空行と `#` で始まる行は飛ばし、最終行が改行で終わらなくても読みます。
 

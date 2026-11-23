@@ -286,7 +286,7 @@ class Host:
             self.out("%-10s %s" % (self.state(item, receipt), item))
         try:
             with open(self.p(TARGETS), encoding="utf-8") as handle:
-                listed = [line.split() for line in handle if line.strip() and not line.startswith("#")]
+                listed = [fields for fields in (line.split() for line in handle) if fields and not fields[0].startswith("#")]
         except FileNotFoundError:
             listed = []
         for fields in listed:  # the list is edited by register / unregister
