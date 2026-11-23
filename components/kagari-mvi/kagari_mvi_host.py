@@ -276,6 +276,8 @@ class Host:
                     self.out("adopt %s" % item if not dry_run else "  would adopt %s" % item)
                     if not dry_run:
                         receipt[item] = self.fingerprint(item) or ""
+                        if item.startswith("checkout:") and not self.recorded_ref:
+                            self.recorded_ref = receipt[item].split()[1]  # its real revision: repair restores that, not main
                         self.save(receipt)
                 elif adopt and item.split(":", 1)[0] in ("user", "group"):
                     self.out("note: %s exists and is never adopted (--purge would delete it and its home); "
@@ -424,17 +426,27 @@ class Host:
         if purge:
             self.out("--purge: the users' home directories go too, so the Claude login of %s is deleted" % AGENT)
         done = False
+        left: List[str] = []  # items that stay as they are: a directory with one of them inside stays too
         try:
             for item in reversed(IDS):
                 kind, state = item.split(":", 1)[0], self.state(item, receipt)
-                if kind in ("dir", "checkout") and state != "missing" and os.path.islink(self.p(item.split(":", 1)[1])):
+                here = self.p(item.split(":", 1)[1])
+                inside = [other for other in left if self.p(other.split(":", 1)[1]).startswith(here + os.sep)]
+                if kind in ("dir", "checkout") and state != "missing" and os.path.islink(here):
+                    left.append(item)
                     self.out("diagnostic: %s is a symbolic link; left as is" % item)
                 elif state == "unrecorded":
+                    left.append(item)
                     self.out("diagnostic: %s is not in the receipt; left as is" % item)
                 elif state == "unreadable":
+                    left.append(item)
                     self.out("diagnostic: %s could not be read (git failed); left as is" % item)
                 elif state == "modified":
+                    left.append(item)
                     self.out("diagnostic: %s was changed after install; left as is" % item)
+                elif state == "ok" and inside:
+                    left.append(item)
+                    self.out("diagnostic: %s contains %s, which is left as is; not removed" % (item, inside[0]))
                 elif state == "missing":
                     if item == "unit:" + TIMER:  # the file was removed by hand: the timer may still run
                         self.ok(["systemctl", "disable", "--now", "kagari-mvi.timer"])

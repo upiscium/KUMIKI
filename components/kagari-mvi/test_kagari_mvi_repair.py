@@ -112,6 +112,33 @@ class AdoptTest(HostBase):
         self.host.uninstall()
         self.assertTrue(os.path.isdir(self.path(host.CHECKOUT)))
 
+    def test_a_directory_is_not_removed_by_purge_while_a_child_that_was_not_adopted_is_inside(self):
+        self.existing_host()
+        os.chmod(self.path("/srv/kagari/logs"), 0o755)  # not what KAGARI makes: not adopted
+        self.host.install(adopt=True)
+        self.assertNotIn("dir:/srv/kagari/logs", self.host.load())
+        self.assertIn("dir:/srv/kagari", self.host.load())  # the parent is adopted
+        with open(self.path("/srv/kagari/logs/precious.log"), "w") as handle:
+            handle.write("a person's log")
+        self.lines.clear()
+        self.host.uninstall(purge=True)
+        self.assertTrue(os.path.exists(self.path("/srv/kagari/logs/precious.log")))  # still there
+        self.assertTrue(os.path.isdir(self.path("/srv/kagari")))
+        self.assertTrue(any("/srv/kagari contains" in line and "not removed" in line for line in self.lines))
+        self.assertIn("dir:/srv/kagari", self.host.load())  # the parent stays recorded
+
+    def test_adopting_a_checkout_pins_its_real_revision_and_repair_restores_that(self):
+        self.existing_host()
+        self.host = host.Host(self.root, run=self.sys, out=self.lines.append)  # a new process: it made nothing
+        self.host.install(adopt=True)
+        self.assertEqual(json.loads(self.read(host.RECEIPT))["kumiki_ref"], "abc123")  # not "main"
+        import shutil
+        shutil.rmtree(self.path(host.CHECKOUT))
+        self.host = host.Host(self.root, run=self.sys, out=self.lines.append)
+        self.assertEqual(self.host.repair(), 0)
+        revisions = [c[-1] for c in self.sys.calls if c[:2] == ["git", "-C"] and "--detach" in c]
+        self.assertEqual(revisions[-1], "abc123")
+
     def test_adopt_dry_run_records_nothing(self):
         self.existing_host()
         self.lines.clear()
