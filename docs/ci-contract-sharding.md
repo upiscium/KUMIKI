@@ -1,6 +1,6 @@
 # CI contract suite sharding (#239)
 
-This document describes an **unpublished candidate implementation** for the independent
+This document describes the eight-shard implementation (#239), published as Draft PR #247, for the independent
 CI latency issue. It does not change the frozen #198 publication or authorize source
 publication, branch-protection changes, merge, runtime activation, or real cleanup.
 
@@ -30,7 +30,9 @@ publication, branch-protection changes, merge, runtime activation, or real clean
   shards 4–7, at individual test-ID boundaries, whenever present.
 - The longest #238 integration-style single test took approximately 645s;
   no sharding scheme can make CI faster than its slowest required test.
-  The aspirational end-to-end 10-minute target is not yet demonstrated.
+  The aspirational end-to-end 10-minute target was met only for the exact 1389-test
+  scope of the #239 run (about 5m27s, CI run 37955591747). The #196 addition is not
+  included in that run, so no 10-minute bound is claimed for the combined scope.
 
 ## Execution model
 
@@ -61,7 +63,10 @@ present (current `main`), all eight shards share the other modules.
 Each shard discovers the **entire suite**, checks exhaustive assignment, executes
 its selected cases, and emits a machine-readable report with the complete
 inventory fingerprint, exact selected IDs, pass/fail/skip evidence, and per-test
-and wall-clock timing. Downloaded receipts use an exact closed JSON schema:\n8 MiB maximum size, no duplicate keys or non-finite numbers, exact integer\ncounters, and no missing/extra fields. All violations fail closed.\nThe known eight environment-gated skips (six due to absent
+and wall-clock timing. Downloaded receipts use an exact closed JSON schema:
+8 MiB maximum size, no duplicate keys or non-finite numbers, exact integer
+counters, and no missing/extra fields. All violations fail closed.
+The known eight environment-gated skips (six due to absent
 `just` and two due to absent `opencode`) are explicit; newly skipped IDs
 fail the test-run gate rather than silently reducing coverage.
 
