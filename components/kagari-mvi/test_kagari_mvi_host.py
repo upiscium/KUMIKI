@@ -202,6 +202,43 @@ class HostTest(HostBase):
         self.assertTrue(any(line.startswith("modified") and host.SUDOERS in line for line in self.lines))
         self.assertTrue(any("expired" in line for line in self.lines))
 
+    def login_lines(self, **dates):
+        path = self.path("/home/%s/.claude/.credentials.json" % host.AGENT)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as handle:
+            json.dump({"claudeAiOauth": {k: (time.time() + d * 86400) * 1000 for k, d in dates.items()}}, handle)
+        self.lines.clear()
+        self.host.status()
+        return [line for line in self.lines if "Claude login" in line]
+
+    def test_login_is_judged_by_the_refresh_token_expiry(self):
+        got = self.login_lines(expiresAt=-0.2, refreshTokenExpiresAt=15)
+        self.assertEqual(len(got), 1)
+        self.assertIn("valid until", got[0])
+        self.assertNotIn("expired", got[0])
+        self.assertRegex(got[0], r"\d{4}-\d\d-\d\d \d\d:\d\d UTC")
+
+    def test_login_near_expiry_warns(self):
+        got = self.login_lines(expiresAt=1, refreshTokenExpiresAt=3.5)
+        self.assertTrue(got and "warning" in got[0] and "expires in 3 days" in got[0])
+
+    def test_login_past_refresh_expiry_is_expired(self):
+        got = self.login_lines(expiresAt=1, refreshTokenExpiresAt=-1)
+        self.assertTrue(got and "expired" in got[0])
+
+    def test_login_without_refresh_expiry_uses_the_access_expiry(self):
+        self.assertIn("expired", self.login_lines(expiresAt=-1)[0])
+        self.assertIn("valid until", self.login_lines(expiresAt=20)[0])
+
+    def test_broken_credentials_file_is_not_set(self):
+        path = self.path("/home/%s/.claude/.credentials.json" % host.AGENT)
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as handle:
+            handle.write("{broken")
+        self.lines.clear()
+        self.host.status()
+        self.assertTrue(any("Claude login" in line and "not set" in line for line in self.lines))
+
     def test_a_failure_halfway_keeps_the_receipt_of_what_was_created(self):
         self.sys.fail_on = ("useradd", host.AGENT)
         with self.assertRaises(CommandError):
