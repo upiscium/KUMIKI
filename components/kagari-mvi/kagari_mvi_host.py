@@ -70,14 +70,27 @@ class Host:
         """What the item is now (None = absent); the receipt stores the same string."""
         kind, target = item.split(":", 1)
         if kind in ("user", "group"):
-            return "present" if self.ok(["getent", "passwd" if kind == "user" else "group", target]) else None
+            try:
+                line = self.run(["getent", "passwd" if kind == "user" else "group", target]).strip()
+            except CommandError:
+                return None
+            fields = line.split(":")  # passwd: name:x:uid:gid:..., group: name:x:gid:members
+            if kind == "user" and len(fields) >= 4:
+                return "uid %s gid %s" % (fields[2], fields[3])
+            return "gid %s" % fields[2] if kind == "group" and len(fields) >= 3 else "present"
         path = self.p(target)
         if kind == "dir":
             return "mode %o" % (os.stat(path).st_mode & 0o7777) if os.path.isdir(path) else None
         if kind == "checkout":
             if not os.path.isdir(os.path.join(path, ".git")):
                 return None
-            return "rev " + self.run(["git", "-C", path, "rev-parse", "HEAD"]).strip()
+            try:
+                rev = "rev " + self.run(["git", "-C", path, "rev-parse", "HEAD"]).strip()
+                dirty = bool(self.run(["git", "-C", path, "status", "--porcelain"]).strip())
+            except CommandError:  # e.g. `dubious ownership`: never read as clean, so never removed
+                return "unreadable (git failed)"
+            # An uncommitted edit or an untracked file is a change by hand: not "unchanged".
+            return rev + " dirty" if dirty else rev
         if not os.path.isfile(path):
             return None
         with open(path, "rb") as handle:
@@ -106,6 +119,8 @@ class Host:
             self.run(["useradd", "--create-home", "--shell", "/bin/bash", "--groups", GROUP, target])
         elif kind == "dir":
             path, existed = self.p(target), os.path.isdir(self.p(target))
+            if os.path.islink(path):
+                raise ValueError("%s is a symbolic link: not followed; remove or adopt it by hand" % path)
             os.makedirs(path, exist_ok=True)
             done = False
             try:
@@ -116,11 +131,13 @@ class Host:
                 if not done and not existed:  # half made, and made by this call: the next install makes it whole
                     try:
                         os.rmdir(path)
-                    except OSError:
-                        pass  # keep the original error
+                    except Exception:  # noqa: BLE001 - keep the original error
+                        pass
         elif kind == "checkout":
             path = self.p(target)
-            if os.path.lexists(path) and (not os.path.isdir(path) or os.listdir(path)):
+            if os.path.islink(path):
+                raise ValueError("%s is a symbolic link: not followed; remove or adopt it by hand" % path)
+            if self.conflict(target):
                 # Never delete what this call did not make: a directory that is already there stays.
                 raise ValueError("%s exists and is not an empty directory (no .git): remove or adopt it by hand" % path)
             existed = os.path.isdir(path)
@@ -132,16 +149,35 @@ class Host:
                 done = True
             finally:
                 if not done:  # a wrong revision must not stay behind
-                    shutil.rmtree(path, ignore_errors=True)
-                    if existed:
-                        os.makedirs(path, exist_ok=True)  # it was an empty directory before: leave it so
-                    if os.path.exists(path) and os.listdir(path):
-                        self.out("diagnostic: could not remove the half-made checkout %s" % path)
+                    try:
+                        self.clean_up_checkout(path, existed)
+                    except Exception as error:  # noqa: BLE001 - never hide the original error
+                        self.out("diagnostic: could not remove the half-made checkout %s: %s" % (path, error))
         else:
             self.write_file(target, 0o440 if kind == "sudoers" else 0o644)
 
+    def conflict(self, target: str) -> bool:
+        """True when something that is not an empty directory is where the checkout goes."""
+        path = self.p(target)
+        return os.path.lexists(path) and (os.path.islink(path) or not os.path.isdir(path) or bool(os.listdir(path)))
+
+    def clean_up_checkout(self, path: str, existed: bool) -> None:
+        if not existed:
+            shutil.rmtree(path, ignore_errors=True)
+        else:  # an empty directory before: keep the directory itself (owner, mode, mount), empty it
+            for name in os.listdir(path):
+                entry = os.path.join(path, name)
+                if os.path.islink(entry) or not os.path.isdir(entry):
+                    os.remove(entry)  # rmtree does nothing to a regular file
+                else:
+                    shutil.rmtree(entry, ignore_errors=True)
+        if os.path.exists(path) and os.listdir(path):
+            self.out("diagnostic: could not remove the half-made checkout %s" % path)
+
     def remove(self, item: str, purge: bool) -> None:
         kind, target = item.split(":", 1)
+        if kind in ("dir", "checkout") and os.path.islink(self.p(target)):
+            raise ValueError("%s is a symbolic link: not removed" % self.p(target))
         if kind == "user":
             self.run(["userdel", "--remove", target])
         elif kind == "group":
@@ -191,7 +227,11 @@ class Host:
         enable = self.timer_to_enable(plan)
         self.out("plan:" if plan or enable else "plan: nothing to do")
         for item in plan:
-            self.out("  create %s" % item)
+            if item.startswith("checkout:") and self.conflict(item.split(":", 1)[1]):
+                self.out("  conflict %s: exists and is not an empty directory (install stops here; "
+                         "remove or adopt it by hand)" % item)
+            else:
+                self.out("  create %s" % item)
         if enable:
             self.out("  enable kagari-mvi.timer")
         if dry_run:
@@ -211,12 +251,25 @@ class Host:
         now = self.fingerprint(item)
         if item not in receipt:
             return "absent" if now is None else "unrecorded"
-        return "missing" if now is None else ("ok" if now == receipt[item] else "modified")
+        if now is None:
+            return "missing"
+        if now.startswith("unreadable"):  # never "ok", even if the receipt holds the same words
+            return "unreadable"
+        legacy = receipt[item] == "present" and item.split(":", 1)[0] in ("user", "group")  # before #508
+        return "ok" if now == receipt[item] or legacy else "modified"
 
     def credentials(self) -> List[str]:
         found = []
-        if not self.ok(["sudo", "-n", "-u", RUNNER, "-H", "gh", "auth", "status"]):
+        if not self.ok(["gh", "--version"]):
+            found.append("gh command: not found (install it by hand; not installed)")
+        elif not self.ok(["sudo", "-n", "-u", RUNNER, "-H", "gh", "auth", "status"]):
             found.append("GitHub credential for %s: not set (log in by hand; not installed)" % RUNNER)
+        try:
+            helped = self.run(["sudo", "-n", "-u", AGENT, "-H", "--", "sh", "-lc", "claude --help"], timeout=60)
+            if "--restricted" not in helped:
+                found.append("Claude Code for %s: no --restricted option (update it by hand; not updated)" % AGENT)
+        except CommandError:
+            found.append("Claude Code for %s: cannot run `claude --help` (install it by hand; not installed)" % AGENT)
         path = self.p("/home/%s/.claude/.credentials.json" % AGENT)
         try:
             with open(path, encoding="utf-8") as handle:
@@ -239,14 +292,21 @@ class Host:
         receipt = self.load()
         if purge:
             self.out("--purge: the users' home directories go too, so the Claude login of %s is deleted" % AGENT)
+        done = False
         try:
             for item in reversed(IDS):
                 kind, state = item.split(":", 1)[0], self.state(item, receipt)
-                if state == "unrecorded":
+                if kind in ("dir", "checkout") and state != "missing" and os.path.islink(self.p(item.split(":", 1)[1])):
+                    self.out("diagnostic: %s is a symbolic link; left as is" % item)
+                elif state == "unrecorded":
                     self.out("diagnostic: %s is not in the receipt; left as is" % item)
+                elif state == "unreadable":
+                    self.out("diagnostic: %s could not be read (git failed); left as is" % item)
                 elif state == "modified":
                     self.out("diagnostic: %s was changed after install; left as is" % item)
                 elif state == "missing":
+                    if item == "unit:" + TIMER:  # the file was removed by hand: the timer may still run
+                        self.ok(["systemctl", "disable", "--now", "kagari-mvi.timer"])
                     self.out("already gone: %s" % item)
                     del receipt[item]
                 elif state == "ok" and kind in KEPT_KINDS and not purge:
@@ -255,6 +315,12 @@ class Host:
                     self.remove(item, purge)
                     del receipt[item]
                     self.out("removed: %s" % item)
+            done = True
         finally:
-            self.save(receipt)  # also after a failure: what is gone must not stay in the receipt
+            try:
+                self.save(receipt)  # also after a failure: what is gone must not stay in the receipt
+            except Exception as error:  # noqa: BLE001
+                if done:
+                    raise
+                self.out("diagnostic: could not save the receipt: %s" % error)  # keep the original error
         return 0
