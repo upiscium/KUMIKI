@@ -369,9 +369,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         ("repair", "restore what is missing without uninstall; diagnose what was changed"),
         ("reinstall", "uninstall (keeps logs, work, logins) then install; --kumiki-ref re-pins the checkout"))]
     host[0].add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
-    host[0].add_argument("--kumiki-ref", default="main", help="KUMIKI revision to pin")
+    host[0].add_argument("--kumiki-ref", help="KUMIKI revision to pin (default: the one in the receipt, else main)")
     host[0].add_argument("--adopt", action="store_true", help="record existing things that match into the receipt")
-    host[4].add_argument("--kumiki-ref", default="main", help="KUMIKI revision to pin")
+    host[4].add_argument("--kumiki-ref", help="KUMIKI revision to pin (default: the one in the receipt, else main)")
     host[2].add_argument("--purge", action="store_true", help="also remove users, group and /srv/kagari")
     return parser.parse_args(argv)
 
@@ -380,7 +380,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
         if args.command in ("install", "status", "uninstall", "repair", "reinstall"):
-            host = Host(kumiki_ref=getattr(args, "kumiki_ref", "main"))
+            host = Host(kumiki_ref=getattr(args, "kumiki_ref", None))
             return {"install": lambda: host.install(args.dry_run, args.adopt), "status": host.status,
                     "uninstall": lambda: host.uninstall(args.purge), "repair": host.repair,
                     "reinstall": host.reinstall}[args.command]()

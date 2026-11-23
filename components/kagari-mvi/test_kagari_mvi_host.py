@@ -22,6 +22,7 @@ class FakeSystem:
         self.uids, self.dirty, self.no_gh = {}, "", False
         self.claude_help = "Usage: claude [--restricted]"
         self.claude_calls, self.git_fails = [], False
+        self.owners, self.remote, self.service_state = {}, host.KUMIKI_URL, "inactive"
 
     def __call__(self, args, cwd=None, input=None, timeout=None):
         args = list(args)
@@ -42,6 +43,12 @@ class FakeSystem:
             if not self.gh_ok:
                 raise CommandError(args, 1, "not logged in")
             return ""
+        if name == "stat":  # owner:group of a path, as chown left it
+            return self.owners.get(last, "root:root") + "\n"
+        if name == "git" and "get-url" in args:
+            return self.remote + "\n"
+        if name == "systemctl" and args[1] == "show":
+            return self.service_state + "\n"
         if name == "git" and self.git_fails and ("rev-parse" in args or "status" in args):
             raise CommandError(args, 128, "fatal: detected dubious ownership")
         if name == "git" and "rev-parse" in args:
@@ -59,6 +66,7 @@ class FakeSystem:
         self.calls.append(args)
         if name == "chown":  # a chown may clear setgid: only a chmod after it keeps the mode
             os.chmod(last, os.stat(last).st_mode & 0o777)
+            self.owners[last] = args[-2]
         if name == "systemctl" and args[1] == "enable":
             self.enabled = True
         elif name == "systemctl" and args[1] == "disable":

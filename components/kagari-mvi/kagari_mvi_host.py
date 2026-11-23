@@ -48,12 +48,15 @@ def unit_texts() -> Dict[str, str]:
 
 class Host:
     def __init__(self, root: str = "/", run: Runner = subprocess_runner, out: Callable[[str], None] = print,
-                 kumiki_url: str = KUMIKI_URL, kumiki_ref: str = "main",
+                 kumiki_url: str = KUMIKI_URL, kumiki_ref: Optional[str] = None,
                  now: Callable[[], float] = time.time) -> None:
-        if kumiki_ref.startswith("-"):
+        if kumiki_ref and kumiki_ref.startswith("-"):
             raise ValueError("the KUMIKI revision must not start with `-`: %s" % kumiki_ref)
         self.root, self.run, self.out = root, run, out
-        self.kumiki_url, self.kumiki_ref, self.now = kumiki_url, kumiki_ref, now
+        self.kumiki_url, self.now = kumiki_url, now
+        self.recorded_ref = self.load_ref()
+        self.kumiki_ref = kumiki_ref or self.recorded_ref or "main"  # repair / reinstall keep the pin unless told
+        self.made_checkout = False  # the receipt's pin changes only when a checkout is made here
         self.texts = unit_texts()
 
     def p(self, path: str) -> str:
@@ -147,6 +150,7 @@ class Host:
                 self.run(["git", "clone", "--", self.kumiki_url, path])
                 self.run(["git", "-C", path, "checkout", "--detach", self.kumiki_ref])
                 done = True
+                self.made_checkout = True
             finally:
                 if not done:  # a wrong revision must not stay behind
                     try:
@@ -191,6 +195,14 @@ class Host:
             if kind == "unit" and target == SERVICE:
                 self.run(["systemctl", "daemon-reload"])
 
+    def load_ref(self) -> Optional[str]:
+        try:
+            with open(self.p(RECEIPT), encoding="utf-8") as handle:
+                ref = json.load(handle).get("kumiki_ref")
+            return ref if isinstance(ref, str) and ref and not ref.startswith("-") else None
+        except (OSError, ValueError, AttributeError):
+            return None
+
     def load(self) -> Dict[str, str]:
         try:
             with open(self.p(RECEIPT), encoding="utf-8") as handle:
@@ -206,7 +218,8 @@ class Host:
             return
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"items": items, "kumiki_ref": self.kumiki_ref, "updated": int(self.now())},
+            pinned = self.kumiki_ref if self.made_checkout or not self.recorded_ref else self.recorded_ref
+            json.dump({"items": items, "kumiki_ref": pinned, "updated": int(self.now())},
                       handle, indent=2, sort_keys=True)
 
     def plan(self) -> List[str]:
@@ -228,16 +241,32 @@ class Host:
             return "sha256 " + hashlib.sha256(self.texts[target].encode("utf-8")).hexdigest()
         return None
 
+    def owner_of(self, target: str) -> Optional[str]:
+        try:
+            return self.run(["stat", "-c", "%U:%G", self.p(target)]).strip()
+        except CommandError:
+            return None
+
+    def origin_of(self, target: str) -> Optional[str]:
+        try:
+            return self.run(["git", "-C", self.p(target), "remote", "get-url", "origin"]).strip()
+        except CommandError:
+            return None
+
     def matches(self, item: str) -> bool:
-        """True when the existing item is what install would have made (so it may be adopted)."""
+        """True when the existing item is what install would have made (so it may be adopted).
+
+        A user or a group is never adopted: a name cannot show who made it, and once it is in the
+        receipt `uninstall --purge` would run `userdel --remove` on it (and on its home directory)."""
         kind, target = item.split(":", 1)
         now = self.fingerprint(item)
-        if now is None or now.startswith("unreadable") or os.path.islink(self.p(target)):
+        if kind in ("user", "group") or now is None or now.startswith("unreadable") or os.path.islink(self.p(target)):
             return False
-        if kind == "checkout":
-            return not now.endswith(" dirty")  # a clean git checkout; the pinned revision is changed by reinstall
-        want = self.expected(item)
-        return True if want is None else now == want  # user / group: the dedicated name is the identity
+        if kind == "checkout":  # clean, and it is KUMIKI: uninstall removes the whole directory
+            return not now.endswith(" dirty") and self.origin_of(target) == self.kumiki_url
+        if kind == "dir" and self.owner_of(target) != "%s:%s" % (RUNNER, GROUP):
+            return False
+        return now == self.expected(item)
 
     def install(self, dry_run: bool = False, adopt: bool = False) -> int:
         receipt, plan = self.load(), self.plan()
@@ -248,6 +277,9 @@ class Host:
                     if not dry_run:
                         receipt[item] = self.fingerprint(item) or ""
                         self.save(receipt)
+                elif adopt and item.split(":", 1)[0] in ("user", "group"):
+                    self.out("note: %s exists and is never adopted (--purge would delete it and its home); "
+                             "remove it by hand if it is not wanted" % item)
                 elif adopt:
                     self.out("diagnostic: %s differs from what KAGARI makes; not adopted, left as is" % item)
                 else:
@@ -294,6 +326,8 @@ class Host:
             state = self.state(item, receipt)
             if state in ("missing", "absent"):
                 todo.append(item)
+            elif state == "unrecorded" and item.split(":", 1)[0] in ("user", "group"):
+                self.out("note: %s exists and is not in the receipt (users and groups are never adopted)" % item)
             elif state != "ok":
                 stuck += 1
                 why = {"modified": "was changed after install", "unrecorded": "is not in the receipt (try `install --adopt`)",
@@ -312,7 +346,7 @@ class Host:
                     continue
                 receipt[item] = self.fingerprint(item) or ""
                 self.save(receipt)
-            if self.timer_to_enable(todo):
+            if any(item.startswith("unit:") for item in todo):  # not a timer that a person stopped
                 self.run(["systemctl", "daemon-reload"])
                 self.run(["systemctl", "enable", "--now", "kagari-mvi.timer"])
         finally:
@@ -323,8 +357,24 @@ class Host:
 
     def reinstall(self) -> int:
         """`uninstall` (default: logs, work directories and logins are kept) then `install`."""
+        if self.service_busy():
+            self.out("refused: kagari-mvi.service is running; wait for it to finish (or stop it), then reinstall")
+            return 1
         self.uninstall()
-        return self.install()
+        code = self.install()
+        receipt = self.load()
+        left = [item for item in IDS if self.state(item, receipt) != "ok"
+                and not (self.state(item, receipt) == "unrecorded" and item.split(":", 1)[0] in ("user", "group"))]
+        for item in left:
+            self.out("diagnostic: %s is not in order after reinstall (%s): check it by hand" % (item, self.state(item, receipt)))
+        return code or (1 if left else 0)
+
+    def service_busy(self) -> bool:
+        try:
+            state = self.run(["systemctl", "show", "-p", "ActiveState", "--value", "kagari-mvi.service"]).strip()
+        except CommandError:
+            return False
+        return state in ("active", "activating", "deactivating", "reloading")
 
     def credentials(self) -> List[str]:
         found = []
@@ -355,7 +405,7 @@ class Host:
             self.out("%-10s %s" % (state, item))
             if state == "unrecorded":
                 self.out("diagnostic: %s %s" % (item, "matches what KAGARI makes: `install --adopt` records it"
-                                                 if self.matches(item) else "differs from what KAGARI makes: not adoptable"))
+                                                 if self.matches(item) else "differs from what KAGARI makes, or is a user / group: not adoptable"))
         try:
             with open(self.p(TARGETS), encoding="utf-8") as handle:
                 listed = [fields for fields in (line.split() for line in handle) if fields and not fields[0].startswith("#")]
