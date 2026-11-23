@@ -383,7 +383,7 @@ class HostTest(HostBase):
         self.sys.git_fails = True
         self.lines.clear()
         self.assertEqual(self.host.status(), 0)  # no traceback
-        self.assertTrue(any(line.startswith("modified") and host.CHECKOUT in line for line in self.lines))
+        self.assertTrue(any(line.startswith("unreadable") and host.CHECKOUT in line for line in self.lines))
         self.lines.clear()
         self.host.uninstall(purge=True)
         self.assertTrue(os.path.isdir(self.path(host.CHECKOUT)))  # left as is
@@ -397,6 +397,15 @@ class HostTest(HostBase):
         self.assertEqual(args[-3:], ["sh", "-lc", "claude --help"])
         self.assertIn(host.AGENT, args)
         self.assertEqual(timeout, 60)
+
+    def test_a_checkout_whose_state_could_not_be_read_at_install_is_never_removed_later(self):
+        self.sys.git_fails = True  # git fails right after the clone: "unreadable" is what the receipt would hold
+        self.host.install()
+        self.assertEqual(self.host.state("checkout:" + host.CHECKOUT, self.host.load()), "unreadable")
+        self.sys.dirty = " M file"  # even when git works again, and there is an uncommitted edit
+        self.sys.git_fails = False
+        self.host.uninstall(purge=True)
+        self.assertTrue(os.path.isdir(self.path(host.CHECKOUT)))
 
 
 AGENT = host.AGENT

@@ -253,6 +253,8 @@ class Host:
             return "absent" if now is None else "unrecorded"
         if now is None:
             return "missing"
+        if now.startswith("unreadable"):  # never "ok", even if the receipt holds the same words
+            return "unreadable"
         legacy = receipt[item] == "present" and item.split(":", 1)[0] in ("user", "group")  # before #508
         return "ok" if now == receipt[item] or legacy else "modified"
 
@@ -298,6 +300,8 @@ class Host:
                     self.out("diagnostic: %s is a symbolic link; left as is" % item)
                 elif state == "unrecorded":
                     self.out("diagnostic: %s is not in the receipt; left as is" % item)
+                elif state == "unreadable":
+                    self.out("diagnostic: %s could not be read (git failed); left as is" % item)
                 elif state == "modified":
                     self.out("diagnostic: %s was changed after install; left as is" % item)
                 elif state == "missing":
