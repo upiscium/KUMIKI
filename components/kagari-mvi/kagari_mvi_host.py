@@ -393,9 +393,16 @@ class Host:
         path = self.p("/home/%s/.claude/.credentials.json" % AGENT)
         try:
             with open(path, encoding="utf-8") as handle:
-                expires = json.load(handle)["claudeAiOauth"]["expiresAt"] / 1000.0
-            if expires < self.now():
+                oauth = json.load(handle)["claudeAiOauth"]
+            # The login ends with the refresh token; the access token is renewed by itself.
+            expires = float(oauth["refreshTokenExpiresAt"] if "refreshTokenExpiresAt" in oauth else oauth["expiresAt"]) / 1000.0
+            left = expires - self.now()
+            if left < 0:
                 found.append("Claude login for %s: expired (log in again by hand)" % AGENT)
+            elif left < 7 * 86400:
+                found.append("warning: Claude login for %s: expires in %d days (log in again by hand)" % (AGENT, int(left // 86400)))
+            else:
+                found.append("Claude login for %s: valid until %s UTC" % (AGENT, time.strftime("%Y-%m-%d %H:%M", time.gmtime(expires))))
         except (OSError, ValueError, KeyError, TypeError):
             found.append("Claude login for %s: not set (log in by hand; not installed)" % AGENT)
         return found
