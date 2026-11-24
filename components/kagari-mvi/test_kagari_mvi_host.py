@@ -325,19 +325,19 @@ class HostTest(HostBase):
     def test_the_service_calls_the_three_entries_for_every_target_and_keeps_a_failure_visible(self):
         code, calls = self.run_service("a/x alice\nb/y bob", {})  # the last line has no newline
         self.assertEqual(code, 0)
-        self.assertEqual([c.split()[0] for c in calls], ["run-once", "review-once", "cleanup-once"] * 2)
-        self.assertEqual(calls[0], "run-once --repo a/x --workdir /srv/kagari --allow-actor alice")
-        self.assertEqual(calls[4], "review-once --repo b/y --workdir /srv/kagari")
-        for entry in ("run-once", "review-once", "cleanup-once"):  # usage limit (3): not a failure, nothing skipped
+        self.assertEqual([c.split()[0] for c in calls], ["work-once", "cleanup-once"] * 2)
+        self.assertEqual(calls[0], "work-once --repo a/x --workdir /srv/kagari --allow-actor alice")
+        self.assertEqual(calls[3], "cleanup-once --repo b/y --workdir /srv/kagari")
+        for entry in ("work-once", "cleanup-once"):  # usage limit (3): not a failure, nothing skipped
             code, calls = self.run_service("a/x alice\nb/y bob\n", {entry: 3})
-            self.assertEqual((code, len(calls)), (0, 6), entry)
-        for entry in ("run-once", "review-once", "cleanup-once"):  # a failure anywhere fails the service
+            self.assertEqual((code, len(calls)), (0, 4), entry)
+        for entry in ("work-once", "cleanup-once"):  # a failure anywhere fails the service
             code, calls = self.run_service("a/x alice\nb/y bob\n", {entry: 1})
-            self.assertEqual((code, len(calls)), (1, 6), entry)
+            self.assertEqual((code, len(calls)), (1, 4), entry)
 
     def test_the_service_skips_comments_and_blank_lines(self):
         code, calls = self.run_service("# a comment\n\na/x alice\n", {})
-        self.assertEqual((code, len(calls)), (0, 3))
+        self.assertEqual((code, len(calls)), (0, 2))
 
     def test_the_unit_texts_follow_the_readme_example(self):
         texts = host.unit_texts()

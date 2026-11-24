@@ -125,9 +125,9 @@ class TargetsTest(unittest.TestCase):
         with open(log) as handle:
             calls = handle.read().splitlines()
         self.assertEqual([c.split()[0:3] for c in calls],
-                         [[e, "--repo", r] for r in ("a/x", "b/y") for e in ("run-once", "review-once", "cleanup-once")])
+                         [[e, "--repo", r] for r in ("a/x", "b/y") for e in ("work-once", "cleanup-once")])
         self.assertTrue(calls[0].endswith("--allow-actor alice"))
-        self.assertTrue(calls[3].endswith("--allow-actor b"))
+        self.assertTrue(calls[2].endswith("--allow-actor b"))
 
     def test_the_cli_parses_register_and_unregister(self):
         args = mvi.parse_args(["register", "o/r", "--allow-actor", "x"])

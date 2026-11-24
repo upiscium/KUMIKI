@@ -33,11 +33,10 @@ def unit_texts() -> Dict[str, str]:
     # non-zero code is remembered and makes the service fail, so that it stays visible (README).
     loop = ('rc=0; while read -r r a || [ -n "$$r" ]; do case "$$r" in ""|"#"*) continue;; esac; '
             + " ".join('%s %s --repo "$$r" --workdir /srv/kagari%s </dev/null || [ $$? -eq 3 ] || rc=1;' % (cmd, name, extra)
-                       for name, extra in (("run-once", ' --allow-actor "$$a"'),
-                                           ("review-once", ""), ("cleanup-once", "")))
+                       for name, extra in (("work-once", ' --allow-actor "$$a"'), ("cleanup-once", "")))
             + " done < " + TARGETS + "; exit $$rc")
     return {
-        SERVICE: ("[Unit]\nDescription=KAGARI MVI: run-once, review-once, cleanup-once in order\n"
+        SERVICE: ("[Unit]\nDescription=KAGARI MVI: work-once (run-once, review-once, repeated), cleanup-once in order\n"
                   "ConditionPathExists=%s\n\n[Service]\nType=oneshot\nUser=%s\nTimeoutStartSec=3h\n"
                   "ExecStart=/bin/sh -c '%s'\n" % (TARGETS, RUNNER, loop)),
         TIMER: ("[Unit]\nDescription=KAGARI MVI timer\n\n[Timer]\nOnBootSec=5min\n"
