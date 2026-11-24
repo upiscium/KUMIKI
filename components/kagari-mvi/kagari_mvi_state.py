@@ -95,6 +95,8 @@ def ready_decision(outcome: Dict[str, Any], fresh: bool, test_report: str) -> Tu
     why = [reason for failed, reason in (
         (any(status != "PASS" for status, _ in outcome["verdicts"]), "not every criterion is PASS"),
         (outcome["tests"][0] != "PASS", "TESTS is %s" % outcome["tests"][0]),
+        (outcome.get("delegation") is not None and outcome["delegation"][0] != "IN",
+         "DELEGATION is %s" % (outcome.get("delegation") or ("",))[0]),
         (outcome["errored"], "the reviewer session ended with an error"),
         (not fresh or runner_exit_code(test_report) != 0, "no passing runner test of this head"))
         if failed]

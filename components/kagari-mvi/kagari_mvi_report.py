@@ -18,6 +18,9 @@ def review_report(head: str, criteria: List[str], outcome: Dict[str, Any], fresh
     failing = sum(1 for status, _ in verdicts if status != "PASS")
     rows.append("| TESTS | テストの目的（申告）と受入条件の対応 | **%s** | %s |" % (
         outcome["tests"][0], cell(outcome["tests"][1])))
+    if outcome.get("delegation"):
+        rows.append("| DELEGATION | 委任した判断の範囲内か（Issue 本文の宣言） | **%s** | %s |" % (
+            outcome["delegation"][0], cell(outcome["delegation"][1])))
     return ("kagari-mvi: independent review (%s, ADR-0007 D6).\n\n- reviewed head: `%s`\n"
             "- not PASS: %d of %d\n- permission denials: %d\n- reviewer session: %s\n"
             "- runner test result: %s\n\n| # | 受入条件 | 判定 | 根拠 |\n| --- | --- | --- | --- |\n%s\n"
