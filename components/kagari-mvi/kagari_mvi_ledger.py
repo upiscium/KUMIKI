@@ -29,7 +29,33 @@ SCOPES = ("issue", "repo", "host")  # the default is the narrowest
 KINDS = ("bash", "ssh", "edit")
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 MAX_LISTED = 10
+PROTECTED_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md")  # as kagari_mvi_exec.PROTECTED_GLOBS
+GLOB_CHARS = "*?["
 Grant = Dict[str, Any]
+
+
+def protected_path(path: str) -> bool:
+    """A path `permissions.deny` guards (instruction files, `.claude/`, CI workflows): no edit grant allows it."""
+    parts = [p for p in path.split("/") if p]
+    return bool(parts) and (parts[-1] in PROTECTED_NAMES or ".claude" in parts[:-1]
+                            or any(parts[i:i + 2] == [".github", "workflows"] for i in range(len(parts))))
+
+
+def path_matches(path: str, pattern: str) -> bool:
+    """fnmatch per path segment: a `*` never matches across a `/`."""
+    left, right = path.split("/"), pattern.split("/")
+    return len(left) == len(right) and all(fnmatch.fnmatchcase(a, b) for a, b in zip(left, right))
+
+
+def broad_edit_match(match: str) -> bool:
+    """An edit `--match` that is too wide: `/*`, `**`, or a glob with fewer than two fixed directories before it."""
+    parts = match.split("/")
+    fixed = 0
+    for part in parts[1:-1]:
+        if any(c in part for c in GLOB_CHARS):
+            break
+        fixed += 1
+    return "**" in match or (any(c in match for c in GLOB_CHARS) and fixed < 2)
 
 
 def default_path() -> str:
@@ -117,7 +143,7 @@ def matches(grant: Grant, tool: str, tool_input: Dict[str, Any]) -> bool:
         return argv == wanted
     if kind == "edit" and tool in ("Edit", "Write"):
         path = str(tool_input.get("file_path", ""))
-        return bool(path) and ".." not in path.split("/") and fnmatch.fnmatchcase(path, str(match))
+        return bool(path) and ".." not in path.split("/") and path_matches(path, str(match))
     return False
 
 
@@ -126,7 +152,10 @@ def decide(grants: List[Grant], tool: str, tool_input: Dict[str, Any],
     """("allow", grant, why) | ("deny", None, why) | (None, None, ""): the last leaves it to Claude.
 
     A DENIED_COMMANDS operation is denied whatever a grant says: Claude's `permissions.deny` has it too, and
-    whether a hook allow could beat that rule is not yet checked on a real Claude Code (#527)."""
+    whether a hook allow could beat that rule is not yet checked on a real Claude Code (#527). The same goes for an
+    Edit/Write of a protected file (`permissions.deny` guards it): denied whatever a grant says."""
+    if tool in ("Edit", "Write") and protected_path(str(tool_input.get("file_path", ""))):
+        return "deny", None, "this file is protected; a ledger grant cannot allow editing it"
     if tool == "Bash":
         found = shell.command_denied(str(tool_input.get("command", "")))
         if found:
@@ -266,6 +295,8 @@ def add(path: str, kind: str, match: str, scope: str, repo: Optional[str], issue
         raise ValueError("a bash grant must be one plain command (no &&, ;, |, redirects or substitutions)")
     elif kind == "edit" and not match.startswith("/"):
         raise ValueError("an edit grant is an absolute path or glob")
+    elif kind == "edit" and broad_edit_match(match):
+        raise ValueError("an edit --match is too broad (`/*`, `**`, or a glob without two fixed directories)")
     grant: Grant = {"id": secrets.token_hex(4), "kind": kind, "match": value, "scope": scope,
                     "repo": repo if scope != "host" else None, "issue": issue if scope == "issue" else None,
                     "expires": stamp(now + datetime.timedelta(days=days)), "created": stamp(now),
@@ -330,7 +361,8 @@ def add_parsers(sub: Any) -> None:
     one = commands.add_parser("add", help="allow an operation again")
     one.add_argument("--kind", choices=KINDS, default="bash")
     one.add_argument("--match", required=True, help="bash: a command (`ls -l`, trailing `*` = any arguments); "
-                     "ssh: comma-separated hosts; edit: absolute path glob")
+                     "edit: absolute path glob (`*` does not cross `/`; protected files never match); "
+                     "ssh cannot be registered for now (denied command)")
     one.add_argument("--scope", choices=SCOPES, default="issue")
     one.add_argument("--repo", help="OWNER/REPO (scope issue or repo)")
     one.add_argument("--issue", type=int, help="Issue number (scope issue)")

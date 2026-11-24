@@ -12,14 +12,31 @@ import re
 import shlex
 from typing import List, Optional, Tuple
 
-# Denied unless the ledger allows them: a speed bump, not a boundary (python3 -c can still reach the network).
+# Always denied, whatever the ledger says (no grant can allow them for now): a speed bump, not a boundary
+# (python3 -c can still reach the network).
 DENIED_COMMANDS = ("curl", "wget", "gh", "git push", "git remote", "ssh", "scp", "sudo", "su",
                    "nc", "ncat", "socat", "telnet")
 OPERATORS = set("();<>|&")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-KEYWORDS = {"time", "if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "exec", "command",
-            "builtin"}
-WRAPPERS = {"env", "nohup", "xargs", "nice", "timeout", "stdbuf", "setsid", "ionice", "chronic", "watch"}
+KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "builtin"}
+# Wrapper -> (short options with a value, short flags, long options with a value, long flags). An option not
+# listed makes the whole rest of the words be scanned for a denied command (the safe side).
+WRAPPERS = {
+    "command": ("", "pvV", (), ()), "time": ("fo", "pvalV", ("--format", "--output"), ("--portability", "--verbose",
+                                                                                         "--append", "--quiet")),
+    "exec": ("a", "cl", (), ()), "nohup": ("", "", (), ()), "setsid": ("", "cfw", (), ("--fork", "--wait", "--ctty")),
+    "env": ("uCS", "i0v", ("--unset", "--chdir", "--split-string"), ("--ignore-environment", "--null", "--debug")),
+    "timeout": ("sk", "vf", ("--signal", "--kill-after"), ("--foreground", "--preserve-status", "--verbose")),
+    "stdbuf": ("ioe", "", ("--input", "--output", "--error"), ()),
+    "xargs": ("INPLdsEa", "0rtpxoiel", ("--max-args", "--max-procs", "--delimiter", "--max-lines", "--arg-file"),
+              ("--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit")),
+    "nice": ("n", "", ("--adjustment",), ()), "ionice": ("cnp", "t", (), ()), "chronic": ("", "ev", (), ()),
+    "watch": ("ndw", "bcdeghpqtxv", (), ()),
+}
+FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
+HEREDOC = re.compile(r"(?<!<)<<-?[ \t]*(?:'([^']*)'|\"([^\"]*)\"|\\?([A-Za-z0-9_]+))")
+COMMENT = re.compile(r"(^|(?<=\s))#.*$", re.M)
+DOLLAR, TICK = "\ue000", "\ue001"  # `$` and a backtick inside single quotes: they run nothing
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 GIT_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 # ssh options that run a program, or hop through another one: never allowed automatically.
@@ -63,25 +80,52 @@ def segments(command: str) -> List[List[str]]:
     return [part for part in parts if part]
 
 
-def skip_prefix(words: List[str]) -> List[str]:
-    """The command proper: after VAR=x, keywords and wrappers (env, time, xargs, ...) and their options."""
+def option_end(wrapper: str, words: List[str]) -> Optional[int]:
+    """How many words the option words[0] of a wrapper takes (with its value); None if it is not known."""
+    short_value, short_flag, long_value, long_flag = WRAPPERS[wrapper]
+    word = words[0]
+    if word.startswith("--"):
+        name = word.split("=")[0]
+        if "=" in word and (name in long_value or name in long_flag):
+            return 1
+        return 2 if name in long_value and len(words) > 1 else (1 if name in long_flag else None)
+    for j, letter in enumerate(word[1:], 1):
+        if letter in short_value:
+            return 1 if word[j + 1:] else min(2, len(words))
+        if letter not in short_flag:
+            return None
+    return 1
+
+
+def skip_prefix(words: List[str]) -> Tuple[List[str], bool]:
+    """The command proper: after VAR=x, keywords and wrappers and their options (with their values).
+    The flag is True when a wrapper option was not understood: the caller then scans every word."""
     while words:
         head = os.path.basename(words[0])
         if ASSIGNMENT.match(words[0]) or head in KEYWORDS:
             words = words[1:]
         elif head in WRAPPERS:
             words = words[1:]
-            while words and (words[0].startswith("-") or ASSIGNMENT.match(words[0])
-                             or re.fullmatch(r"\d+[smhd]?|\{\}", words[0])):
-                words = words[1:]
+            while words and (words[0].startswith("-") and words[0] != "-" or ASSIGNMENT.match(words[0])
+                             or re.fullmatch(r"\d+(\.\d+)?[smhd]?|\{\}", words[0])):
+                if words[0] == "--":
+                    words = words[1:]
+                    break
+                step = option_end(head, words) if words[0].startswith("-") else 1
+                if step is None:
+                    return words, True
+                words = words[step:]
         else:
             break
-    return words
+    return words, False
 
 
 def denied_name(words: List[str], depth: int = 0) -> Optional[str]:
     """The DENIED_COMMANDS entry that these words (after wrappers and git options) start with."""
-    words = skip_prefix(words)
+    words, unsure = skip_prefix(words)
+    if unsure:
+        firsts = {name.split()[0] for name in DENIED_COMMANDS}
+        return next((os.path.basename(w) for w in words if os.path.basename(w) in firsts), None)
     if not words:
         return None
     head = os.path.basename(words[0])
@@ -95,7 +139,13 @@ def denied_name(words: List[str], depth: int = 0) -> Optional[str]:
             flags = [i for i, w in enumerate(rest) if w.startswith("-") and not w.startswith("--") and "c" in w]
             script = rest[flags[0] + 1:flags[0] + 2] if flags else None
         if script:
-            return command_denied(" ".join(script), depth + 1)
+            return command_denied(" ".join(script).replace(DOLLAR, "$").replace(TICK, "`"), depth + 1)
+    if head == "find":
+        for i, word in enumerate(rest):
+            if word in FIND_EXEC:
+                hit = denied_name(rest[i + 1:], depth + 1)
+                if hit:
+                    return hit
     found = None
     named = [head] + rest
     for name in DENIED_COMMANDS:
@@ -113,15 +163,58 @@ def denied_name(words: List[str], depth: int = 0) -> Optional[str]:
     return None
 
 
+def strip_heredocs(command: str) -> str:
+    """The command without the bodies of here-documents (`<<EOF`, `<<'EOF'`, `<<-EOF`)."""
+    kept, waiting = [], []
+    for line in command.split("\n"):
+        if waiting:
+            if line.strip("\t" if waiting[0][1] else "") == waiting[0][0]:
+                waiting.pop(0)
+            continue
+        kept.append(line)
+        waiting = [(m.group(1) or m.group(2) or m.group(3), m.group(0).startswith("<<-"))
+                   for m in HEREDOC.finditer(line)]
+    return "\n".join(kept)
+
+
+def mask_single_quotes(command: str) -> str:
+    """Hide `$` and backticks inside single quotes (not run by bash); comments are left alone."""
+    out, quote, i = [], "", 0
+    while i < len(command):
+        char = command[i]
+        if not quote and char == "#" and (i == 0 or command[i - 1] in " \t\n"):
+            end = command.find("\n", i)
+            end = len(command) if end < 0 else end
+            out.append(command[i:end])
+            i = end
+            continue
+        if char == "\\" and quote != "'" and i + 1 < len(command):
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if quote == "'":
+            char = DOLLAR if char == "$" else TICK if char == "`" else char
+        if char in "'\"" and quote in ("", char):
+            quote = "" if quote else char
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
 def command_denied(command: str, depth: int = 0) -> Optional[str]:
     """The DENIED_COMMANDS entry a command runs, also behind wrappers, `bash -c` and `$(...)`.
     What cannot be parsed counts as denied."""
     if depth > 5:
         return "unparsable"
+    command = mask_single_quotes(strip_heredocs(command))
     try:
         parts = segments(command)
-    except ValueError:
-        return "unparsable"
+    except ValueError:  # an unclosed quote: it may sit in a comment (`# it's`), so read it again without them
+        command = COMMENT.sub("", command)
+        try:
+            parts = segments(command)
+        except ValueError:
+            return "unparsable"
     try:  # an unquoted backtick starts a command: read it as a separator too
         parts += segments(command.replace("`", " ; "))
     except ValueError:

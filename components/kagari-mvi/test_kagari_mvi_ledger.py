@@ -250,6 +250,47 @@ class DeniedCommandsTest(unittest.TestCase):
         led.require_runner_user(1001, "kagari-runner")
 
 
+class WrapperAndQuoteTest(unittest.TestCase):  # #530
+    def test_wrapper_option_values_are_skipped(self):  # AC1
+        for command in ("command -p curl x", "time -p curl x", "exec -a n curl x", "env -u FOO curl x",
+                        "timeout -s KILL 5 curl x", "stdbuf -o L curl x", "xargs -I X curl X",
+                        "find . -exec curl {} \\;", "env --unknown-option curl x"):
+            with self.subTest(command=command):
+                self.assertEqual(sh.command_denied(command), "curl")
+
+    def test_heredoc_body_and_comments(self):  # AC2, AC3
+        self.assertIsNone(sh.command_denied("cat > f <<'EOF'\ndon't\ncurl x\nEOF"))
+        self.assertIsNone(sh.command_denied("cat <<-EOF\n\tgh pr\n\tEOF\nls"))
+        self.assertEqual(sh.command_denied("cat <<EOF\nx\nEOF\ncurl y"), "curl")
+        self.assertIsNone(sh.command_denied("ls  # it's"))
+        self.assertEqual(sh.command_denied("ls 'unclosed"), "unparsable")
+
+    def test_single_quoted_substitution_does_not_run(self):  # AC4
+        self.assertIsNone(sh.command_denied("echo '$(curl x)'"))
+        self.assertEqual(sh.command_denied('echo "$(curl x)"'), "curl")
+        self.assertEqual(sh.command_denied("echo $(curl x)"), "curl")
+        self.assertEqual(sh.command_denied("bash -c 'echo $(curl x)'"), "curl")
+
+    def test_protected_edit_and_broad_match(self):  # AC5
+        grants = [grant(kind="edit", match="/srv/x/*")]
+        self.assertEqual(led.decide(grants, "Edit", {"file_path": "/srv/x/a.txt"}, NOW)[0], "allow")
+        for path in ("/srv/x/CLAUDE.md", "/srv/x/.claude/settings.json", "/srv/x/.github/workflows/a.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(led.decide(grants, "Write", {"file_path": path}, NOW)[0], "deny")
+        with tempfile.TemporaryDirectory() as tmp:
+            for match in ("/*", "/**", "/srv/*", "/srv/**/a"):
+                with self.subTest(match=match), self.assertRaises(ValueError):
+                    led.add(os.path.join(tmp, "l.json"), "edit", match, "host", None, None, 1, "x")
+            led.add(os.path.join(tmp, "l.json"), "edit", "/srv/x/*.txt", "host", None, None, 1, "x")
+
+    def test_existing_decisions_are_unchanged(self):  # AC6
+        for command in ("FOO=1 curl x", "env curl x", "bash -c 'curl x'", "ls a#b && curl evil"):
+            self.assertEqual(sh.command_denied(command), "curl")
+        self.assertEqual(sh.command_denied("git -C . push"), "git push")
+        for command in ("git pushd", "grep -r curl ."):
+            self.assertIsNone(sh.command_denied(command))
+
+
 class CliTest(unittest.TestCase):
     def run_cli(self, path, *argv):
         parser = argparse.ArgumentParser()
