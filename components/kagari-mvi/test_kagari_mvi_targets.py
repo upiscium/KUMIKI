@@ -35,6 +35,20 @@ class TargetsTest(unittest.TestCase):
             return inner(args, **kw)
         self.run = run
 
+    def test_entry_splits_at_spaces_and_tabs_only(self):
+        for odd in ("\x0b", "\x1c", " ", "\x0c", "\x85"):
+            with self.subTest(char=repr(odd)):
+                self.assertEqual(targets.entry("o/r%sx a" % odd), ["o/r%sx" % odd, "a"])
+                self.assertEqual(targets.entry("o/r a%sb" % odd), ["o/r", "a%sb" % odd])
+        self.assertEqual(targets.entry("o/r alice"), ["o/r", "alice"])
+        self.assertEqual(targets.entry(" \to/r \t alice\t "), ["o/r", "alice"])
+        self.assertEqual(targets.entry("o/r"), ["o/r"])
+
+    def test_entry_skips_comments_and_blank_lines(self):
+        for line in ("", "   ", "\t", "# note", "  #o/r a", "#"):
+            with self.subTest(line=line):
+                self.assertIsNone(targets.entry(line))
+
     def register(self, repo="o/r", actors=None):
         return targets.register(repo, actors, root=self.root, run=self.run, out=self.lines.append,
                                 ensure_labels=lambda: mvi.Worker(repo, run=self.run).ensure_labels())
