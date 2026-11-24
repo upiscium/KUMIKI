@@ -21,6 +21,7 @@ from kagari_mvi_exec import SAFE_GIT, AgentSteps, Blocked, CommandError, Runner,
 from kagari_mvi_host import RUNNER, Host
 from kagari_mvi_issue import (acceptance_criteria, allowed_protected, delegation, missing_placement,
                               test_command)
+from kagari_mvi_batch import work_once
 from kagari_mvi_limit import LimitSteps
 from kagari_mvi_parse import tail
 from kagari_mvi_report import report, review_report
@@ -54,6 +55,8 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
         self.agent_config_dir, self.reviewer = agent_config_dir, reviewer
         self.ledger_path = ledger_path  # None: kagari-runner's ~/.local/state/kagari-mvi/ledger.json (#430)
         self.denied: List[Dict[str, Any]] = []  # operations this run's agent was refused
+        self.selected: Optional[int] = None  # the Issue run_once took last (None: none)
+        self.implemented: Optional[int] = None  # the Issue run_once last made `implemented` (#535)
 
     # --- GitHub REST via `gh api` -------------------------------------------
     def api(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Any:
@@ -129,8 +132,12 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
         return self.api_pages(self.repo_path(
             "/issues?state=open&labels=%s&sort=created&direction=asc" % quote_path(label)))
 
-    def review_once(self, workdir: str) -> int:
-        issue = oldest([i for i in self.list_open_labeled(IMPLEMENTED) if is_review_candidate(i)])
+    def review_once(self, workdir: str, also: Optional[int] = None) -> int:
+        """`also`: an Issue number to read directly (GET), since the label search lags (#535)."""
+        found = self.list_open_labeled(IMPLEMENTED)
+        if also is not None and all(i["number"] != also for i in found):
+            found = found + [self.api("GET", self.repo_path("/issues/%d" % also))]
+        issue = oldest([i for i in found if is_review_candidate(i)])
         if issue is None:
             self.log("no implemented Issue to review")
             return 0
@@ -210,11 +217,13 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
         return self.list_open_labeled(APPROVED)
 
     def run_once(self, allowed: Sequence[str], workdir: str) -> int:
+        self.selected = self.implemented = None
         issue = select_issue(self.list_open_approved())
         if issue is None:
             self.log("no approved Issue to process")
             return 0
         number = issue["number"]
+        self.selected = number
         self.log("selected #%d" % number)
 
         events = self.api_pages(self.repo_path("/issues/%d/timeline" % number))
@@ -286,6 +295,7 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
         except Exception as error:  # noqa: BLE001 - every failure must end as blocked
             self.block_after_failure(number, stage, error)
             return 1
+        self.implemented = number
         self.log("#%d implemented: %s" % (number, pr.get("html_url", pr["number"])))
         return 0
 
@@ -362,10 +372,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     once = sub.add_parser("run-once", help="process at most one approved Issue")
     once.add_argument("--allow-actor", action="append", required=True,
                       help="login allowed to add kagari:approved (repeat or comma-separate)")
+    work = sub.add_parser("work-once", help="run-once then review-once, repeated while approved Issues remain")
+    work.add_argument("--allow-actor", action="append", required=True,
+                      help="login allowed to add kagari:approved (repeat or comma-separate)")
+    work.add_argument("--reviewer", choices=("claude", "tsumgi"), default="claude")
+    work.add_argument("--max-issues", type=int, default=3, help="most Issues per call (default 3)")
     review = sub.add_parser("review-once", help="review at most one implemented Issue's PR")
     review.add_argument("--reviewer", choices=("claude", "tsumgi"), default="claude")
     cleanup = sub.add_parser("cleanup-once", help="delete branches and directories of merged PRs")
-    for command in (once, review, cleanup):
+    for command in (once, work, review, cleanup):
         command.add_argument("--repo", required=True, help="OWNER/REPO")
         command.add_argument("--workdir", required=True, help="directory for clones and worktrees")
         command.add_argument("--agent-user", default="kagari-agent",
@@ -425,6 +440,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return worker.cleanup_once(os.path.abspath(args.workdir))
         allowed = [name.strip() for value in args.allow_actor for name in value.split(",")
                    if name.strip()]
+        if args.command == "work-once":
+            return work_once(worker, allowed, os.path.abspath(args.workdir), args.max_issues)
         return worker.run_once(allowed, os.path.abspath(args.workdir))
     except CommandError as error:
         print("kagari_mvi: %s\n%s" % (error, tail(error.output)), file=sys.stderr)

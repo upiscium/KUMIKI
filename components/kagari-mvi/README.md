@@ -202,6 +202,8 @@ just mvi::run-once OWNER/REPO        # 承認された Issue を最大 1 件処�
 just mvi::run-once OWNER/REPO --agent-config-dir DIR   # 追加の引数は kagari_mvi.py に渡る
 just mvi::review-once OWNER/REPO     # implemented の Issue の PR を最大 1 件レビューする
 just mvi::review-once OWNER/REPO --reviewer tsumgi   # レビューを TSUMGI（別系統のモデル）で行う
+python3 components/kagari-mvi/kagari_mvi.py work-once --repo OWNER/REPO --workdir /srv/kagari --allow-actor LOGIN [--max-issues 3]
+                                     # run-once → review-once を、承認済みの Issue が残る限り最大 3 件まで繰り返す（#535）
 just mvi::cleanup-once OWNER/REPO    # merge 済みの PR のブランチと作業ディレクトリを消す
 just mvi::test                       # 単体テスト（gh・git・sudo は偽物に差し替える）
 ```
@@ -230,11 +232,11 @@ just mvi::test                       # 単体テスト（gh・git・sudo は偽�
 | 2 | 引数が不正だった |
 | 3 | Claude の利用上限に当たったので、Issue を `blocked` にせず元に戻した（`run-once`・`review-once`、#481。`review-once` は既定の Claude のレビュアーだけで、`--reviewer tsumgi` は Claude を使わないので対象外） |
 
-終了コード 3 は失敗ではありません。上限が戻れば次の実行が進みます。`run-once`・`review-once`・`cleanup-once` を 1 つの timer から順に呼ぶときは、3 で後ろの呼び出しを止めないでください（systemd なら `SuccessExitStatus=3`、シェルなら `|| [ $? -eq 3 ]`）。特に `cleanup-once` は、利用上限と関係なく動かせます。
+終了コード 3 は失敗ではありません。上限が戻れば次の実行が進みます。`run-once`・`review-once`・`cleanup-once` を 1 つの timer から順に呼ぶときは、3 で後ろの呼び出しを止めないでください（systemd なら `SuccessExitStatus=3`、シェルなら `|| [ $? -eq 3 ]`）。特に `cleanup-once` は、利用上限と関係なく動かせます。`work-once` は、失敗（1）があれば 1、無くて利用上限に当たれば 3、それ以外は 0 で終わります。
 
 ## timer で動かす（#489、#501）
 
-**標準の方式：対象一覧（#501、ADR-0012 D1・D5）。** 対象リポジトリは、ホストの 1 つのファイル `/etc/kagari-mvi/targets`（1 行に `OWNER/REPO ACTOR`）に置きます。`install` が作る timer の service は、1 つのコマンドでこの一覧を順に読み、各リポジトリに `run-once` → `review-once` → `cleanup-once` を呼びます。リポジトリごとの `ExecStart=` を手で書き足す必要はありません。対象リポジトリには何も置きません。
+**標準の方式：対象一覧（#501、ADR-0012 D1・D5）。** 対象リポジトリは、ホストの 1 つのファイル `/etc/kagari-mvi/targets`（1 行に `OWNER/REPO ACTOR`）に置きます。`install` が作る timer の service は、1 つのコマンドでこの一覧を順に読み、各リポジトリに `work-once`（`run-once` → `review-once` を、承認済みの Issue が残る限り最大 3 件まで繰り返す）→ `cleanup-once` を呼びます。リポジトリごとの `ExecStart=` を手で書き足す必要はありません。対象リポジトリには何も置きません。
 
 ```sh
 sudo python3 kagari_mvi.py register OWNER/REPO [--allow-actor LOGIN]   # 一覧へ追記し、kagari:* ラベルを作る
@@ -292,8 +294,8 @@ WantedBy=timers.target
 
 - **`PATH`**：system service の既定の `PATH` には、nix の profile が入りません。`just` と、`just` が呼ぶ `python3`・`gh`・`git`・`sudo` を探せる `PATH` が要ります。例は、LXC（Ubuntu）の `kagari-runner` で `command -v just` が `/nix/var/nix/profiles/default/bin/just` だったための書き方です。`sudo -u kagari-runner -H sh -lc 'command -v just python3 gh git sudo'` で確かめて、ホストに合わせてください。
 - **`SuccessExitStatus=3`**：終了コード 3 は、Claude の利用上限に当たって Issue を元に戻したことを表し、失敗ではありません（#481）。これを成功として扱わないと、systemd が `ExecStart` の残りを飛ばし、利用上限と関係の無い `cleanup-once` まで止まります。それ以外の終了コード（1 と 2）は失敗として、残りを飛ばします。人間が見る必要があるためです。失敗しても timer は止まらず、10 分後にもう一度起動する想定です（`failed` の後の再起動は**未確認**）。手順 4〜9 の失敗では Issue に `kagari:blocked` が付き、そのラベルを外すまで再処理されません。繰り返し起動されるのは、`blocked` が付かない失敗（Issue の選択時の API の失敗、`cleanup-once` の失敗、ラベル操作そのものの失敗）です。`journalctl -u kagari-mvi.service` と、Issue の `blocked` のコメントを見てください。
-- **`TimeoutStartSec=3h`**：1 つのリポジトリの最悪は、`run-once` が約 1 時間（`AGENT_TIMEOUT`）とテストが約 30 分（`TEST_TIMEOUT`）、`review-once` が約 1 時間、`cleanup-once` が数分です。この値が、全部の `ExecStart=` の合計に掛かるのか、それぞれに掛かるのかは、**未確認**です。合計に掛かる場合に備えて、1 つのリポジトリで 3 時間にしています。リポジトリを増やすときは、増やした数に合わせて延ばしてください。`Type=oneshot` の既定は無制限なので、この値を超えると systemd が service を止めます。worker が止められたときにラベルを戻す処理が無ければ、処理中の Issue に `kagari:running` が残り、自動では復旧しません（「既知の限界」の「止まった Issue」と同じ状態です。この挙動は未確認）。
-- **順に呼ぶこと**：1 つの `Type=oneshot` の service に `ExecStart=` を並べると、前のものが終わってから次が始まります。`OnUnitInactiveSec` は、service が終わってから次の起動までの間隔なので、systemd の仕様上は実行が重ならない想定です（実機では**未確認**）。`run-once` は、最も古い承認の Issue を 1 件だけ処理します。間隔は 10 分を目安にし、利用上限に当たる間は、その間隔で再試行されます。
+- **`TimeoutStartSec=3h`**：1 つのリポジトリの最悪は、`run-once` が約 1 時間（`AGENT_TIMEOUT`）とテストが約 30 分（`TEST_TIMEOUT`）、`review-once` が約 1 時間、`cleanup-once` が数分です。この値が、全部の `ExecStart=` の合計に掛かるのか、それぞれに掛かるのかは、**未確認**です。合計に掛かる場合に備えて、1 つのリポジトリで 3 時間にしています。リポジトリを増やすときは、増やした数に合わせて延ばしてください。`work-once` は 1 回の service で最大 3 件（`--max-issues`）を処理するので、最悪の実行時間は、件数に比例して伸びます（1 件が最悪で約 2.5 時間なら、3 件で約 7.5 時間）。ただし、実測では 1 件が数分で終わるので、通常は 3 時間に収まります。最悪まで備えるなら、`TimeoutStartSec` を件数に合わせて延ばすか、`--max-issues` を減らしてください（この Issue では 3h のままにしました。実機の最悪値は**未確認**です）。`Type=oneshot` の既定は無制限なので、この値を超えると systemd が service を止めます。worker が止められたときにラベルを戻す処理が無ければ、処理中の Issue に `kagari:running` が残り、自動では復旧しません（「既知の限界」の「止まった Issue」と同じ状態です。この挙動は未確認）。
+- **順に呼ぶこと**：1 つの `Type=oneshot` の service に `ExecStart=` を並べると、前のものが終わってから次が始まります。`OnUnitInactiveSec` は、service が終わってから次の起動までの間隔なので、systemd の仕様上は実行が重ならない想定です（実機では**未確認**）。`run-once` は、最も古い承認の Issue を 1 件だけ処理します。生成する service は、`work-once` が `run-once` → `review-once` を、承認済みの Issue が残る限り最大 3 件まで繰り返します（#535。1 件が `blocked` や終了コード 3 で止まったら、そこで終わり、残りは次の周期に回ります。同じ Issue は、1 回の実行の中で 2 度処理しません）。間隔は 10 分を目安にし、利用上限に当たる間は、その間隔で再試行されます。
 - **複数のリポジトリ**：同じ service に、リポジトリごとに 3 行の `ExecStart=` を並べます。service と timer を分けて同時に動かすことは避けてください。`kagari-agent` のプロセスを止める処理が、もう一方の実行を止めてしまうためです（「1 つのホストに 1 つの KAGARI」）。途中で失敗（1 と 2）すると、後ろのリポジトリは飛ばされます。失敗を無視して先へ進めたいときは `ExecStart=-…` と書けますが、失敗が見えなくなるので、おすすめしません。
 - **ログインの期限**：`sudo -u kagari-agent -H claude auth status` の `loginExpiresAt` が、`kagari-agent` の Claude のログインの期限です。期限の前に再ログインしてください（ADR-0009 追補 2026-11-18）。`claudeAiOauth` の期限は 2 つあります。`expiresAt` はアクセストークンの期限で、短命（数時間）ですが、使うたびに更新用トークンで自動的に更新されます。`refreshTokenExpiresAt` が更新用トークンの期限で、ログイン自体の期限（約 3 週間）です。`status` は `refreshTokenExpiresAt` で判定し、有効なら期限の日付を表示し、7 日以内なら警告し、過ぎていれば expired と表示します。`refreshTokenExpiresAt` が無い資格情報では、ログインの期限は不明です。`status` は期限切れや「あと N 日」の警告を出さず、「expiry unknown」と表示します（`expiresAt` の日付はアクセストークンの期限として添えるだけで、ログインの期限ではありません）。日付の値だけを読み、トークンの中身は読みません。
 - **導入**：先に、`WorkingDirectory=` の KUMIKI の checkout（`git clone` して `main` に合わせたもの）を `/opt/kagari/kumiki`（`kagari-runner` の home ではない）に用意します。次に、2 つのファイルを置いたら、`systemctl daemon-reload` の後に、`systemctl enable --now kagari-mvi.timer` で、初回の有効化と開始を行います。
@@ -428,7 +430,7 @@ KAGARI が責任を持たないもの（上の「KAGARI が責任を持つこと
 - **レビューの独立性**：既定のレビュアーは、実装者と同じモデル系統です（ADR-0007 D6）。`--reviewer tsumgi` では別系統になりますが、ファイルを読めず、大きな PR はレビューできません。受入条件と差分は Issue と PR から取るので、その文面でレビュアーを誘導することもできます。レビューの結果は参考として扱い、merge は User が判断してください。
 - **レビュアーの起動の乗っ取り**：レビュアーは実装者と同じ `kagari-agent` で、ログインシェルから起動します。そのため、実装者が Bash で `~/.profile` の PATH や、`kagari-agent` の home に置いた `claude` を書き換えると、レビュアーの起動を乗っ取れるおそれがあります（未確認）。`claude` を root が所有する場所に入れ、`--claude` に絶対パスを渡せば、指定したパスの本体がすり替わることは防げます。ただし、`~/.profile` はシェルスクリプトなので、その内容（環境変数の設定や、`exec` による別のプログラムへの置き換え、PATH から探す `timeout` や `node` の差し替えなど）による介入は残ります。レビューをログインシェルなしで起動すれば防げると考えていますが、未確認です。実装者と別のユーザーでレビューする方法は、2 周目で扱います。
 - **レビュー後の変更**：`reviewed` を付けた後に PR へ commit を足しても、もう一度はレビューしません。やり直す場合は、`kagari:reviewed` を外してください。
-- **一覧への反映の遅れ**：承認した直後の実行では、Issue が選ばれないことがあります。ラベルで絞り込む一覧 API への反映が遅れるためと推測しています。次の実行で拾われます。`review-once` でも同じことが起きます。`implemented` を付けた直後に実行すると、「no implemented Issue to review」と出て何もせずに終わります。壊れているわけではありません。どちらの場合も、数十秒ほど待ってから、もう一度実行してください。
+- **一覧への反映の遅れ**：承認した直後の実行では、Issue が選ばれないことがあります。ラベルで絞り込む一覧 API への反映が遅れるためと推測しています（原因は未確認）。次の実行で拾われます。`review-once` も、単独で `implemented` を付けた直後に実行すると、「no implemented Issue to review」と出て何もせずに終わることがあります。数十秒ほど待ってから、もう一度実行してください。`work-once`（timer の service）では、`run-once` が `implemented` にした Issue の番号を `review-once` に渡し、`GET /issues/N` でラベルを読み直すので、この遅れに頼らず直後にレビューします（#535。実機での確認は未実施）。状態の正本は、これまでどおり GitHub のラベルだけです。
 
 ## 実機での確認手順（I-2 / #405、LXC `kagari-runner`、対象 `upiscium/kagari-mvi-sandbox`）
 
