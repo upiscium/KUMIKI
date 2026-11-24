@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import kagari_mvi_ledger as ledger
 import kagari_mvi_tsumgi as tsumgi
-from kagari_mvi_shell import DENIED_COMMANDS  # noqa: F401 - the ledger's hook denies these unless a grant matches
+from kagari_mvi_shell import DENIED_COMMANDS
 from kagari_mvi_tsumgi import TSUMGI_MODEL, TSUMGI_URL  # noqa: F401 - used by callers and tests
 # Moved out in #490; re-exported so that kagari_mvi, the tests and the recipes keep their names.
 from kagari_mvi_issue import (ALLOWED_HEADING, CRITERIA_HEADING, PLACEMENT_HEADINGS,  # noqa: F401
@@ -37,7 +37,8 @@ ARTIFACTS = [":(exclude,glob)**/%s" % pattern for pattern in (  # build outputs,
 # --restricted also ignores user/project/local settings and confines file tools to the cwd.
 AGENT_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 # Bash is allowed broadly (it runs as the agent user, without GitHub credentials, D3); the
-# DENIED_COMMANDS (kagari_mvi_shell.py) are denied by the ledger hook unless a grant matches (#430).
+# DENIED_COMMANDS (kagari_mvi_shell.py) are in `permissions.deny`, and the ledger hook denies them too: no
+# ledger grant allows them until a real Claude Code shows how a hook allow and a deny rule rank (#527).
 # Changes to these need a human decision (ADR-0009 D1): instruction files and Claude
 # settings at any depth, and CI workflows. The runner checks the commit before pushing.
 INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md")
@@ -55,7 +56,8 @@ AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worke
 - Implement only what the Issue asks. Edit files in the current directory only.
 - You may run shell commands (build, lint, tests). Do not commit: the host commits
   and opens the pull request for you.
-- The host denies network and credential commands (curl, wget, gh, git push, ssh, sudo, ...).
+- Network and credential commands (curl, wget, gh, git push, ssh, sudo, ...) are denied by the permission
+  rules, also behind env, bash -c or $(...). A permission ledger grant cannot allow them.
 - Do not change CLAUDE.md, CLAUDE.local.md, AGENTS.md, `.claude/` or `.github/workflows/` unless the Issue
   lists the path under `### 変更する保護ファイル`. Other changes there stop the run before push.
 - The Issue's test command, which the host re-runs to decide the result: {test}
@@ -155,6 +157,8 @@ class AgentSteps:
             "permissions": {"allow": ["Bash", "Read", "Glob", "Grep", "Edit(/%s/**)" % worktree,
                                       "Write(/%s/**)" % worktree],
                             "deny": ["Agent", "WebFetch", "WebSearch", "NotebookEdit"] + [
+                                rule for name in DENIED_COMMANDS
+                                for rule in ("Bash(%s)" % name, "Bash(%s *)" % name)] + [
                                 "%s(/%s/%s)" % (tool, worktree, glob) for tool in ("Edit", "Write")
                                 for glob in PROTECTED_GLOBS if not allowed]},
             "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"},
@@ -177,11 +181,9 @@ class AgentSteps:
         self.denied = []
         mine = ledger.for_run(ledger.load(self.ledger_path or ledger.default_path()), self.repo, number,
                               ledger.utcnow())
-        with open(grants, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps({"grants": mine}))
-        os.chmod(grants, 0o644)
-        os.close(os.open(audit, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o660))
-        os.chmod(audit, 0o660)  # the hook runs as the agent user and appends here
+        # Never follow a link left in the shared worktree directory: the old file or link is removed first.
+        ledger.create_private(grants, 0o644, json.dumps({"grants": mine}))
+        ledger.create_private(audit, 0o660)  # the hook runs as the agent user and appends here
 
     def run_review(self, workdir: str, review_dir: str, number: int, criteria: List[str],
                    diff: str, test_report: str) -> Dict[str, Any]:

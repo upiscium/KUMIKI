@@ -399,6 +399,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if os.geteuid() == 0:  # as for register: the ledger is kagari-runner's
                 return subprocess.call(["sudo", "-n", "-u", RUNNER, "-H", "--", sys.executable,
                                         os.path.abspath(__file__)] + sys.argv[1:])
+            ledger.require_runner_user()
             return ledger.cli(args)
         if args.command == "unregister":
             return targets.unregister(args.target)
@@ -419,7 +420,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except CommandError as error:
         print("kagari_mvi: %s\n%s" % (error, tail(error.output)), file=sys.stderr)
         return 1
-    except ValueError as error:
+    except (ValueError, PermissionError) as error:
         print("kagari_mvi: %s" % error, file=sys.stderr)
         return 2
 

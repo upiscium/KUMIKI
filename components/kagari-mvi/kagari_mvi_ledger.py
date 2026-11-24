@@ -4,8 +4,8 @@
 cannot read it: before each Claude run the runner copies only the grants that apply to that run
 (repository, Issue, not expired, not revoked) into a snapshot file, and a PreToolUse hook
 (`hook` below, run by Claude as the agent user) reads the snapshot. A grant that matches is
-allowed and recorded in the audit file; a DENIED_COMMANDS command without a grant is denied; every
-other operation is left to Claude's own rules. Stage 1: nothing waits for a human answer.
+allowed and recorded in the audit file; a DENIED_COMMANDS command is denied (also by `permissions.deny`,
+and no grant can allow it for now); every other operation is left to Claude's own rules. Stage 1: nothing waits for a human answer.
 """
 from __future__ import annotations
 
@@ -53,15 +53,22 @@ def load(path: str) -> List[Grant]:
     return [g for g in data.get("grants", []) if isinstance(g, dict)] if isinstance(data, dict) else []
 
 
+def create_private(path: str, mode: int, text: str = "") -> None:
+    """Make a new file that is not a symbolic link: an existing one (or a link) is removed first."""
+    if os.path.lexists(path):
+        os.remove(path)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    os.fchmod(descriptor, mode)  # not subject to the umask
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 def save(path: str, grants: List[Grant]) -> None:
     folder = os.path.dirname(path)
     os.makedirs(folder, mode=0o700, exist_ok=True)
     os.chmod(folder, 0o700)
     temp = path + ".new"
-    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump({"version": 1, "grants": grants}, handle, ensure_ascii=False, indent=2)
-    os.chmod(temp, 0o600)
+    create_private(temp, 0o600, json.dumps({"version": 1, "grants": grants}, ensure_ascii=False, indent=2))
     os.replace(temp, path)
 
 
@@ -116,14 +123,17 @@ def matches(grant: Grant, tool: str, tool_input: Dict[str, Any]) -> bool:
 
 def decide(grants: List[Grant], tool: str, tool_input: Dict[str, Any],
            now: datetime.datetime) -> Tuple[Optional[str], Optional[Grant], str]:
-    """("allow", grant, why) | ("deny", None, why) | (None, None, ""): the last leaves it to Claude."""
-    for grant in grants:
-        if is_active(grant, now) and matches(grant, tool, tool_input):
-            return "allow", grant, "allowed by ledger grant %s" % grant.get("id")
+    """("allow", grant, why) | ("deny", None, why) | (None, None, ""): the last leaves it to Claude.
+
+    A DENIED_COMMANDS operation is denied whatever a grant says: Claude's `permissions.deny` has it too, and
+    whether a hook allow could beat that rule is not yet checked on a real Claude Code (#527)."""
     if tool == "Bash":
         found = shell.command_denied(str(tool_input.get("command", "")))
         if found:
-            return "deny", None, ("`%s` is denied and no ledger grant matches (kagari-mvi ledger add)" % found)
+            return "deny", None, ("`%s` is denied; a ledger grant cannot allow it" % found)
+    for grant in grants:
+        if is_active(grant, now) and matches(grant, tool, tool_input):
+            return "allow", grant, "allowed by ledger grant %s" % grant.get("id")
     return None, None, ""
 
 
@@ -192,17 +202,17 @@ def candidate(op: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     tool, tool_input = op["tool"], op["input"]
     if tool == "Bash":
         argv = shell.simple_argv(str(tool_input.get("command", "")))
-        if argv is None:
-            return None
-        target = shell.ssh_target(argv) if os.path.basename(argv[0]) == "ssh" else None
-        if target:
-            return "ssh", target[0]
-        if shell.unreadable_ssh(argv):
-            return None
+        if argv is None or shell.command_denied(str(tool_input.get("command", ""))):
+            return None  # a DENIED_COMMANDS operation cannot be registered for now
         return "bash", " ".join(shlex.quote(word) for word in argv)
     if tool in ("Edit", "Write") and tool_input.get("file_path"):
         return "edit", str(tool_input["file_path"])
     return None
+
+
+def quiet(text: str) -> str:
+    """No GitHub notification from an `@name` in a command: a zero-width space after each `@`."""
+    return text.replace("@", "@\u200b")
 
 
 def denial_report(ops: List[Dict[str, Any]], repo: str, issue: int) -> str:
@@ -212,10 +222,12 @@ def denial_report(ops: List[Dict[str, Any]], repo: str, issue: int) -> str:
     lines = ["", "Operations denied in this run (no matching permission ledger grant):", ""]
     for op in ops[:MAX_LISTED]:
         text = describe(op["tool"], op["input"]).replace("`", "'").replace("\n", " ")[:300]
+        text = quiet(text)
         lines.append("- `%s`: `%s`" % (op["tool"], text))
         found = candidate(op)
         if found is None:
-            lines.append("  - no grant can allow this one (compound or unparsable command, or no ledger kind for it)")
+            lines.append("  - no grant can allow this one (a denied command such as curl, ssh or git push, a compound "
+                         "or unparsable command, or no ledger kind for it)")
             continue
         lines.append("  - to allow it, a human runs one of (as root or kagari-runner; default scope `issue`):")
         for scope in SCOPES:
@@ -244,13 +256,14 @@ def add(path: str, kind: str, match: str, scope: str, repo: Optional[str], issue
     if days < 1 or not reason.strip():
         raise ValueError("--days must be 1 or more and --reason is required")
     value: Any = match
+    if shell.simple_argv(match) == ["*"] or match.strip() == "*":
+        raise ValueError("--match '*' would allow every command")
+    if kind == "bash" and shell.command_denied(match):
+        raise ValueError("`%s` is in the denied commands: a grant cannot allow it for now" % shell.command_denied(match))
     if kind == "ssh":
-        value = [h.strip() for h in match.split(",") if h.strip()]
-        if not value or not all(HOST.fullmatch(h) for h in value):
-            raise ValueError("--match for ssh is a comma-separated list of host names")
-    elif kind == "bash" and (shell.simple_argv(match) is None or shell.unreadable_ssh(shell.simple_argv(match))):
-        raise ValueError("a bash grant must be one plain command (no &&, ;, |, redirects or substitutions; "
-                         "use --kind ssh for ssh, which ProxyCommand and the like never get through)")
+        raise ValueError("ssh is in the denied commands (`permissions.deny`): a grant cannot allow it for now")
+    if kind == "bash" and (shell.simple_argv(match) is None or shell.unreadable_ssh(shell.simple_argv(match))):
+        raise ValueError("a bash grant must be one plain command (no &&, ;, |, redirects or substitutions)")
     elif kind == "edit" and not match.startswith("/"):
         raise ValueError("an edit grant is an absolute path or glob")
     grant: Grant = {"id": secrets.token_hex(4), "kind": kind, "match": value, "scope": scope,
@@ -282,6 +295,16 @@ def format_grant(grant: Grant, now: datetime.datetime) -> str:
     return "%s  %-7s %-4s %s  scope=%s (%s)  expires %s  [%s] %s" % (
         grant.get("id"), state, grant.get("kind"), match, grant.get("scope"), where, grant.get("expires"),
         grant.get("created"), grant.get("reason"))
+
+
+def require_runner_user(euid: Optional[int] = None, name: Optional[str] = None) -> None:
+    """The ledger is root's or kagari-runner's: any other user would silently make a ledger nobody reads."""
+    import pwd
+    euid = os.geteuid() if euid is None else euid
+    name = name or pwd.getpwuid(euid).pw_name
+    if euid != 0 and name != "kagari-runner":
+        raise PermissionError("run `ledger` as root or kagari-runner (this is %s): another user would "
+                              "make a ledger the worker never reads" % name)
 
 
 def cli(args: argparse.Namespace, path: Optional[str] = None, out: Callable[[str], None] = print,
