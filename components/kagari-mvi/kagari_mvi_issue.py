@@ -5,7 +5,7 @@ Pure text functions; no processes, no GitHub. Split out of kagari_mvi_exec.py (#
 from __future__ import annotations
 
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 TEST_HEADING = re.compile(r"^#{2,6}[ \t]*(?:テストコマンド|Test command)[ \t]*$", re.M | re.I)
 ALLOWED_HEADING = re.compile(r"^#{2,6}[ \t]*(?:変更する保護ファイル|Protected files to change)[ \t]*$",
@@ -14,6 +14,26 @@ CRITERIA_HEADING = re.compile(r"^#{2,6}[ \t]*(?:受入条件|Acceptance criteria
 PLACEMENT_HEADINGS = [(names, re.compile(r"^#{2,6}[ \t]*(?:%s)[ \t]*$" % "|".join(names), re.M | re.I))
                       for names in (("全体ロジック", "Overall logic"), ("置く理由", "Why here"),
                                     ("却下した置き場所", "Rejected placements"))]
+
+DECIDED_HEADING = re.compile(r"^#{2,6}[ \t]*(?:決定済み事項|Decided)[ \t]*$", re.M | re.I)
+DELEGATED_HEADING = re.compile(r"^#{2,6}[ \t]*(?:委任する判断|Delegated decisions)[ \t]*$", re.M | re.I)
+
+
+def delegation(body: Optional[str]) -> Optional[Dict[str, List[str]]]:
+    """The Issue's declared decisions (HDC R1, #519), read from the body only.
+
+    None without either heading. Else decided / delegated items and the unreadable lines:
+    every non-blank line of the two sections must be a one-line bullet with text."""
+    sections = {key: section_text(body, pattern) for key, pattern in
+                (("decided", DECIDED_HEADING), ("delegated", DELEGATED_HEADING))}
+    if all(text is None for text in sections.values()):
+        return None
+    found: Dict[str, List[str]] = {"unreadable": []}
+    for key, text in sections.items():
+        lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+        found[key] = [m.group(1) for m in (re.match(r"^[-*]\s+(?:\[[ xX]\]\s*)?(\S.*)$", line) for line in lines) if m]
+        found["unreadable"] += [line for line in lines if not re.match(r"^[-*]\s+(?:\[[ xX]\]\s*)?\S", line)]
+    return found
 
 
 def test_command(body: Optional[str]) -> Optional[str]:

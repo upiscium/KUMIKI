@@ -19,7 +19,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from kagari_mvi_cleanup import CleanupSteps
 from kagari_mvi_exec import SAFE_GIT, AgentSteps, Blocked, CommandError, Runner, UsageLimit, subprocess_runner
 from kagari_mvi_host import RUNNER, Host
-from kagari_mvi_issue import acceptance_criteria, allowed_protected, missing_placement, test_command
+from kagari_mvi_issue import (acceptance_criteria, allowed_protected, delegation, missing_placement,
+                              test_command)
 from kagari_mvi_limit import LimitSteps
 from kagari_mvi_parse import tail
 from kagari_mvi_report import report, review_report
@@ -145,6 +146,9 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
             criteria = acceptance_criteria(issue.get("body"))
             if not criteria:
                 raise Blocked("The Issue body has no `### 受入条件` list to review against.")
+            declared = delegation(issue.get("body"))  # the body only (HDC R1)
+            if declared is not None and declared["unreadable"]:
+                raise Blocked("The Issue's decision sections have lines that are not one-line bullets.")
             pr = self.api("GET", self.repo_path("/pulls/%d" % pr["number"]))
             head = pr["head"]["sha"]
             diff = self.api_text(self.repo_path("/pulls/%d" % pr["number"]),
@@ -158,7 +162,7 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
             stage = "checkout"
             review_dir = self.prepare_review_dir(workdir, number, head)  # unused by TSUMGI
             stage = "review"
-            outcome = self.run_review(workdir, review_dir, number, criteria, diff, test_report)
+            outcome = self.run_review(workdir, review_dir, number, criteria, diff, test_report, declared)
             ready, note = ready_decision(outcome, fresh, test_report)
             not_ready = None
             if ready:
@@ -226,6 +230,11 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
         if reason is None and missing:
             reason = ("The Issue body lacks placement sections (ADR-0011): %s. Add each as a "
                       "`###` heading with content." % ", ".join("`### %s`" % name for name in missing))
+        declared = delegation(issue.get("body"))
+        if reason is None and declared is not None and declared["unreadable"]:
+            reason = ("The Issue's `### 決定済み事項` / `### 委任する判断` sections have lines that are not "
+                      "one-line bullets: %s. Write one item per `- ` line."
+                      % "; ".join("`%s`" % line[:80] for line in declared["unreadable"][:5]))
         if reason is not None:
             self.add_labels(number, BLOCKED)
             self.comment(number, "kagari-mvi: blocked before start.\n\n" + reason)

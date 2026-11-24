@@ -21,6 +21,8 @@ VERDICT_LINE = re.compile(r"^[^\w\n]*AC(\d+)[^\w\n]*?[:：][^\w\n]*(PASS|FAIL|UN
                           r"[-—–:：]*[ \t]*(.*)$", re.M | re.I)
 TESTS_LINE = re.compile(r"^[^\w\n]*TESTS[^\w\n]*?[:：][^\w\n]*(PASS|FAIL|UNKNOWN)\b[*_]*[ \t]*"
                         r"[-—–:：]*[ \t]*(.*)$", re.M | re.I)
+DELEGATION_LINE = re.compile(r"^[^\w\n]*DELEGATION[^\w\n]*?[:：][^\w\n]*(UNKNOWN|OUT|IN)\b[*_]*[ \t]*"
+                             r"[-—–:：]*[ \t]*(.*)$", re.M | re.I)
 
 # A sentence ends at . 。 ! ? ！ ？ … (before closing brackets or quotes), but not at an abbreviation's dot.
 SENTENCE_END = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\betc)(?<!\bvs)(?<!\bcf)"
@@ -121,6 +123,15 @@ def tests_verdict(text: str) -> Tuple[str, str]:
     if not found:
         return ("UNKNOWN", "(no TESTS verdict from the reviewer)")
     return ("UNKNOWN", "(conflicting TESTS verdicts from the reviewer)")
+
+
+def delegation_verdict(text: str) -> Tuple[str, str]:
+    """The reviewer's `DELEGATION:` line (IN|OUT|UNKNOWN); a missing or conflicting one is UNKNOWN."""
+    found = [(status.upper(), evidence.strip()) for status, evidence in DELEGATION_LINE.findall(text)]
+    if found and len({status for status, _ in found}) == 1:
+        return found[-1]
+    return ("UNKNOWN", "(conflicting DELEGATION verdicts from the reviewer)" if found
+            else "(no DELEGATION verdict from the reviewer)")
 
 
 def review_verdicts(text: str, count: int) -> List[Tuple[str, str]]:
