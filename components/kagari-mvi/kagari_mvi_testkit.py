@@ -1,5 +1,6 @@
 """Shared fixtures for the kagari_mvi tests: a fake gh/git runner and sample Issues."""
 import json
+import re
 import os
 import sys
 
@@ -59,6 +60,13 @@ class FakeRunner:
         if not is_api:
             return next((out for needle, out in self.outputs.items() if needle in joined), "")
         method, path = ("DIFF" if "diff" in args[5] else args[3]), args[6]
+        found = re.fullmatch(r"repos/o/r/issues/(\d+)", path)
+        if method == "GET" and found and ("GET", path) not in self.routes:
+            # No lag by default: a direct GET of an Issue shows what the search list shows (#537).
+            listed = self.routes.get(("GET", "repos/o/r/issues?")) or []
+            same = next((i for i in listed if i["number"] == int(found.group(1))), None)
+            if same is not None:
+                return json.dumps(same)
         for (route_method, prefix), response in self.routes.items():
             if route_method == method and path.startswith(prefix):
                 if isinstance(response, str):

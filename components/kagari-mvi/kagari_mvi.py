@@ -225,6 +225,10 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
         number = issue["number"]
         self.selected = number
         self.log("selected #%d" % number)
+        # The label search lags (#535, #537): read the Issue directly before touching anything.
+        if not is_candidate(self.api("GET", self.repo_path("/issues/%d" % number)) or {}):
+            self.log("#%d is no longer a candidate (label search lag)" % number)
+            return 0
 
         events = self.api_pages(self.repo_path("/issues/%d/timeline" % number))
         reason = check_actor(approval_actor(events), allowed)

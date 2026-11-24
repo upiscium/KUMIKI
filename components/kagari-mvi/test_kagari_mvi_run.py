@@ -19,6 +19,7 @@ class RunOnceTest(unittest.TestCase):
         return {
             ("GET", "repos/o/r/issues?"): [issue(7, [mvi.APPROVED])],
             ("GET", "repos/o/r/issues/7/timeline"): [labeled("upiscium")],
+            ("GET", "repos/o/r/issues/7"): issue(7, [mvi.APPROVED]),  # the direct re-read (#537)
             ("GET", "repos/o/r/pulls?"): [existing_pr] if existing_pr else [],
             ("GET", "repos/o/r/labels"): [],
             ("POST", "repos/o/r/pulls"): {"number": 70, "html_url": "https://x/pull/70"},
@@ -33,6 +34,18 @@ class RunOnceTest(unittest.TestCase):
 
     def comments(self, runner, number):
         return [body["body"] for body in runner.api_calls("POST", "repos/o/r/issues/%d/comments" % number)]
+
+    def test_an_issue_already_implemented_in_the_stale_search_is_left_alone(self):
+        routes = self.routes()
+        routes[("GET", "repos/o/r/issues/7")] = issue(7, [mvi.APPROVED, mvi.IMPLEMENTED])
+        runner = FakeRunner(routes)
+        self.assertEqual(self.run_worker(runner), 0)
+        self.assertEqual(runner.added_labels(), [])
+        self.assertEqual(runner.removed_labels(), [])
+        self.assertEqual(self.comments(runner, 7), [])
+        self.assertFalse([a for a, _, _ in runner.calls if a[0] != "gh"])  # no git, no worktree
+        self.assertFalse(runner.api_calls("POST", "repos/o/r/pulls"))
+        self.assertFalse(runner.api_calls("GET", "repos/o/r/issues/7/timeline"))
 
     def test_success_runs_agent_commits_tests_and_opens_draft_pr(self):
         runner = FakeRunner(self.routes())
