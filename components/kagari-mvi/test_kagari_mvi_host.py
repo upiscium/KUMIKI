@@ -208,7 +208,7 @@ class HostTest(HostBase):
         path = self.path("/home/%s/.claude/.credentials.json" % host.AGENT)
         os.makedirs(os.path.dirname(path))
         with open(path, "w") as handle:
-            json.dump({"claudeAiOauth": {"expiresAt": (time.time() - 10) * 1000}}, handle)
+            json.dump({"claudeAiOauth": {"refreshTokenExpiresAt": (time.time() - 10) * 1000}}, handle)
         self.lines.clear()
         self.host.status()
         self.assertTrue(any(line.startswith("modified") and host.SUDOERS in line for line in self.lines))
@@ -238,9 +238,13 @@ class HostTest(HostBase):
         got = self.login_lines(expiresAt=1, refreshTokenExpiresAt=-1)
         self.assertTrue(got and "expired" in got[0])
 
-    def test_login_without_refresh_expiry_uses_the_access_expiry(self):
-        self.assertIn("expired", self.login_lines(expiresAt=-1)[0])
-        self.assertIn("valid until", self.login_lines(expiresAt=20)[0])
+    def test_login_without_refresh_expiry_is_unknown(self):
+        for days in (-1, 2, 20):
+            got = self.login_lines(expiresAt=days)
+            self.assertEqual(len(got), 1)
+            self.assertIn("expiry unknown", got[0])
+            for word in ("expired", "warning", "expires in", "valid until"):
+                self.assertNotIn(word, got[0])
 
     def test_broken_credentials_file_is_not_set(self):
         path = self.path("/home/%s/.claude/.credentials.json" % host.AGENT)
