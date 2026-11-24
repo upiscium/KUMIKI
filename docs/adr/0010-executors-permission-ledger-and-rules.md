@@ -1,6 +1,6 @@
 # ADR-0010: 実行役を Claude Code と Pi に分け、許可台帳と運用ルールを足す
 
-- **Status:** Accepted（2026-11-15、PR #439 の merge による User の承認）; 追補 2026-11-16（行数の上限を 1 ファイルあたり本体 500 行・テスト 800 行に変更、#454）
+- **Status:** Accepted（2026-11-15、PR #439 の merge による User の承認）; 追補 2026-11-16（行数の上限を 1 ファイルあたり本体 500 行・テスト 800 行に変更、#454）; 追補 2026-11-22（D6・D7 の「MUSUBI が制御セッションを管理する」〔MUSUBI#39〕を、upiscium/MUSUBI#43 の決定に合わせて取り消し、#521）
 - **Human decision:** 2026-11-14〜15 の設計セッションで、User が次の方針を決めた（#429、指示書「KAGARI/MUSUBI 次期方針 実装指示書」）。この ADR はそれを記録し、改定する ADR の箇所を示す。
 - **Issue:** #429
 - **Related:** ADR-0006（D1、D3、D4、D6）、ADR-0007（D2、D3、D4、D7）、ADR-0009（D1、D4、Consequences、追補 2026-11-14）、#340、#359、#418、#419、#427、#430〜#437、upiscium/MUSUBI#37〜#39
@@ -59,10 +59,11 @@
 
 ### D6 — 制御セッションと MUSUBI
 - 設計と全体の制御は Claude のセッションで行う。当面は Remote Control で動かし（Phase A）、将来は MUSUBI が起動して管理する（Phase B。upiscium/MUSUBI#39）。KAGARI へは、Issue と承認ラベルで指示する。
+  - **追補（2026-11-22、取り消し）：** 上の Phase B は upiscium/MUSUBI#43（Human 決定、2026-11-22）で取り消された。制御セッションは、当面も将来も Remote Control など MUSUBI の外の Claude セッションで行い、MUSUBI は制御セッションを管理しない。MUSUBI の役割は、KAGARI と GitHub の読み取り専用の参照、Discord 通知、人間の操作の中継だけである。Ask と許可台帳の権限は KAGARI が持つ。MUSUBI#43 は、旧 MUSUBI#39 と #429 の制御セッション統合の記述より優先する。
 - MUSUBI は KAGARI MVI（GitHub のラベル）につなぎ、複数のリポジトリの `blocked` を集める（upiscium/MUSUBI#37）。今の `kagari-cli-adapter` と OpenCode 専用の分類器は凍結する。
 
 ### D7 — 実装の順序と v0.2.0 の範囲
-- この ADR が承認されるまで、改定に依存する Issue（#430〜#433、#435〜#437、upiscium/MUSUBI#38・#39）には着手しない。例外は、依存の無い upiscium/MUSUBI#37 と、#427 の後に進める #434 である。
+- この ADR が承認されるまで、改定に依存する Issue（#430〜#433、#435〜#437、upiscium/MUSUBI#38・#39〔#39 は MUSUBI#43 で取り消し〕）には着手しない。例外は、依存の無い upiscium/MUSUBI#37 と、#427 の後に進める #434 である。
 - **v0.2.0 の範囲**（User 判断 2026-11-15）：追補（2026-11-14、#425）を反映した ADR-0009 D4 の条件に、#434 だけを足す。ほかの Issue は v0.2.0 の後の v0.2.x 系に回す（#433・#436 は v0.3 候補のまま）。許可台帳は、待機の仕組みと MUSUBI の回答画面（upiscium/MUSUBI#38）がそろって初めて使えるので、v0.2.0 に入れるとリリースが大きく遅れるためである。
 
 | Issue | 内容 | 依存 | 時期 |
@@ -77,7 +78,7 @@
 | #437 | 秘密情報を要するテスト | この ADR | 必要になったとき |
 | upiscium/MUSUBI#37 | MUSUBI を KAGARI MVI につなぐ | — | すぐ |
 | upiscium/MUSUBI#38 | blocked の理由から台帳に登録する | #430 | #430 の後 |
-| upiscium/MUSUBI#39 | 制御用の Claude セッションを管理する | MUSUBI#37、#434 | MUSUBI#37 の後 |
+| upiscium/MUSUBI#39 | 制御用の Claude セッションを管理する（**MUSUBI#43 で取り消し**、2026-11-22） | MUSUBI#37、#434 | ~~MUSUBI#37 の後~~ 実施しない |
 
 ## Consequences
 - ADR-0006、ADR-0007、ADR-0009 の Status 行に、この ADR で一部を改定したことを書く。
