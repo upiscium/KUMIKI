@@ -234,7 +234,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=kagari-runner
-WorkingDirectory=/home/kagari-runner/KUMIKI
+WorkingDirectory=/opt/kagari/kumiki
 Environment=PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
 Environment=KAGARI_MVI_WORKDIR=/srv/kagari
 Environment=KAGARI_MVI_ALLOW_ACTOR=upiscium
@@ -266,7 +266,7 @@ WantedBy=timers.target
 - **順に呼ぶこと**：1 つの `Type=oneshot` の service に `ExecStart=` を並べると、前のものが終わってから次が始まります。`OnUnitInactiveSec` は、service が終わってから次の起動までの間隔なので、systemd の仕様上は実行が重ならない想定です（実機では**未確認**）。`run-once` は、最も古い承認の Issue を 1 件だけ処理します。間隔は 10 分を目安にし、利用上限に当たる間は、その間隔で再試行されます。
 - **複数のリポジトリ**：同じ service に、リポジトリごとに 3 行の `ExecStart=` を並べます。service と timer を分けて同時に動かすことは避けてください。`kagari-agent` のプロセスを止める処理が、もう一方の実行を止めてしまうためです（「1 つのホストに 1 つの KAGARI」）。途中で失敗（1 と 2）すると、後ろのリポジトリは飛ばされます。失敗を無視して先へ進めたいときは `ExecStart=-…` と書けますが、失敗が見えなくなるので、おすすめしません。
 - **ログインの期限**：`sudo -u kagari-agent -H claude auth status` の `loginExpiresAt` が、`kagari-agent` の Claude のログインの期限です。期限の前に再ログインしてください（ADR-0009 追補 2026-11-18）。`claudeAiOauth` の期限は 2 つあります。`expiresAt` はアクセストークンの期限で、短命（数時間）ですが、使うたびに更新用トークンで自動的に更新されます。`refreshTokenExpiresAt` が更新用トークンの期限で、ログイン自体の期限（約 3 週間）です。`status` は `refreshTokenExpiresAt`（無いときだけ `expiresAt`）で判定し、有効なら期限の日付を表示し、7 日以内なら警告し、過ぎていれば expired と表示します。日付の値だけを読み、トークンの中身は読みません。
-- **導入**：先に、`WorkingDirectory=` の KUMIKI の checkout（`git clone` して `main` に合わせたもの）を `kagari-runner` の home に用意します。次に、2 つのファイルを置いたら、`systemctl daemon-reload` の後に、`systemctl enable --now kagari-mvi.timer` で、初回の有効化と開始を行います。
+- **導入**：先に、`WorkingDirectory=` の KUMIKI の checkout（`git clone` して `main` に合わせたもの）を `/opt/kagari/kumiki`（`kagari-runner` の home ではない）に用意します。次に、2 つのファイルを置いたら、`systemctl daemon-reload` の後に、`systemctl enable --now kagari-mvi.timer` で、初回の有効化と開始を行います。
 - **再ログインの手順**：(1) `systemctl stop kagari-mvi.timer`（先に timer を止めて、新しい実行が始まらないようにする。実行中の service は止まりません）。(2) `systemctl is-active kagari-mvi.service` を、`inactive` か `failed` になるまで繰り返し確かめる（この 1 回のコマンドは待ってくれず、その時点の状態を返すだけです。実行中は `activating`）。(3) `kagari-agent` で再ログインする（コマンドは**未確認**です。対話の `claude` で `/login`、または `claude auth login` のどちらかです。2026-12-09 の期限の前に実際に再ログインして確かめ、確かめたら、ここを書き直します）。(4) `sudo -u kagari-agent -H claude auth status` で、期限が延びたことを確かめる。(5) `systemctl start kagari-mvi.timer`（初回の `enable` は済んでいるので、`start` だけで戻ります）。実行の途中で `systemctl stop kagari-mvi.service` をしたり、ホストを再起動したりすると、`kagari:running` が残り、自動では復旧しません（「既知の限界」）。
 
 ## 許可台帳（#430、ADR-0010 D2、段階 1）
@@ -275,8 +275,10 @@ WantedBy=timers.target
 
 - `kagari-mvi ledger add --kind bash|ssh|edit --match … [--scope issue|repo|host] [--repo O/R] [--issue N] [--days 30] --reason …`、`ledger revoke ID`、`ledger list [--all]`。root から実行すると `kagari-runner` として動く。
 - 判定は PreToolUse hook（`--settings`）。`kagari-agent` は台帳を読めないので、run-once が起動前に、その実行に効く許可（リポジトリ・Issue・期限・取り消しで絞ったもの）だけを `issue-N.grants.json` に写す。`--permission-prompts none` はそのまま。
-- 一致すれば許可し、`logs/<repo>/issue-N-claude-ledger.jsonl` と PR のテスト結果コメントに、どの許可で通したかを残す。`DENIED_COMMANDS` は、一致する許可がなければ hook が拒否する（hook が失敗しても `exit 2` で通さない）。
-- Bash は構文として照合する。`&&` `;` `|` `&`・リダイレクト・`$(...)`・解析できないコマンドは、台帳に一致しても自動では許可しない。`ssh` は `--kind ssh` のホスト一覧で縛り、`-o ProxyCommand` / `LocalCommand` / `PermitLocalCommand` / `KnownHostsCommand` / `ProxyJump` と `-J` は通さない。
+- 一致すれば許可し、`logs/<repo>/issue-N-claude-ledger.jsonl` と PR のテスト結果コメントに、どの許可で通したかを残す。
+- `DENIED_COMMANDS`（`curl`・`wget`・`gh`・`git push`・`ssh` など）は、Claude の `permissions.deny` に入れ、hook も拒否する。環境変数の接頭辞（`FOO=1 curl`）・`env`/`time`/`xargs` などのラッパー・`bash -c`・`$(...)`・バッククォート・`git -C . push` の中も見る。解析できないものは拒否側に倒す。hook の allow が deny ルールに勝つかは、実機で未確認のため、当面は deny を優先し、`DENIED_COMMANDS` の許可（`ssh` の `--kind ssh` を含む）は `ledger add` が受け付けない。`--match '*'` も受け付けない。
+- Bash は構文として照合する。`&&` `;` `|` `&`・リダイレクト・`$(...)`・解析できないコマンドは、台帳に一致しても自動では許可しない。語の途中の `#` はコメントにしない（`ls a#b && curl x` は複合コマンド）。`ssh` の判定は、`-o ProxyCommand` / `LocalCommand` / `PermitLocalCommand` / `KnownHostsCommand` / `ProxyJump` と `-J`・`-F`・`-S`・`-W` を自動許可しない。
+- `grants.json` と audit は、symlink を辿らず、既存のものを消してから作る（`O_NOFOLLOW`）。`ledger` は root か `kagari-runner` 以外では止まる。blocked コメントに書くコマンドは、`@` の後ろにゼロ幅スペースを入れ、通知が飛ばないようにする。台帳が壊れている（JSON として読めない）と、run-once はその Issue を `blocked` にして止まる。
 - 一致しない操作は今までどおり拒否され、`blocked` のコメント 1 件に、拒否した操作と登録できる許可の候補（有効範囲ごと）を書く。人間の回答を待つ仕組みは段階 2。
 - 台帳の処理は `kagari_mvi_ledger.py`（台帳・判定・CLI）と `kagari_mvi_shell.py`（Bash の解析）に分けた。`kagari_mvi_exec.py` と `kagari_mvi.py` は上限（500 行）に収まるため、分けた理由は責務の分離だけである。
 

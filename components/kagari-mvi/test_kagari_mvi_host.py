@@ -174,6 +174,18 @@ class HostTest(HostBase):
         self.assertFalse(os.path.exists(self.path(host.RECEIPT)))
         self.assertTrue(any("login" in line and "deleted" in line for line in self.lines))
 
+    def test_uninstall_keeps_the_permission_ledger_and_purge_removes_it_with_the_home(self):  # #527 AC8
+        self.host.install()
+        ledger = self.path("/home/%s/.local/state/kagari-mvi/ledger.json" % host.RUNNER)
+        os.makedirs(os.path.dirname(ledger))
+        with open(ledger, "w") as handle:
+            handle.write("{}")
+        self.host.uninstall()
+        self.assertTrue(os.path.exists(ledger))  # not owned by install: the default uninstall leaves it
+        self.assertNotIn(["userdel", "--remove", host.RUNNER], self.sys.calls)
+        self.host.uninstall(purge=True)
+        self.assertIn(["userdel", "--remove", host.RUNNER], self.sys.calls)  # removes the home, ledger included
+
     def test_reinstall_after_uninstall_works(self):
         self.host.install()
         self.host.uninstall()

@@ -53,7 +53,7 @@ class RunOnceTest(unittest.TestCase):
         self.assertIn("Bash", allow)
         deny = settings["permissions"]["deny"]
         self.assertIn("Agent", deny)
-        self.assertFalse(any(rule.startswith("Bash(") for rule in deny))  # the ledger hook decides these (#430)
+        self.assertIn("Bash(curl *)", deny)  # DENIED_COMMANDS are deny rules again (#527)
         hook = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         self.assertTrue(hook.endswith("|| exit 2"))
         self.assertTrue(any(rule.startswith("Edit(//") and rule.endswith("/wt/o__r/issue-7/**)") for rule in allow))
