@@ -1,5 +1,7 @@
 # KAGARI（篝）— framework identity and legacy AgentCore compatibility
 
+> **凍結（ADR-0012 D6）。** ホストの導入は [ADR-0012](adr/0012-host-scoped-kagari.md) と [kagari-mvi の README](../components/kagari-mvi/README.md) を参照。この文書の install / uninstall（リポジトリごとの導入器）の記述は旧方式です。
+
 > **Visible identity:** KAGARI (formerly AgentCore / Agent Core) is the agent execution and governance framework **within KUMIKI**. This page changes product vocabulary only. It does **not** declare new storage, protocol, Git refs, component paths, rights or user-project mutations.
 
 ## What is named KAGARI?

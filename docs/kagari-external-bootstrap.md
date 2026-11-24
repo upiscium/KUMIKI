@@ -1,5 +1,7 @@
 # KAGARI external bootstrap — non-invasive Phase 1 candidate
 
+> **凍結（ADR-0012 D6）。** ホストの導入は [ADR-0012](adr/0012-host-scoped-kagari.md) と [kagari-mvi の README](../components/kagari-mvi/README.md) を参照。この文書の install / uninstall（リポジトリごとの導入器）の記述は旧方式です。
+
 > **Status:** development-only implementation candidate for [#256](https://github.com/upiscium/Templates/issues/256). Not the activated KAGARI v4 / KAGARI 1.0.0 runtime. The existing Agent Core VERSION 3, its normal adoption workflow, and the Project's runtime remain unchanged.
 
 ## Boundary
