@@ -22,11 +22,12 @@ def issue(number, labels, created="2026-11-01T00:00:00Z", pr=False, state="open"
     return data
 
 
-def stream(result, is_error=False, denials=0):
+def stream(result, is_error=False, denials=0, denied=None):
+    denied = denied if denied is not None else [{"tool_name": "Bash"}] * denials
     return "\n".join(json.dumps(event) for event in (
         {"type": "system", "subtype": "init"},
         {"type": "result", "is_error": is_error, "result": result,
-         "permission_denials": [{"tool_name": "Bash"}] * denials}))
+         "permission_denials": denied}))
 
 
 def labeled(login, name=mvi.APPROVED, at="2026-11-14T01:00:00Z"):

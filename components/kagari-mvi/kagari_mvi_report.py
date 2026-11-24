@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence
 
+import kagari_mvi_ledger as ledger
 from kagari_mvi_parse import tail
 
 
@@ -30,8 +31,12 @@ def report(test: str, code: int, output: str, outcome: Dict[str, Any], sha: str,
            protected: Sequence[str] = ()) -> str:
     changed = "".join("- protected file changed (allowed by the Issue): `%s`\n"  # one line each
                       % path.replace("\r", "\\r").replace("\n", "\\n") for path in protected)
+    allowed = outcome.get("ledger_allowed") or []
+    used = "".join("- allowed by ledger grant `%s`: `%s`\n" % (
+        r.get("grant"), str(ledger.describe(r.get("tool", ""), r.get("input") or {}))[:200].replace(
+            "`", "'").replace("\n", " ")) for r in allowed[:20])
     return ("kagari-mvi: test result recorded by the runner (not reported by Claude).\n\n"
-            "- tested commit: `%s`\n" % sha + changed +
+            "- tested commit: `%s`\n" % sha + changed + used +
             "- test command: `%s` (run by the runner as the agent user)\n- exit code: %d\n"
             "- Claude status: `%s`\n- permission denials: %d\n\n```\n%s\n```\n\n"
             "テストの目的（Claude の申告。合否には使わない）：\n\n%s" % (

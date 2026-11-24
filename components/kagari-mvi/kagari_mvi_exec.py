@@ -12,7 +12,9 @@ import shutil
 import subprocess
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import kagari_mvi_ledger as ledger
 import kagari_mvi_tsumgi as tsumgi
+from kagari_mvi_shell import DENIED_COMMANDS  # noqa: F401 - the ledger's hook denies these unless a grant matches
 from kagari_mvi_tsumgi import TSUMGI_MODEL, TSUMGI_URL  # noqa: F401 - used by callers and tests
 # Moved out in #490; re-exported so that kagari_mvi, the tests and the recipes keep their names.
 from kagari_mvi_issue import (ALLOWED_HEADING, CRITERIA_HEADING, PLACEMENT_HEADINGS,  # noqa: F401
@@ -34,10 +36,8 @@ ARTIFACTS = [":(exclude,glob)**/%s" % pattern for pattern in (  # build outputs,
 # Only these built-in tools exist in the session (no Cron, RemoteTrigger, Skill, ...).
 # --restricted also ignores user/project/local settings and confines file tools to the cwd.
 AGENT_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
-# Bash is allowed broadly (it runs as the agent user, without GitHub credentials, D3);
-# these are denied as a speed bump, not a boundary (python3 -c can still reach the network).
-DENIED_COMMANDS = ("curl", "wget", "gh", "git push", "git remote", "ssh", "scp", "sudo", "su",
-                   "nc", "ncat", "socat", "telnet")
+# Bash is allowed broadly (it runs as the agent user, without GitHub credentials, D3); the
+# DENIED_COMMANDS (kagari_mvi_shell.py) are denied by the ledger hook unless a grant matches (#430).
 # Changes to these need a human decision (ADR-0009 D1): instruction files and Claude
 # settings at any depth, and CI workflows. The runner checks the commit before pushing.
 INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md")
@@ -155,15 +155,33 @@ class AgentSteps:
             "permissions": {"allow": ["Bash", "Read", "Glob", "Grep", "Edit(/%s/**)" % worktree,
                                       "Write(/%s/**)" % worktree],
                             "deny": ["Agent", "WebFetch", "WebSearch", "NotebookEdit"] + [
-                                "Bash(%s)" % rule for name in DENIED_COMMANDS
-                                for rule in (name, name + " *")] + [
                                 "%s(/%s/%s)" % (tool, worktree, glob) for tool in ("Edit", "Write")
                                 for glob in PROTECTED_GLOBS if not allowed]},
             "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"},
         }
+        grants, audit = worktree + ".grants.json", worktree + ".audit.jsonl"
+        self.write_grants(grants, audit, number)
+        settings["hooks"] = {"PreToolUse": [{"matcher": "Bash|Edit|Write", "hooks": [
+            {"type": "command", "command": ledger.hook_command(grants, audit)}]}]}
         prompt = "Issue #%d: %s\n\n%s\n" % (number, issue["title"], issue.get("body") or "")
-        return self.launch_claude(workdir, worktree, "issue-%d-claude" % number, AGENT_TOOLS,
-                                  settings, AGENT_RULES.format(test=test), prompt)
+        try:
+            return self.launch_claude(workdir, worktree, "issue-%d-claude" % number, AGENT_TOOLS,
+                                      settings, AGENT_RULES.format(test=test), prompt, audit=audit)
+        finally:
+            for path in (grants, audit):
+                if os.path.lexists(path):
+                    os.remove(path)
+
+    def write_grants(self, grants: str, audit: str, number: int) -> None:
+        """Snapshot of the ledger grants for this run (the agent cannot read the ledger itself)."""
+        self.denied = []
+        mine = ledger.for_run(ledger.load(self.ledger_path or ledger.default_path()), self.repo, number,
+                              ledger.utcnow())
+        with open(grants, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"grants": mine}))
+        os.chmod(grants, 0o644)
+        os.close(os.open(audit, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o660))
+        os.chmod(audit, 0o660)  # the hook runs as the agent user and appends here
 
     def run_review(self, workdir: str, review_dir: str, number: int, criteria: List[str],
                    diff: str, test_report: str) -> Dict[str, Any]:
@@ -202,7 +220,8 @@ class AgentSteps:
                 "reviewer": reviewer + ("; " + reply["error"] if reply["error"] else "")}
 
     def launch_claude(self, workdir: str, cwd: str, log_name: str, tools: str,
-                      settings: Dict[str, Any], rules: str, prompt: str) -> Dict[str, Any]:
+                      settings: Dict[str, Any], rules: str, prompt: str,
+                      audit: Optional[str] = None) -> Dict[str, Any]:
         argv = [self.claude, "-p", "--output-format", "stream-json", "--verbose",
                 "--no-session-persistence", "--tools", tools, "--restricted",
                 "--permission-prompts", "none",
@@ -220,6 +239,12 @@ class AgentSteps:
         with open(os.path.join(logs, log_name + ".jsonl"), "w", encoding="utf-8") as handle:
             handle.write(output)
         outcome = agent_outcome(output, failed)
+        if audit:
+            records = ledger.read_audit(audit)
+            self.denied = ledger.denied_operations(records, outcome["denied"])
+            outcome["ledger_allowed"] = [r for r in records if r.get("decision") == "allow"]
+            with open(os.path.join(logs, log_name + "-ledger.jsonl"), "w", encoding="utf-8") as handle:
+                handle.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
         if outcome["limited"]:  # before auth: a limit is not a login problem
             raise UsageLimit(outcome["resets"])
         if outcome["auth"]:

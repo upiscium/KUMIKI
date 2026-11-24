@@ -52,8 +52,10 @@ class RunOnceTest(unittest.TestCase):
         allow = settings["permissions"]["allow"]
         self.assertIn("Bash", allow)
         deny = settings["permissions"]["deny"]
-        for rule in ("Bash(curl *)", "Bash(gh *)", "Bash(git push *)", "Bash(sudo)", "Agent"):
-            self.assertIn(rule, deny)
+        self.assertIn("Agent", deny)
+        self.assertFalse(any(rule.startswith("Bash(") for rule in deny))  # the ledger hook decides these (#430)
+        hook = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertTrue(hook.endswith("|| exit 2"))
         self.assertTrue(any(rule.startswith("Edit(//") and rule.endswith("/wt/o__r/issue-7/**)") for rule in allow))
         self.assertNotIn("Edit", allow)
         self.assertTrue(any(rule.startswith("Write(//") and rule.endswith("/wt/o__r/issue-7/**/.claude/**)")
