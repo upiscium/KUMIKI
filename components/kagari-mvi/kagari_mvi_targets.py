@@ -41,8 +41,8 @@ def read_lines(path: str) -> List[str]:
 
 def entry(line: str) -> Optional[List[str]]:
     """The fields of a target line; None for a comment or a blank line."""
-    fields = line.split()
-    return fields if fields and not fields[0].startswith("#") else None
+    fields = re.split(r"[ \t]+", line.strip(" \t"))  # as the shell's `read`: not str.split(), which also splits at \x0b ...
+    return fields if fields[0] and not fields[0].startswith("#") else None
 
 
 def read_targets(path: str) -> Dict[str, str]:
