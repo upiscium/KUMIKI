@@ -1,5 +1,7 @@
 # Agent Core Admin source-side library
 
+> **凍結（ADR-0012 D6）。** ホストの導入は [ADR-0012](adr/0012-host-scoped-kagari.md) と [kagari-mvi の README](../components/kagari-mvi/README.md) を参照。この文書の install / uninstall（リポジトリごとの導入器）の記述は旧方式です。
+
 `tools/agent_core_admin.py` is a development-only, source-side Python library for
 planning and applying narrowly inventoried Agent Core file operations. It is not a
 trusted launcher, production authorization authority, user-facing command, or part
