@@ -17,6 +17,7 @@ class StubWorker:
 
     def __init__(self, approved, run_codes=None, review_codes=None):
         self.approved, self.calls, self.selected, self.implemented = list(approved), [], None, None
+        self.done = set()
         self.run_codes, self.review_codes = run_codes or {}, review_codes or {}
 
     def log(self, _):
@@ -30,6 +31,9 @@ class StubWorker:
         number = self.selected = self.approved.pop(0)
         code = self.run_codes.get(number, 0)
         self.calls.append("run %d" % number)
+        if number in self.done:  # like the real run_once: the direct GET shows it is no longer a candidate
+            return 0
+        self.done.add(number)
         if code == 0:
             self.implemented = number
         return code
@@ -93,7 +97,9 @@ class WorkOnceTest(unittest.TestCase):
     def test_the_same_issue_is_not_handled_twice_in_one_run(self):
         worker = StubWorker([5, 5, 6])
         code, calls = self.work(worker)
-        self.assertEqual(calls, ["run 5", "review 5", "run 5"])
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ["run 5", "review 5", "run 5"])  # the 2nd run_once starts nothing
+        self.assertEqual(worker.done, {5})
         self.assertEqual(worker.approved, [6])
 
 
