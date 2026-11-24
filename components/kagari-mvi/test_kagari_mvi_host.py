@@ -593,5 +593,48 @@ class HardeningTest(HostBase):
         self.assertIn("not found", err.getvalue())
 
 
+class WorkingDirectoryTest(HostBase):
+    def run_in(self, cwd, call):
+        old = os.getcwd()
+        os.chdir(cwd)
+        try:
+            return call()
+        finally:
+            os.chdir(old)
+
+    def inside(self):
+        path = self.path(host.CHECKOUT)
+        os.makedirs(os.path.join(path, "sub"))
+        return os.path.join(path, "sub")
+
+    def test_inside_checkout_stops_without_change(self):
+        cwd = self.inside()
+        for call in (self.host.reinstall, self.host.uninstall, self.host.install, self.host.repair):
+            before = len(self.sys.calls)
+            self.assertEqual(self.run_in(cwd, call), 1)
+            self.assertEqual(len(self.sys.calls), before)
+            self.assertTrue(os.path.isdir(cwd))
+            self.assertFalse(os.path.exists(self.path(host.RECEIPT)))
+        self.assertTrue(any("outside the checkout" in line for line in self.lines))
+
+    def test_outside_checkout_behaves_as_before(self):
+        with tempfile.TemporaryDirectory() as other:
+            self.assertEqual(self.run_in(other, self.host.install), 0)
+            self.assertEqual(self.run_in(other, self.host.uninstall), 0)
+        self.assertFalse(any("refused" in line for line in self.lines))
+
+    def test_unreadable_cwd_moves_to_root_and_installs(self):
+        gone = tempfile.mkdtemp()
+        old = os.getcwd()
+        os.chdir(gone)
+        try:
+            os.rmdir(gone)
+            self.assertEqual(self.host.install(), 0)
+            self.assertEqual(os.getcwd(), "/")
+        finally:
+            os.chdir(old)
+        self.assertTrue(os.path.isdir(os.path.join(self.path(host.CHECKOUT), ".git")))
+
+
 if __name__ == "__main__":
     unittest.main()

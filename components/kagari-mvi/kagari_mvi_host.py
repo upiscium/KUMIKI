@@ -62,6 +62,20 @@ class Host:
     def p(self, path: str) -> str:
         return os.path.join(self.root, path.lstrip("/"))
 
+    def cwd_clear(self) -> bool:
+        """False (and say why) inside the checkout; an unreadable (removed) working directory moves to `/`."""
+        try:
+            here = os.path.realpath(os.getcwd())
+        except OSError:
+            os.chdir("/")
+            return True
+        root = os.path.realpath(self.p(CHECKOUT))
+        if here == root or here.startswith(root + os.sep):
+            self.out("refused: the working directory %s is inside the checkout %s; nothing changed. "
+                     "Run it from outside the checkout (for example `cd /`)" % (here, root))
+            return False
+        return True
+
     def ok(self, args: Sequence[str]) -> bool:
         try:
             self.run(list(args))
@@ -269,6 +283,7 @@ class Host:
         return now == self.expected(item)
 
     def install(self, dry_run: bool = False, adopt: bool = False) -> int:
+        if not self.cwd_clear(): return 1  # noqa: E701
         receipt, plan = self.load(), self.plan()
         for item in IDS:
             if item not in plan and item not in receipt:
@@ -323,6 +338,7 @@ class Host:
     def repair(self) -> int:
         """Restore what is missing or absent without `uninstall`; never touch what a person changed."""
         receipt, stuck = self.load(), 0
+        if not self.cwd_clear(): return 1  # noqa: E701
         todo = []
         for item in IDS:
             state = self.state(item, receipt)
@@ -359,6 +375,7 @@ class Host:
 
     def reinstall(self) -> int:
         """`uninstall` (default: logs, work directories and logins are kept) then `install`."""
+        if not self.cwd_clear(): return 1  # noqa: E701
         if self.service_busy():
             self.out("refused: kagari-mvi.service is running; wait for it to finish (or stop it), then reinstall")
             return 1
@@ -434,6 +451,7 @@ class Host:
         return 0
 
     def uninstall(self, purge: bool = False) -> int:
+        if not self.cwd_clear(): return 1  # noqa: E701
         receipt = self.load()
         if purge:
             self.out("--purge: the users' home directories go too, so the Claude login of %s is deleted" % AGENT)
