@@ -395,7 +395,12 @@ class Host:
             with open(path, encoding="utf-8") as handle:
                 oauth = json.load(handle)["claudeAiOauth"]
             # The login ends with the refresh token; the access token is renewed by itself.
-            expires = float(oauth["refreshTokenExpiresAt"] if "refreshTokenExpiresAt" in oauth else oauth["expiresAt"]) / 1000.0
+            if "refreshTokenExpiresAt" not in oauth:
+                access = float(oauth["expiresAt"]) / 1000.0
+                found.append("Claude login for %s: expiry unknown (access token expiry %s UTC is not the login expiry; it is renewed by itself)"
+                             % (AGENT, time.strftime("%Y-%m-%d %H:%M", time.gmtime(access))))
+                return found
+            expires = float(oauth["refreshTokenExpiresAt"]) / 1000.0
             left = expires - self.now()
             if left < 0:
                 found.append("Claude login for %s: expired (log in again by hand)" % AGENT)
