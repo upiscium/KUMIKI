@@ -269,6 +269,17 @@ WantedBy=timers.target
 - **導入**：先に、`WorkingDirectory=` の KUMIKI の checkout（`git clone` して `main` に合わせたもの）を `kagari-runner` の home に用意します。次に、2 つのファイルを置いたら、`systemctl daemon-reload` の後に、`systemctl enable --now kagari-mvi.timer` で、初回の有効化と開始を行います。
 - **再ログインの手順**：(1) `systemctl stop kagari-mvi.timer`（先に timer を止めて、新しい実行が始まらないようにする。実行中の service は止まりません）。(2) `systemctl is-active kagari-mvi.service` を、`inactive` か `failed` になるまで繰り返し確かめる（この 1 回のコマンドは待ってくれず、その時点の状態を返すだけです。実行中は `activating`）。(3) `kagari-agent` で再ログインする（コマンドは**未確認**です。対話の `claude` で `/login`、または `claude auth login` のどちらかです。2026-12-09 の期限の前に実際に再ログインして確かめ、確かめたら、ここを書き直します）。(4) `sudo -u kagari-agent -H claude auth status` で、期限が延びたことを確かめる。(5) `systemctl start kagari-mvi.timer`（初回の `enable` は済んでいるので、`start` だけで戻ります）。実行の途中で `systemctl stop kagari-mvi.service` をしたり、ホストを再起動したりすると、`kagari:running` が残り、自動では復旧しません（「既知の限界」）。
 
+## 許可台帳（#430、ADR-0010 D2、段階 1）
+
+人間が一度許した操作を、以後は自動で許可する。台帳は `kagari-runner` のホームの `~/.local/state/kagari-mvi/ledger.json`（0600、ディレクトリ 0700）。`install` の所有物ではなく、`uninstall` は残し、`uninstall --purge` はホームごと消す。
+
+- `kagari-mvi ledger add --kind bash|ssh|edit --match … [--scope issue|repo|host] [--repo O/R] [--issue N] [--days 30] --reason …`、`ledger revoke ID`、`ledger list [--all]`。root から実行すると `kagari-runner` として動く。
+- 判定は PreToolUse hook（`--settings`）。`kagari-agent` は台帳を読めないので、run-once が起動前に、その実行に効く許可（リポジトリ・Issue・期限・取り消しで絞ったもの）だけを `issue-N.grants.json` に写す。`--permission-prompts none` はそのまま。
+- 一致すれば許可し、`logs/<repo>/issue-N-claude-ledger.jsonl` と PR のテスト結果コメントに、どの許可で通したかを残す。`DENIED_COMMANDS` は、一致する許可がなければ hook が拒否する（hook が失敗しても `exit 2` で通さない）。
+- Bash は構文として照合する。`&&` `;` `|` `&`・リダイレクト・`$(...)`・解析できないコマンドは、台帳に一致しても自動では許可しない。`ssh` は `--kind ssh` のホスト一覧で縛り、`-o ProxyCommand` / `LocalCommand` / `PermitLocalCommand` / `KnownHostsCommand` / `ProxyJump` と `-J` は通さない。
+- 一致しない操作は今までどおり拒否され、`blocked` のコメント 1 件に、拒否した操作と登録できる許可の候補（有効範囲ごと）を書く。人間の回答を待つ仕組みは段階 2。
+- 台帳の処理は `kagari_mvi_ledger.py`（台帳・判定・CLI）と `kagari_mvi_shell.py`（Bash の解析）に分けた。`kagari_mvi_exec.py` と `kagari_mvi.py` は上限（500 行）に収まるため、分けた理由は責務の分離だけである。
+
 ## `run-once` の動作
 
 1. **Issue を選ぶ**：対象は、open で、`kagari:approved` が付いていて、running / implemented / reviewed / blocked のどれも付いていない Issue です（PR は除きます）。その中で作成日時が最も古い 1 件を選びます。

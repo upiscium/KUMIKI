@@ -11,17 +11,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from kagari_mvi_cleanup import CleanupSteps
 from kagari_mvi_exec import SAFE_GIT, AgentSteps, Blocked, CommandError, Runner, UsageLimit, subprocess_runner
-from kagari_mvi_host import Host
+from kagari_mvi_host import RUNNER, Host
 from kagari_mvi_issue import acceptance_criteria, allowed_protected, missing_placement, test_command
 from kagari_mvi_limit import LimitSteps
 from kagari_mvi_parse import tail
 from kagari_mvi_report import report, review_report
+import kagari_mvi_ledger as ledger
 import kagari_mvi_targets as targets  # noqa: E402
 # Moved out in #490; re-exported so that the tests and the recipes keep their names.
 from kagari_mvi_state import (APPROVED, BLOCKED, EXCLUDED, IMPLEMENTED, LABELS, REVIEWED, RUNNING,  # noqa: F401
@@ -39,7 +41,8 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
     def __init__(self, repo: str, run: Runner = subprocess_runner,
                  log: Callable[[str], None] = lambda message: print(message, file=sys.stderr),
                  agent_user: str = "kagari-agent", claude: str = "claude",
-                 agent_config_dir: Optional[str] = None, reviewer: str = "claude") -> None:
+                 agent_config_dir: Optional[str] = None, reviewer: str = "claude",
+                 ledger_path: Optional[str] = None) -> None:
         if repo.count("/") != 1 or not all(repo.split("/")):
             raise ValueError("--repo must be OWNER/REPO: %r" % repo)
         self.repo, self.slug = repo, repo.replace("/", "__")  # paths per repository
@@ -48,6 +51,8 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
         self.agent_user = agent_user
         self.claude = claude
         self.agent_config_dir, self.reviewer = agent_config_dir, reviewer
+        self.ledger_path = ledger_path  # None: kagari-runner's ~/.local/state/kagari-mvi/ledger.json (#430)
+        self.denied: List[Dict[str, Any]] = []  # operations this run's agent was refused
 
     # --- GitHub REST via `gh api` -------------------------------------------
     def api(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Any:
@@ -283,6 +288,7 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
                 type(error).__name__, error)
             body = "kagari-mvi: failed at stage `%s`.\n\n```\n%s\n```" % (
                 stage, tail(detail).replace("```", "'''"))
+        body += ledger.denial_report(self.denied, self.repo, number)  # still one comment
         self.log("#%d %s" % (number, body))
         # Add blocked before removing running: if adding fails, running stays
         # and the Issue is not picked again.
@@ -360,6 +366,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     register = sub.add_parser("register", help="add OWNER/REPO to the host's target list and create its labels")
     register.add_argument("target", metavar="OWNER/REPO")
     register.add_argument("--allow-actor", action="append", help="login allowed to approve (default: OWNER)")
+    ledger.add_parsers(sub)
     unregister = sub.add_parser("unregister", help="remove OWNER/REPO from the target list only")
     unregister.add_argument("target", metavar="OWNER/REPO")
     host = [sub.add_parser(name, help=text) for name, text in (
@@ -388,6 +395,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             run = targets.runner_as_service_user()
             return targets.register(args.target, args.allow_actor, run=run,
                                     ensure_labels=lambda: Worker(args.target, run=run).ensure_labels())
+        if args.command == "ledger":
+            if os.geteuid() == 0:  # as for register: the ledger is kagari-runner's
+                return subprocess.call(["sudo", "-n", "-u", RUNNER, "-H", "--", sys.executable,
+                                        os.path.abspath(__file__)] + sys.argv[1:])
+            return ledger.cli(args)
         if args.command == "unregister":
             return targets.unregister(args.target)
         if args.command == "ensure-labels":

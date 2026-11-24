@@ -61,6 +61,7 @@ def agent_outcome(output: str, failed: bool) -> Dict[str, Any]:
         "status": statuses[-1].strip() if statuses else "(none)",
         "completed": not errored and bool(statuses) and statuses[-1] == "COMPLETED",
         "denials": len((result or {}).get("permission_denials") or []),
+        "denied": [d for d in ((result or {}).get("permission_denials") or []) if isinstance(d, dict)][:50],
         "detail": tail("\n".join(plain + [text])),  # readable: no raw stream-json
         "text": text,
     }
