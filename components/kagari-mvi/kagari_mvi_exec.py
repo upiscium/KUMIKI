@@ -70,6 +70,10 @@ AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worke
   A criterion no test can check (e.g. which files changed) goes under untested as
   `AC<n>: <why no test can check it>` (one per line as a list if several); the reviewer
   checks it in the diff. A criterion a test could check needs a test.
+  When a criterion asks that behaviour differs with and without a condition, the test must
+  actually change that condition (e.g. run both with and without it in a child process).
+  A test that checks once inside a single condition does not count as the test for that criterion.
+  If you cannot write any test, write `none: <reason>` under `tests:` (never leave it empty).
 - End your last message with one line: `status: COMPLETED` if the Issue is done and the
   test command passes, otherwise `status: BLOCKED: <reason>`.
 """
