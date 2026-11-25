@@ -177,7 +177,13 @@ class ReviewParseTest(unittest.TestCase):
         self.assertIn("the test must actually change that condition", agent)
         self.assertIn("run both with and without it in a child process", agent)
         self.assertIn("checks once inside a single condition does not count", agent)
-        self.assertIn("write `none: <reason>` under `tests:` (never leave it empty)", agent)
+        self.assertIn("write `- none: <reason>` under `tests:` as a list item (never leave it empty)", agent)
+        self.assertNotIn("write `none: <reason>`", agent)
+
+    def test_test_purposes_keeps_a_bulleted_none_reason(self):
+        got = ex.test_purposes("done.\ntests:\n- none: docs only, no test can check README text\n"
+                               "untested: AC1: text\nstatus: COMPLETED")
+        self.assertIn("- none: docs only, no test can check README text", got)
 
     def test_agent_rules_keep_the_status_and_untested_instructions(self):
         agent = " ".join(ex.AGENT_RULES.split())
