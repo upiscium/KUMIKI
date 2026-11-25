@@ -180,6 +180,16 @@ class ReviewParseTest(unittest.TestCase):
         self.assertIn("write `- none: <reason>` under `tests:` as a list item (never leave it empty)", agent)
         self.assertNotIn("write `none: <reason>`", agent)
 
+    def test_agent_rules_limit_tests_to_what_the_test_command_runs(self):
+        agent = " ".join(ex.AGENT_RULES.split())
+        self.assertIn("Under `tests:` write only tests that the Issue's test command actually runs.", agent)
+        self.assertIn("Do not write a check the test command does not run", agent)
+
+    def test_agent_rules_put_hand_checks_under_untested(self):
+        agent = " ".join(ex.AGENT_RULES.split())
+        self.assertIn("Write a check you did by hand under `untested:` as "
+                      "`AC<n>: checked by hand with <command>`", agent)
+
     def test_test_purposes_keeps_a_bulleted_none_reason(self):
         got = ex.test_purposes("done.\ntests:\n- none: docs only, no test can check README text\n"
                                "untested: AC1: text\nstatus: COMPLETED")

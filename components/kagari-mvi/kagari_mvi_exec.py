@@ -74,6 +74,10 @@ AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worke
   actually change that condition (e.g. run both with and without it in a child process).
   A test that checks once inside a single condition does not count as the test for that criterion.
   If you cannot write any test, write `- none: <reason>` under `tests:` as a list item (never leave it empty).
+  Under `tests:` write only tests that the Issue's test command actually runs. Do not write a check
+  the test command does not run (e.g. a command you ran by hand) under `tests:`.
+  Write a check you did by hand under `untested:` as `AC<n>: checked by hand with <command>`
+  (this tells the reviewer it is not a guarantee of the test command).
 - End your last message with one line: `status: COMPLETED` if the Issue is done and the
   test command passes, otherwise `status: BLOCKED: <reason>`.
 """
