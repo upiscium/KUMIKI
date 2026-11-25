@@ -187,9 +187,9 @@ sudo -n -u kagari-agent -H -- sh -lc 'command -v claude && claude --version'
 
 - Claude の実装の中で `nix develop` が使えない場合に備えて、Issue のテストコマンドは `nix develop path:. -c <コマンド>` と書きます。実装の worktree の `.git` は、`/srv/kagari/repos/…`（モード 0700。agent はたどれない）の中を指します。`.` が git の作業ツリーだと Nix は git で読むので、agent からは読めず、`error: opening Git repository … Permission denied` で失敗します（MUSUBI#50 の実例）。`path:.` は git の情報を使いません。ただし `.gitignore` の対象を含めてディレクトリ全体を store に写すので、`node_modules` などがあると遅くなります（最初の呼び出しの前なら影響は小さい）。`path:` は Claude の実装の中でだけ必要です。ホストの再実行は `.git` の無い `<worktree>.verify` で動くので、Nix が自動で path として扱い、`path:` は要りません。
 - 注意：テストの `HOME` は実行ごとの一時ディレクトリなので、Nix の評価のキャッシュ（`~/.cache/nix`）が効かず、初回の評価に時間がかかります（`TEST_TIMEOUT` は約 30 分）。
-- 確かめた範囲：`kagari-host-test`（Nix 2.36.0）で、上の確かめ方の 3 つのコマンド（`nix --version`、`nix run nixpkgs#hello`、`nix shell nixpkgs#nodejs_24 -c node --version`）が通りました（2026-11-25）。次は未確認です。
+- 確かめた範囲：`kagari-host-test`（Nix 2.36.0）で、上の確かめ方の 3 つのコマンド（`nix --version`、`nix run nixpkgs#hello`、`nix shell nixpkgs#nodejs_24 -c node --version`）が通りました（2026-11-25）。さらに、MUSUBI#50 で、ホストのテストの再実行が `nix develop -c …` で通りました（2026-11-25）。次は未確認です。
   - LXC のサンドボックス（`nesting` の要否）
-  - `flake.nix` の `devShells` を使う実際のテスト（MUSUBI には `devShells` がまだ無く、別の Issue で足します）
+  - 他のホスト
   - 他のホスト
 
 ### 標準の操作（ADR-0012 D3）
