@@ -23,6 +23,7 @@ from kagari_mvi_issue import (acceptance_criteria, allowed_protected, delegation
                               test_command)
 from kagari_mvi_batch import work_once
 from kagari_mvi_limit import LimitSteps
+from kagari_mvi_orphan import orphan_branch
 from kagari_mvi_parse import tail
 from kagari_mvi_report import report, review_report
 import kagari_mvi_ledger as ledger
@@ -336,6 +337,13 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
         else:
             os.makedirs(os.path.dirname(clone), exist_ok=True)
             self.run(["git"] + SAFE_GIT + ["clone", "https://github.com/%s.git" % self.repo, clone])
+        found = orphan_branch(self.run, clone, number, base)
+        if found == "unknown":
+            raise Blocked("The remote branch %s exists with commits the worker did not make; check it and "
+                          "delete it by hand, then remove kagari:blocked." % branch_name(number))
+        if found == "runner":
+            self.run(["git", "-C", clone] + SAFE_GIT + ["push", "origin", "--delete", branch_name(number)])
+            self.log("deleted the orphaned remote branch %s" % branch_name(number))
         if os.path.exists(worktree):
             # Leftover from an earlier attempt on this Issue: the worker owns it.
             self.kill_agent_processes()  # a failed run may leave processes writing here
