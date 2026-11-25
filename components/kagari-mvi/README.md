@@ -164,6 +164,34 @@ sudo -n -u kagari-agent -H -- sh -lc 'command -v claude && claude --version'
 - 例：MUSUBI は Node 24 以上が要ります（`apps/web/package.json` の `engines`）。`kagari-host-test` の Node は v20.20.2 だったので、User が `/usr/local/bin` などに Node 24 を入れました。その後、MUSUBI の最初の Issue（MUSUBI#44）が、実装・テスト・レビューまで通りました（2026-11-25 の実例）。
 - `just` の版が古いと、`minimum-version` の設定を使う Justfile を読めません（`Unknown setting minimum-version`。`kagari-mvi` の LXC で `just mvi::test` が、この理由で失敗しました）。Issue のテストコマンドには、`just` を使わず、直接のコマンドを書いてください。
 
+#### Nix を使う対象リポジトリ
+
+対象リポジトリが Nix を使う（`flake.nix` または `shell.nix` がある）ときは、道具をホストに直接入れず、Nix で用意します。ホストごとの版のずれ（例：MUSUBI が Node 24 を要求するのに、ホストが Node 20）で `blocked` になるのを防ぐためです。
+
+- テストコマンドは、次のどれかにします。
+  - `nix develop -c <コマンド>`（`flake.nix` の `devShells`）
+  - `nix-shell --run '<コマンド>'`（`shell.nix`）
+  - 単一のプログラムなら `nix run .#<名前> -- <引数>`
+- リポジトリ側の用意：`flake.nix` に `devShells.default`（または `shell.nix`）を定義し、`flake.lock` を commit します。
+- ホスト側の前提（User が用意します。KAGARI の `install` は Nix を入れません。ADR-0012 D2）：
+  - Nix がマルチユーザーで入っていること。
+  - `kagari-agent` の `PATH`（ログインシェルなしの `sh -c`）から `nix` が呼べること（`/nix/var/nix/profiles/default/bin` が `secure_path` に入る、または `/usr/local/bin` からの symlink）。
+  - `experimental-features = nix-command flakes` が有効なこと。
+  - `kagari-agent` が Nix の daemon を使えること（通常のユーザーは、daemon のソケットを使えます）。`kagari-agent` を `trusted-users` に入れないでください。信頼されたユーザーは、任意の substituter や署名のないパスを使えて、ほぼ root と同じ権限になるためです。
+  - ネットワーク（substituter とソースの取得）。
+- 確かめ方（ログインシェルなし）が通ること。
+
+  ```sh
+  sudo -n -u kagari-agent -H -- sh -c 'nix --version && nix develop --help >/dev/null'
+  ```
+
+- Claude の実装の中で `nix develop` が使えない場合に備えて、Issue のテストコマンドは `nix develop path:. -c <コマンド>` と書きます。実装の worktree の `.git` は、`/srv/kagari/repos/…`（モード 0700。agent はたどれない）の中を指します。`.` が git の作業ツリーだと Nix は git で読むので、agent からは読めず、`error: opening Git repository … Permission denied` で失敗します（MUSUBI#50 の実例）。`path:.` は git の情報を使いません。ただし `.gitignore` の対象を含めてディレクトリ全体を store に写すので、`node_modules` などがあると遅くなります（最初の呼び出しの前なら影響は小さい）。`path:` は Claude の実装の中でだけ必要です。ホストの再実行は `.git` の無い `<worktree>.verify` で動くので、Nix が自動で path として扱い、`path:` は要りません。
+- 注意：テストの `HOME` は実行ごとの一時ディレクトリなので、Nix の評価のキャッシュ（`~/.cache/nix`）が効かず、初回の評価に時間がかかります（`TEST_TIMEOUT` は約 30 分）。
+- 確かめた範囲：`kagari-host-test`（Nix 2.36.0）で、上の確かめ方の 3 つのコマンド（`nix --version`、`nix run nixpkgs#hello`、`nix shell nixpkgs#nodejs_24 -c node --version`）が通りました（2026-11-25）。次は未確認です。
+  - LXC のサンドボックス（`nesting` の要否）
+  - `flake.nix` の `devShells` を使う実際のテスト（MUSUBI には `devShells` がまだ無く、別の Issue で足します）
+  - 他のホスト
+
 ### 標準の操作（ADR-0012 D3）
 
 `kagari_mvi.py install [--dry-run]` / `status` / `uninstall [--purge]` が、上の手作業と同じものを作り、外します（実行は root で行います）。導入したものと内容の指紋（ファイルは sha256、`/srv/kagari` の下はモード、checkout は HEAD のリビジョンと `git status --porcelain` が空であること〔clean〕、ユーザーは uid・gid、グループは gid）は、受領書 `/var/lib/kagari-mvi/receipt.json` に記録します。置き場所を `/srv/kagari` の外にしたのは、既定の `uninstall` が `/srv/kagari` を残しても、受領書の管理が作業ディレクトリと混ざらないようにするためです。`uninstall` は、受領書にあり変更されていないものだけを外し、ユーザー・グループ・`/srv/kagari` の下は `--purge` まで残します（`--purge` は home の Claude のログインも消します）。`install` は、所有物を 1 つ作るたびに受領書へ記録します。途中で失敗しても、同じ `install` をもう一度実行すれば、続きから終わります（`uninstall` を先にする必要はありません）。例外：checkout の場所（`/opt/kagari/kumiki`）に空でないディレクトリやファイルがあると、`install` はそこで止まります（`--dry-run` が `conflict` と表示します）。手で片づけるか、取り込んでから再実行します。checkout が失敗したとき、元から空だったディレクトリは、中身だけを消して残します。シンボリックリンクの `/srv/kagari` の下と checkout は、`create` が拒否し、`uninstall` が外さず診断します。未コミットの編集がある checkout、別の uid・gid で作り直されたユーザー・グループも、外さず診断します。`status` は、`gh` が無いこと、`kagari-agent` の Claude Code が `--restricted` を使えない版であることも診断します（導入や更新はしません）。timer が有効になっていなければ、`install` が有効にし直します。生成する service は、「timer で動かす」の例と同じ `TimeoutStartSec=3h`、`OnBootSec=5min`、`OnUnitInactiveSec=10min` を使います。例との違いは、失敗の扱いです：例（`ExecStart=` を並べる）は、失敗（1 と 2）で残りを飛ばしますが、生成する service は、終了コード 3 を失敗にせず、1 つの呼び出しが失敗しても残りの呼び出しと残りのリポジトリを続け、最後に service を失敗にします（失敗は見える形で残る）。一覧の最終行が改行で終わらなくても読み、空行と `#` で始まる行は飛ばします。ホストのルートを変える `--root` は、コマンドラインには出していません（実ホストのユーザーや systemd に作用するため、テストの中だけで使います）。対象リポジトリの一覧は `/etc/kagari-mvi/targets`（1 行に `OWNER/REPO ACTOR`）で、`register` / `unregister` で編集します（「timer で動かす」）。#500 が書いた受領書（ユーザーとグループを `present` と記録している）も、存在すれば変更なしと見なします（uid・gid の記録は、新しく作ったものから）。`git` が失敗して checkout の状態を読めないとき（`dubious ownership` など）は、変更なしとは見なさず、外しません。`status` は、Claude Code の `--restricted` の有無を、`kagari-agent` のログインシェル（`sh -lc`、1 分の制限つき）で `claude --help` を実行して確かめます。実機（`useradd`・`systemctl`・`visudo`・`install -d -m 3770` の setgid と sticky）での動作は、#500 の実機確認（新しい LXC）で確かめました。未確認なのは、この `claude --help` による確認、旧い形式の受領書の実機での扱い、`git` が失敗するときの実機での動きです。
