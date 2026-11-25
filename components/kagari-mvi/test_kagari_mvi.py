@@ -172,6 +172,20 @@ class ReviewParseTest(unittest.TestCase):
         self.assertIn("or a criterion has neither", review)  # no test and no untested entry: FAIL
         self.assertNotIn("every criterion has a test;", review)
 
+    def test_agent_rules_require_varying_the_condition_and_a_reason_for_no_tests(self):
+        agent = " ".join(ex.AGENT_RULES.split())
+        self.assertIn("the test must actually change that condition", agent)
+        self.assertIn("run both with and without it in a child process", agent)
+        self.assertIn("checks once inside a single condition does not count", agent)
+        self.assertIn("write `none: <reason>` under `tests:` (never leave it empty)", agent)
+
+    def test_agent_rules_keep_the_status_and_untested_instructions(self):
+        agent = " ".join(ex.AGENT_RULES.split())
+        self.assertIn("untested: <what the tests do not check, or none>", agent)
+        self.assertIn("- <test name>: <what it is meant to guarantee> (AC<n>)", agent)
+        self.assertIn("End your last message with one line: `status: COMPLETED` if the Issue is done "
+                      "and the test command passes, otherwise `status: BLOCKED: <reason>`.", agent)
+
     def test_tests_verdict_line_missing_or_conflicting_is_unknown(self):
         self.assertEqual(ex.tests_verdict("AC1: PASS — a\n**TESTS**: FAIL — test_a checks nothing"),
                          ("FAIL", "test_a checks nothing"))
