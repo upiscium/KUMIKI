@@ -16,6 +16,7 @@ import sys
 import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from kagari_mvi_classify import classify
 from kagari_mvi_cleanup import CleanupSteps
 from kagari_mvi_exec import SAFE_GIT, AgentSteps, Blocked, CommandError, Runner, UsageLimit, subprocess_runner
 from kagari_mvi_host import RUNNER, Host
@@ -251,7 +252,8 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
                       % "; ".join("`%s`" % line[:80] for line in declared["unreadable"][:5]))
         if reason is not None:
             self.add_labels(number, BLOCKED)
-            self.comment(number, "kagari-mvi: blocked before start.\n\n" + reason)
+            kind, step = classify("start", None, reason)
+            self.comment(number, "kagari-mvi: blocked [%s] before start.\n\n%s\n\nNext: %s" % (kind, reason, step))
             self.log("#%d blocked: %s" % (number, reason))
             return 0
 
@@ -305,14 +307,15 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
         return 0
 
     def block_after_failure(self, number: int, stage: str, error: Exception) -> None:
+        detail = error.output if isinstance(error, CommandError) else "%s: %s" % (type(error).__name__, error)
+        kind, step = classify(stage, error, "" if isinstance(error, Blocked) else detail)
         if isinstance(error, Blocked):
-            body = "kagari-mvi: blocked at stage `%s`.\n\n%s" % (stage, error)
+            body = "kagari-mvi: blocked [%s] at stage `%s`.\n\n%s" % (kind, stage, error)
         else:
-            detail = error.output if isinstance(error, CommandError) else "%s: %s" % (
-                type(error).__name__, error)
-            body = "kagari-mvi: failed at stage `%s`.\n\n```\n%s\n```" % (
-                stage, tail(detail).replace("```", "'''"))
+            body = "kagari-mvi: failed [%s] at stage `%s`.\n\n```\n%s\n```" % (
+                kind, stage, tail(detail).replace("```", "'''"))
         body += ledger.denial_report(self.denied, self.repo, number)  # still one comment
+        body += "\n\nNext: " + step
         self.log("#%d %s" % (number, body))
         # Add blocked before removing running: if adding fails, running stays
         # and the Issue is not picked again.

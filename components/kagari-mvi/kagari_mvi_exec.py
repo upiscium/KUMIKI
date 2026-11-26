@@ -80,6 +80,10 @@ AGENT_RULES = """You implement exactly one GitHub Issue for the KAGARI MVI worke
   (this tells the reviewer it is not a guarantee of the test command).
 - End your last message with one line: `status: COMPLETED` if the Issue is done and the
   test command passes, otherwise `status: BLOCKED: <reason>`.
+- Say why you are blocked with one of these forms (a `BLOCKED` without a kind counts as TECHNICAL):
+  `status: BLOCKED: HUMAN_DECISION: <the choice and why>` when a requirement, design, trade-off
+  or scope choice is needed; `status: BLOCKED: OPERATIONAL: <why>` for a problem with the environment,
+  credentials or an external service.
 """
 
 
