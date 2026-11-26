@@ -190,7 +190,6 @@ sudo -n -u kagari-agent -H -- sh -lc 'command -v claude && claude --version'
 - 確かめた範囲：`kagari-host-test`（Nix 2.36.0）で、上の確かめ方の 3 つのコマンド（`nix --version`、`nix run nixpkgs#hello`、`nix shell nixpkgs#nodejs_24 -c node --version`）が通りました（2026-11-25）。さらに、MUSUBI#50 で、ホストのテストの再実行が `nix develop -c …` で通りました（2026-11-25）。次は未確認です。
   - LXC のサンドボックス（`nesting` の要否）
   - 他のホスト
-  - 他のホスト
 
 ### 標準の操作（ADR-0012 D3）
 
