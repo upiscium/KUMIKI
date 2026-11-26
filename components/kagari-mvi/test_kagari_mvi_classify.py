@@ -32,6 +32,18 @@ class ClassifyTest(unittest.TestCase):
             ("find-existing-pr", "PR #3 for `kagari/issue-7` already exists and", H, STEPS["pr"]),
             ("report", "Draft PR #3 was created, but status is `COMPLETED` and the test exit code is 1.", T,
              STEPS["test"]),
+            ("report", "Draft PR #3 was created, but status is `BLOCKED: HUMAN_DECISION: pick A or B` and the "
+             "test exit code is 0.", H, STEPS["decide"]),
+            ("report", "Draft PR #3 was created, but status is `BLOCKED: HUMAN_DECISION: pick A or B` and the "
+             "test exit code is 1.", H, STEPS["decide"]),
+            ("report", "Draft PR #3 was created, but status is `BLOCKED: OPERATIONAL: no token` and the "
+             "test exit code is 0.", O, STEPS["env"]),
+            ("report", "Draft PR #3 was created, but status is `BLOCKED: OPERATIONAL: no token` and the "
+             "test exit code is 1.", O, STEPS["env"]),
+            ("report", "Draft PR #3 was created, but status is `BLOCKED: spec unclear` and the "
+             "test exit code is 0.", T, STEPS["test"]),
+            ("report", "Draft PR #3 was created, but status is `COMPLETED` and the test exit code is 0.", T,
+             STEPS["test"]),
             ("find-pr", "No open PR for `kagari/issue-7` to review.", U, STEPS["unknown"]),
         ]
         for stage, text, kind, step in cases:
