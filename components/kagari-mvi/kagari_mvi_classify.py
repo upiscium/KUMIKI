@@ -27,7 +27,7 @@ TEMPORARY = ("Internal Server Error", "Bad Gateway", "Service Unavailable", "Gat
 BEFORE_START = ("No `labeled` event", "not in the allow list", "was edited after", "no test command",
                 "placement sections", "not one-line bullets", "settings.local.json",
                 "touch files that need a human decision", "Issue body has no", "decision sections")
-AGENT = re.compile(r"status:\s*BLOCKED(?::\s*(HUMAN_DECISION|OPERATIONAL):)?", re.I)
+AGENT = re.compile(r"status(?::|\s+is)\s*`?BLOCKED(?::\s*(HUMAN_DECISION|OPERATIONAL):)?", re.I)
 
 
 def classify(stage: str, error: Optional[BaseException], text: str = "") -> Tuple[str, str]:
