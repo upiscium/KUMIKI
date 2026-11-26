@@ -23,6 +23,19 @@ class ReadmeDuplicateTest(unittest.TestCase):
             lines = f.read().split("\n")
         self.assertEqual(lines.count("  - 他のホスト"), 1)
 
+    def test_no_stale_unverified_sentences(self):
+        with open(README, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn("`install --adopt` の実機での動作", text)
+        self.assertNotIn("`register`・`unregister` の実機での動作", text)
+
+    def test_known_limits_mention_v030_items(self):
+        with open(README, encoding="utf-8") as f:
+            text = f.read()
+        sec = text.split("### 既知の限界", 1)[1].split("\n## ", 1)[0]
+        for word in ("並列", "Ask", "Draft に戻さない", "env -S", "command -v"):
+            self.assertIn(word, sec)
+
     def test_detects_duplicate(self):
         self.assertEqual(duplicate_bullets("- a\n  - x\n  - x\n"), ["  - x"])
         self.assertEqual(duplicate_bullets("- a\n- a\n"), ["- a"])
