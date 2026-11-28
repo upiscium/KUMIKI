@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import kagari_mvi_declared as decl
 import kagari_mvi_ledger as ledger
 import kagari_mvi_tsumgi as tsumgi
 from kagari_mvi_shell import DENIED_COMMANDS
@@ -177,7 +178,7 @@ class AgentSteps:
             "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"},
         }
         grants, audit = worktree + ".grants.json", worktree + ".audit.jsonl"
-        self.write_grants(grants, audit, number)
+        self.write_grants(grants, audit, number, issue.get("body"))
         settings["hooks"] = {"PreToolUse": [{"matcher": "Bash|Edit|Write", "hooks": [
             {"type": "command", "command": ledger.hook_command(grants, audit)}]}]}
         prompt = "Issue #%d: %s\n\n%s\n" % (number, issue["title"], issue.get("body") or "")
@@ -189,11 +190,13 @@ class AgentSteps:
                 if os.path.lexists(path):
                     os.remove(path)
 
-    def write_grants(self, grants: str, audit: str, number: int) -> None:
+    def write_grants(self, grants: str, audit: str, number: int, body: Optional[str] = None) -> None:
         """Snapshot of the ledger grants for this run (the agent cannot read the ledger itself)."""
         self.denied = []
-        mine = ledger.for_run(ledger.load(self.ledger_path or ledger.default_path()), self.repo, number,
-                              ledger.utcnow())
+        now = ledger.utcnow()
+        mine = ledger.for_run(ledger.load(self.ledger_path or ledger.default_path()), self.repo, number, now)
+        mine += decl.grants(body, self.repo, number, now)  # this run only: never written to the ledger (#431)
+        self.declared, self.used = decl.matches(body), []
         # Never follow a link left in the shared worktree directory: the old file or link is removed first.
         ledger.create_private(grants, 0o644, json.dumps({"grants": mine}))
         ledger.create_private(audit, 0o660)  # the hook runs as the agent user and appends here
@@ -267,6 +270,7 @@ class AgentSteps:
             records = ledger.read_audit(audit)
             self.denied = ledger.denied_operations(records, outcome["denied"])
             outcome["ledger_allowed"] = [r for r in records if r.get("decision") == "allow"]
+            self.used = outcome["ledger_allowed"]
             with open(os.path.join(logs, log_name + "-ledger.jsonl"), "w", encoding="utf-8") as handle:
                 handle.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
         if outcome["limited"]:  # before auth: a limit is not a login problem
