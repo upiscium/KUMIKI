@@ -27,6 +27,7 @@ from kagari_mvi_limit import LimitSteps
 from kagari_mvi_orphan import orphan_branch
 from kagari_mvi_parse import tail
 from kagari_mvi_report import report, review_report
+import kagari_mvi_declared as decl
 import kagari_mvi_ledger as ledger
 import kagari_mvi_targets as targets  # noqa: E402
 # Moved out in #490; re-exported so that the tests and the recipes keep their names.
@@ -57,6 +58,8 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
         self.agent_config_dir, self.reviewer = agent_config_dir, reviewer
         self.ledger_path = ledger_path  # None: kagari-runner's ~/.local/state/kagari-mvi/ledger.json (#430)
         self.denied: List[Dict[str, Any]] = []  # operations this run's agent was refused
+        self.declared: List[str] = []  # commands the Issue body declared for this run (#431)
+        self.used: List[Dict[str, Any]] = []  # audit records of operations allowed in this run
         self.selected: Optional[int] = None  # the Issue run_once took last (None: none)
         self.implemented: Optional[int] = None  # the Issue run_once last made `implemented` (#535)
 
@@ -220,6 +223,7 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
 
     def run_once(self, allowed: Sequence[str], workdir: str) -> int:
         self.selected = self.implemented = None
+        self.declared, self.used = [], []
         issue = select_issue(self.list_open_approved())
         if issue is None:
             self.log("no approved Issue to process")
@@ -250,6 +254,11 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
             reason = ("The Issue's `### 決定済み事項` / `### 委任する判断` sections have lines that are not "
                       "one-line bullets: %s. Write one item per `- ` line."
                       % "; ".join("`%s`" % line[:80] for line in declared["unreadable"][:5]))
+        bad = decl.problems(issue.get("body"))
+        if reason is None and bad:
+            reason = ("The Issue's `### 追加で許可する操作` section has lines that cannot be used: %s. "
+                      "Write `- bash: <command>` lines (this Issue's run only), then approve again."
+                      % "; ".join(bad[:5]))
         if reason is not None:
             self.add_labels(number, BLOCKED)
             kind, step = classify("start", None, reason)
@@ -283,7 +292,8 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
                 stage = "draft-pr"
                 pr = self.create_draft_pr(issue, base)
                 stage = "report"
-                self.comment(pr["number"], report(test, code, output, outcome, sha, protected))
+                self.comment(pr["number"], report(test, code, output, outcome, sha, protected)
+                             + decl.report(self.declared, self.used))
                 if code != 0 or not outcome["completed"]:
                     problem = ("Draft PR #%d was created, but status is `%s` and the test "
                                "exit code is %d. See the PR comment." % (
@@ -315,6 +325,7 @@ class Worker(AgentSteps, CleanupSteps, LimitSteps):
             body = "kagari-mvi: failed [%s] at stage `%s`.\n\n```\n%s\n```" % (
                 kind, stage, tail(detail).replace("```", "'''"))
         body += ledger.denial_report(self.denied, self.repo, number)  # still one comment
+        body += decl.report(self.declared, self.used)
         body += "\n\nNext: " + step
         self.log("#%d %s" % (number, body))
         # Add blocked before removing running: if adding fails, running stays
